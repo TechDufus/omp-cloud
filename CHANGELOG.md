@@ -4,6 +4,8 @@ Release notes of omp-cloud, newest first. `mise run release -- <version>` moves 
 
 ## Unreleased
 
+- **Website.** The documentation builds into a website with a landing page, in the dashboard's look with a light and a dark theme and search over every page: `mise run site:build` (into `site/dist/`) and `mise run site:dev` (a local preview). The pages are `docs/*.md`, `CHANGELOG.md` and sections of `README.md` themselves, and the build fails on a link to a page or heading that does not exist. Once the repository is public it is published at https://omp-cloud.techdufus.com on every push to `main`.
+
 ## 0.5.1 (2026-10-21)
 
 - **Cloud agents.** `/cloud <task>` hands your repository (uncommitted changes included) and the conversation to an omp agent in its own KVM microVM on your hardware, running the same omp you run. It works on its own branch and asks you questions when it needs to. After 10 minutes idle (`runner.idleTimeoutSeconds`) its VM pauses with its processes intact, and the next message resumes it. A lost VM is replaced from the last result and conversation. `/cloud pull <id>` fetches `omp-cloud/<id>` and saves the cloud conversation as a local omp session, and `/cloud resume <id>` continues it locally.

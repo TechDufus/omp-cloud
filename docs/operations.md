@@ -2,6 +2,8 @@
 
 [README](../README.md) · [Documentation index](../README.md#documentation)
 
+How to back up and restore the service's data, and the units that keep it running across a reboot.
+
 ```sh
 omp-cloud backup                 # <dataDir>/../backups/omp-cloud-<UTC timestamp>.tar.gz, keeps the newest 7
 omp-cloud backup --keep 14 --config /path/to/service.json

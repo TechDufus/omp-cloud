@@ -1,0 +1,722 @@
+@import "../../src/dashboard/client/kit/styles.css";
+@import "../../src/dashboard/client/kit/ui/modal.css";
+@import "@fontsource-variable/inter/wght.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
+@import "./landing.css";
+
+/* ==========================================================================
+   Fonts: the dashboard kit's families, self-hosted.
+   ========================================================================== */
+:root {
+  --font-sans: "Inter Variable", "Inter var", "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+html {
+  scroll-padding-top: calc(var(--topbar-h) + 16px);
+}
+
+/* ==========================================================================
+   Theme-driven visibility
+   ========================================================================== */
+html[data-theme="dark"] [data-theme-only="light"],
+html[data-theme="light"] [data-theme-only="dark"] {
+  display: none;
+}
+
+.theme-icon {
+  display: none;
+}
+
+html:not([data-theme-pref]) .theme-icon[data-pref="system"],
+html[data-theme-pref="system"] .theme-icon[data-pref="system"],
+html[data-theme-pref="light"] .theme-icon[data-pref="light"],
+html[data-theme-pref="dark"] .theme-icon[data-pref="dark"] {
+  display: block;
+}
+
+.copy-done {
+  display: none;
+}
+
+[data-copied="true"] .copy-done {
+  display: block;
+}
+
+[data-copied="true"] .copy-idle {
+  display: none;
+}
+
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  padding: 8px 12px;
+  border-radius: var(--r-control);
+  background: var(--card);
+  border: 1px solid var(--line-3);
+  color: var(--ink-1);
+  transform: translateY(-200%);
+}
+
+.skip-link:focus {
+  transform: none;
+}
+
+/* ==========================================================================
+   Topbar additions
+   ========================================================================== */
+.topbar-links {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.topbar .btn svg {
+  color: inherit;
+}
+
+.sidebar-foot a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+}
+
+.sidebar-foot a:hover {
+  color: var(--ink-1);
+}
+
+/* ==========================================================================
+   Window chrome, ported from scripts/showcase/compose/common.css onto kit tokens
+   ========================================================================== */
+.win {
+  border: 1px solid var(--line-2);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+}
+
+.win-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 12px;
+  background: var(--card);
+  border-bottom: 1px solid var(--line-2);
+}
+
+.win-bar i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--line-3);
+}
+
+.win-addr {
+  margin-left: 12px;
+  padding: 3px 12px;
+  border-radius: 6px;
+  background: var(--raised);
+  font: 500 10px/1.2 var(--font-mono);
+  color: var(--ink-3);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.win-addr b {
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+.win img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pills span {
+  padding: 5px 11px;
+  border: 1px solid var(--line-3);
+  border-radius: 999px;
+  font: 500 12px/1 var(--font-mono);
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Docs layout
+   ========================================================================== */
+.doc {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 48px;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.doc[data-toc="false"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.prose {
+  max-width: 78ch;
+  min-width: 0;
+}
+
+.toc {
+  position: sticky;
+  top: calc(var(--topbar-h) + 24px);
+  align-self: start;
+  max-height: calc(100dvh - var(--topbar-h) - 48px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 4px;
+}
+
+.toc .micro {
+  margin-bottom: 6px;
+}
+
+.toc-link {
+  display: block;
+  padding: 3px 0 3px 10px;
+  border-left: 1px solid var(--line-2);
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--ink-3);
+  transition: color var(--dur-1) var(--ease);
+}
+
+.toc-link[data-level="3"] {
+  padding-left: 22px;
+}
+
+.toc-link:hover {
+  color: var(--ink-1);
+}
+
+.toc-link[data-active="true"] {
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+
+@media (max-width: 1200px) {
+  .doc {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .toc {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+   Prose: the kit resets margins and lists, so restore them
+   ========================================================================== */
+.doc-eyebrow {
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
+.doc-title {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.prose .page-description {
+  margin-top: 8px;
+  margin-bottom: 8px;
+  font-size: 14.5px;
+  line-height: 1.7;
+}
+
+h2.doc-heading {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin-top: 40px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line-1);
+}
+
+h3.doc-heading {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 28px;
+}
+
+.prose h4,
+.prose h5,
+.prose h6 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 20px;
+}
+
+.heading-anchor {
+  margin-left: 8px;
+  color: var(--ink-4);
+  font-weight: 400;
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease);
+}
+
+.doc-heading:hover .heading-anchor,
+.heading-anchor:focus-visible {
+  opacity: 1;
+}
+
+.prose p,
+.prose ul,
+.prose ol {
+  margin: 12px 0;
+  font-size: 14.5px;
+  line-height: 1.7;
+}
+
+.prose ul {
+  list-style: disc;
+}
+
+.prose ol {
+  list-style: decimal;
+}
+
+.prose ul,
+.prose ol {
+  padding-left: 1.4em;
+}
+
+.prose li > ul,
+.prose li > ol {
+  margin: 4px 0;
+}
+
+.prose li + li {
+  margin-top: 4px;
+}
+
+.prose li::marker {
+  color: var(--ink-3);
+}
+
+.prose a:not(.btn):not(.card):not(.heading-anchor) {
+  color: var(--accent);
+}
+
+.prose a:not(.btn):not(.card):hover {
+  text-decoration: underline;
+}
+
+.prose hr {
+  border: 0;
+  border-top: 1px solid var(--line-1);
+  margin: 28px 0;
+}
+
+.prose strong {
+  font-weight: 600;
+}
+
+.prose :not(pre) > code {
+  background: var(--raised);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-chip);
+  padding: 0.1em 0.35em;
+  font-size: 0.88em;
+  overflow-wrap: anywhere;
+}
+
+.prose pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+}
+
+.prose img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--r-control);
+}
+
+.code {
+  margin: 16px 0;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-control);
+  background: var(--card);
+  overflow: hidden;
+}
+
+.code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 4px 3px 14px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.code-lang {
+  font: 500 11px/1 var(--font-mono);
+  color: var(--ink-3);
+  text-transform: lowercase;
+}
+
+.code .code-block {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.prose .code-block {
+  max-height: none;
+}
+
+.prose table {
+  width: 100%;
+  font-size: 13px;
+}
+
+.prose th {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-3);
+  text-align: left;
+  border-bottom: 1px solid var(--line-1);
+  white-space: nowrap;
+}
+
+.prose td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-1);
+  white-space: normal;
+  vertical-align: top;
+}
+
+.prose .table-wrap {
+  margin: 16px 0;
+}
+
+.callout {
+  margin: 16px 0;
+  padding: 12px 16px;
+  background: var(--card);
+  border-left: 3px solid var(--accent-line);
+  border-radius: 0 var(--r-control) var(--r-control) 0;
+}
+
+.callout > :first-child {
+  margin-top: 0;
+}
+
+.callout > :last-child {
+  margin-bottom: 0;
+}
+
+.diagram {
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-card);
+  background: var(--panel);
+  overflow-x: auto;
+}
+
+/* At its own size, scrolling sideways when wider than the column: a wide graph scaled to fit has unreadable labels. */
+.diagram svg {
+  display: block;
+  margin: 0 auto;
+  max-width: none;
+  height: auto;
+}
+
+/* Pager and footer */
+.doc-footer {
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line-1);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.doc-pager {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.doc-pager .card {
+  padding: 12px 16px;
+  gap: 2px;
+}
+
+.doc-pager .card[data-dir="next"] {
+  grid-column: 2;
+  text-align: right;
+}
+
+.doc-pager-title {
+  font-weight: 550;
+  color: var(--ink-1);
+}
+
+a.card {
+  transition:
+    transform var(--dur-2) var(--ease),
+    box-shadow var(--dur-2) var(--ease);
+}
+
+a.card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-2);
+}
+
+/* The card grid needs the whole column, not a line length. */
+.prose.doc-index {
+  max-width: none;
+}
+
+.doc-index-group {
+  margin-top: 32px;
+}
+
+.doc-index-group .card-body {
+  padding-top: 8px;
+}
+
+.doc-index-group .card-header {
+  justify-content: flex-start;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
+.doc-index-group .card-header svg {
+  color: var(--accent);
+}
+
+/* 404 */
+.not-found {
+  position: relative;
+  z-index: 1;
+  min-height: 100dvh;
+  padding: calc(var(--topbar-h) + 24px) 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.not-found .card {
+  width: min(440px, 100%);
+  text-align: center;
+}
+
+.not-found .card-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 28px 24px;
+}
+
+.not-found-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ==========================================================================
+   Landing layout
+   ========================================================================== */
+.l-section {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 112px 24px 0;
+}
+
+.l-section h2 {
+  font-size: clamp(1.6rem, 1.2rem + 1.4vw, 2.25rem);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+}
+
+.feature-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 1100px) {
+  .feature-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .feature-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.hero h1 {
+  font-size: clamp(2.4rem, 1.6rem + 3vw, 4.25rem);
+  line-height: 1.04;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+}
+
+.hero-sub {
+  font-size: 17px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  max-width: 60ch;
+}
+
+.hero-sub p {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+/* ==========================================================================
+   Animation
+   ========================================================================== */
+@keyframes hero-in {
+  from {
+    opacity: 0;
+    transform: translateY(28px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes hero-float {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+
+  50% {
+    translate: 0 -6px;
+  }
+}
+
+.hero-win {
+  animation:
+    hero-in 900ms var(--ease-out) backwards,
+    hero-float var(--float) ease-in-out infinite;
+  animation-delay: calc(var(--i) * 140ms), calc(1s + var(--i) * 700ms);
+}
+
+@keyframes flow-dash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+
+/* The kit's global rule only shortens durations, which makes infinite animations jitter. */
+@media (prefers-reduced-motion: reduce) {
+  .hero-win,
+  .flow-edge {
+    animation: none !important;
+  }
+
+  .flow-dot {
+    display: none !important;
+  }
+}
+
+/* ==========================================================================
+   Search dialog
+   ========================================================================== */
+.search-modal {
+  width: min(640px, 100%);
+  align-self: flex-start;
+  margin-top: 12vh;
+}
+
+.search-modal .search {
+  display: flex;
+  width: 100%;
+  padding: 12px 12px 8px;
+}
+
+.search-modal .search svg {
+  left: 24px;
+}
+
+.search-modal .search .input {
+  width: 100%;
+  height: 38px;
+  padding-left: 34px;
+  font-size: 14px;
+}
+
+.search-results {
+  max-height: min(50vh, 420px);
+  overflow-y: auto;
+  padding: 4px 8px 8px;
+}
+
+.search-results [role="option"] {
+  border-radius: var(--r-control);
+}
+
+.search-results [role="option"] a {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+}
+
+.search-results [role="option"][aria-selected="true"] {
+  background: var(--selected);
+}
+
+.search-title {
+  font-weight: 550;
+  color: var(--ink-1);
+}
+
+.search-snippet {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.search-snippet mark {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 3px;
+}
+
+.search-empty {
+  padding: 16px 12px;
+  color: var(--ink-3);
+  text-align: center;
+}

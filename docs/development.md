@@ -2,6 +2,8 @@
 
 [README](../README.md) · [Documentation index](../README.md#documentation)
 
+How the repository is laid out, and the commands that build, test and check it.
+
 ## Layout
 
 | Path | |
@@ -15,6 +17,7 @@
 | `scripts/parity/` | `mise run parity:capture`: the native-parity harness (`capture.ts` the session, `terminal.ts` the pty and tmux drivers, `tsp.ts` the replay of omp's Tern-protocol record, `provider.ts` the scripted fake model, `summary.ts` the table) |
 | `test/` | End-to-end scenarios (`scenario.ts`, `plugin-scenario.ts`, `update-scenario.ts`, `install-scenario.ts`) with their shared `run-lock.ts`, `cleanhost/` and the deterministic fake model (`fake-provider.ts`) |
 | `dev/` | Developer tools (`mise run dev:local`, `dev:play`, `dev:provider`); not part of the service |
+| `site/` | The website (`mise run site:build`, `site:dev`): a static Bun + React build of the landing page (copy read from sections of `README.md`), `docs/*.md` and `CHANGELOG.md` in the dashboard's UI kit. `nav.ts` is the docs sidebar and must list every `docs/*.md` |
 | [`docs/api.md`](api.md) | HTTP API contract |
 | [`docs/install.md`](install.md) | The install: requirements, `omp-cloud setup`, login, doctor, uninstall |
 | [`docs/architecture.md`](architecture.md) | How it works, the design reasons and the known limitations |
@@ -23,7 +26,7 @@
 
 ```sh
 mise run test              # unit tests (bun test); `bun test src/setup` runs the setup, doctor and uninstall tests alone
-mise run typecheck         # tsc --noEmit, service and dashboard client
+mise run typecheck         # tsc --noEmit, service, dashboard client and website
 mise run smoke             # curl the API of a fresh service, no VM
 mise run scenario          # API end to end on local vmon, fake model
 mise run plugin:scenario   # real local omp + plugin installed from the release bundle through a marketplace → fresh service on local vmon
@@ -35,6 +38,8 @@ mise run release:build     # dist/: the two executables, sha256 sidecars, releas
 mise run infra:up          # omp-cloud setup --checkout: this checkout as the service host (one sudo prompt); infra:down is uninstall --checkout
 mise run serve             # service in the foreground (stop the omp-cloud unit first)
 mise run dashboard:dev     # the dashboard on seeded data (temp service, runner off); prints a sign-in link
+mise run site:build        # the website into site/dist/; fails on a broken internal link or anchor, a doc missing from site/nav.ts or a README section the landing reads
+mise run site:dev          # the website at http://127.0.0.1:4321, rebuilt on change; `-- --base /omp-cloud/` serves it under a subpath
 ```
 
 `update:scenario` sets `update.ompUnits` to `[]` in its throwaway database, so its apply never queries or restarts a broker or gateway unit. It refuses to start when an apply could reach live units in another way (a vibemon that is not the pin, an apply already running).
@@ -44,6 +49,8 @@ mise run dashboard:dev     # the dashboard on seeded data (temp service, runner 
 `parity:capture` runs one scripted session on a real omp with the plugin, the fake model and a throwaway service, once through a pty that speaks Tern's protocol and once in tmux with the classic renderer, and writes `/tmp/parity/` (`--out <dir>`). It counts the `rows` fallback nodes omp-cloud causes (`--assert` exits 1 on any, or on an incomplete cloud job view) and compares a cloud job's tiles and `/jobs` widget with a native job's. It runs the service from a `git archive HEAD` snapshot (`--live-service` uses the working tree, `--plugin head` the committed plugin as a baseline). `scenario`, `plugin:scenario`, `update:scenario`, `install:scenario` and `parity:capture` share the local vmon and the gateway clients file, so each takes one run lock (`test/run-lock.ts`, the pid file `~/.local/share/omp-cloud/scenario.lock`): a second run refuses to start with a message naming the holder (exit 2), and a lock whose process is gone is taken over. `parity:capture --no-cloud` takes none.
 
 `install:scenario` and `cleanhost` use the dedicated vibemon team `omp-cloud-test` (key `~/.config/omp-cloud/vmon-test.key`) and never touch the live team or units. On a host whose nested KVM kills the clean VM (`mise run cleanhost -- nested` says so), `install:scenario -- --no-nested` proves everything but the template build and a real turn. `infra:up -- --no-login` and the other `omp-cloud setup` flags pass through ([Install](install.md)).
+
+The website renders the Markdown files themselves, so a doc reads the same on GitHub and on the site. Its build checks every link between them: a link to a heading that does not exist fails it, as does a new `docs/*.md` that `site/nav.ts` does not list. The landing page reads `README.md`'s sections `What you get`, `A tour` (`In omp`, `The dashboard`, `In Tern`), `How it works` (four `**Lead.**` steps), `Quickstart` (with an `sh` block), `Security model` and `Related projects`; renaming one fails the build with the section's name. The build also copies `install.sh` to the site root, so the installer is served at `<site>/install.sh` from the same `main` as `raw.githubusercontent.com`. `.github/workflows/pages.yml` deploys it to GitHub Pages on every push to `main` that touches its inputs, and skips while the repository is private.
 
 `mise tasks` lists the rest. Contributor and agent notes: [`AGENTS.md`](../AGENTS.md).
 

@@ -2,6 +2,8 @@
 
 [README](../README.md) · [Documentation index](../README.md#documentation)
 
+What the service, the VMs and your devices can reach, what runs as root, and what crosses between your omp and a cloud agent.
+
 ## Trust boundaries
 
 - The service has three listeners, defined in [API](api.md#listeners): the API listener (`listen`, plain HTTP, loopback only) for the owner token and this machine's devices, the dashboard listener (`dashboard.listen`, plain HTTP, loopback only) for the dashboard's session cookie, and the remote listener (`remote`, TLS, set up on `0.0.0.0:8443`) for paired devices only. The owner token is refused on the remote listener; the dashboard listener's `POST /session` accepts it to open a session.

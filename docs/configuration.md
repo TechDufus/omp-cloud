@@ -2,6 +2,8 @@
 
 [README](../README.md) · [Documentation index](../README.md#documentation)
 
+omp-cloud has two kinds of configuration: omp-cloud's own files on each machine you run omp on, and `service.json` on the server. Everything else is a run-time setting.
+
 ## Client config
 
 omp-cloud keeps its own files; omp's config is never read or written. `<config home>/omp-cloud/config.yml` is yours (`<config home>` is `$XDG_CONFIG_HOME`, else `%APPDATA%` on Windows, else `~/.config`), and a repository may commit `.omp-cloud.yml` at its root. Both are YAML mappings; unknown keys and values of the wrong type are ignored and reported by `/cloud status`.

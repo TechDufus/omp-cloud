@@ -7,3 +7,5 @@ node_modules/
 /AGENTS.local.md
 # Raw captures: scripts/showcase/optimize.ts turns them into docs/assets/.
 /docs/assets/src/
+# mise run site:build output.
+/site/dist/

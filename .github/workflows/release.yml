@@ -23,6 +23,7 @@ jobs:
         run: |
           bunx tsc --noEmit
           bunx tsc --noEmit -p src/dashboard/client
+          bunx tsc --noEmit -p site
       # Unit tests only: the scenarios and the smoke test need vmon and a model.
       - name: Test
         run: bun test

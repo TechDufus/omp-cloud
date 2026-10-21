@@ -2,6 +2,8 @@
 
 [README](../README.md) · [Documentation index](../README.md#documentation)
 
+Every `/cloud` command the plugin adds to omp, where finished turns and questions go, and the cards they land as.
+
 | Command | Does |
 |---|---|
 | `/cloud` | Open the hub (the threads, their detail and actions on the keys listed below); outside omp's interactive UI, the same list as a card |

@@ -59,8 +59,16 @@ description = "Unit tests"
 run = "bun test"
 
 [tasks.typecheck]
-description = "Typecheck (tsc --noEmit; the dashboard client has its own tsconfig with the DOM lib)"
-run = "bunx tsc --noEmit && bunx tsc --noEmit -p src/dashboard/client"
+description = "Typecheck (tsc --noEmit; the dashboard client and the website have their own tsconfigs with the DOM lib)"
+run = "bunx tsc --noEmit && bunx tsc --noEmit -p src/dashboard/client && bunx tsc --noEmit -p site"
+
+[tasks."site:build"]
+description = "Build the website (landing page from README.md, docs from docs/*.md and CHANGELOG.md) into site/dist/ and fail on any broken internal link or anchor; -- --out dir, -- --site-url url"
+run = "bun run site/build.ts"
+
+[tasks."site:dev"]
+description = "Serve the website at http://127.0.0.1:4321 from a temp build that rebuilds on changes to docs/, site/, README.md, CHANGELOG.md, install.sh and the dashboard kit; -- --port N, -- --base /prefix/ serves it under a subpath"
+run = "bun run site/dev.ts"
 
 [tasks.smoke]
 description = "curl smoke test of the API against a freshly started service (no VM)"

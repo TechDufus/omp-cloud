@@ -1,0 +1,53 @@
+name: pages
+
+# The website (site/): the landing page and docs at https://omp-cloud.techdufus.com, rebuilt from main.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "site/**"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "package.json"
+      - "install.sh"
+      - "bun.lock"
+      - "src/dashboard/client/kit/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # GitHub Pages and the links the site advertises need a public repository:
+    # while it is private the jobs are skipped, not failed.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - run: bun run site/build.ts --out site/dist
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
