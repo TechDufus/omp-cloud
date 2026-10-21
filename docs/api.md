@@ -1,0 +1,649 @@
+# omp-cloud API
+
+[README](../README.md) · [Documentation index](../README.md#documentation)
+
+The HTTP API local omp uses to hand work to the cloud: upload a repository and conversation, follow the thread, send follow-up messages and fetch the result branch. One service runs one kind of agent, omp in a VM built from a template of the owner's omp version.
+
+Every response is JSON with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, except: the two file downloads, the `diff` without `stat` (`text/plain`), the settings YAML export and the event streams keep those headers but not the JSON body; the `204` answers of the pairing routes have no body; the [dashboard static relay](#dashboard-static-relay) passes on the page's own `Cache-Control`. Errors are `{"error": "<message>"}`; an unexpected failure is `500` `internal error` and is logged by the service.
+
+## Authentication
+
+The API listener accepts `Authorization: Bearer <token>` (the scheme is matched case-insensitively) where the token is the owner token or a device token; the remote listener accepts device tokens only ([Devices and pairing](#devices-and-pairing)); the dashboard listener has its own session cookie ([Dashboard](#dashboard)). The three listeners are defined under [Listeners](#listeners). The service config holds the owner token's SHA-256 (`apiTokenSha256`, lower-case hex of the UTF-8 token), compared in constant time. There is one user: both kinds of token act as the principal `owner`, and every thread records it as its owner. A device token (`ompd_…`) is looked up in the database on every request.
+
+| Case | Response |
+|---|---|
+| Missing or wrong token, an unknown or revoked device token, the owner token on the remote listener | `401` `unauthorized` with `WWW-Authenticate: Bearer realm="omp-cloud"` |
+| A device token on an owner-only route ([the list](#tokens-and-callers)) | `403` `only the owner token can do this; it works on the server machine` |
+| Remote listener, source outside `remote.allow` or the gateway host | `403` `forbidden`, before any routing |
+| Unknown route or method | `404` `not found` (after authentication; a device's `403` on an owner-only path comes first) |
+| Unknown, deleted, or another owner's thread | `404` `not found` |
+
+`GET /api/v1/health` and the two public pairing steps (`POST /api/v1/pairing/redeem` and `/claim`) need no token: [Health](#health), [Devices and pairing](#devices-and-pairing).
+
+## Routes
+
+| Route | Purpose |
+|---|---|
+| `GET /api/v1/whoami` | `{user, service, capabilities, limits, spend, models, maxUploadBytes, defaultModel, modelPatterns, ompVersion, gitHosts, vms, threads, device, remote, update}`: [Version and capabilities](#version-and-capabilities) |
+| `GET /api/v1/health` | Public, no token: `200 {status, version, build, schema}`: [Health](#health) |
+| `POST /api/v1/threads` | Create a thread ([multipart, below](#creating-a-thread)); `201` with a thread summary, or `200` for a repeated `Idempotency-Key` ([below](#idempotent-create)) |
+| `GET /api/v1/threads` | `{threads: [summary], next, total}`, newest activity first, paged and filtered: [Listing threads](#listing-threads) |
+| `GET /api/v1/threads/{id}` | Thread detail |
+| `GET /api/v1/threads/{id}/events?after=<seq>` | The thread's events as a server-sent event stream: [Events](#events) |
+| `POST /api/v1/threads/{id}/messages` | Body `{"text": "...", "mode": "queue" \| "interrupt"}` (`text` 1 to 32768 bytes, else `400` `text must be 1 to 32768 bytes`; `mode` defaults to `queue`, as does `""`); `201 {"turn": {...}, "interrupted": boolean, "cancelled": [turn ids]}`; `400` `mode must be queue or interrupt`; `409` `thread has 200 turns; start a new one` or `thread has failed; start a new one`: [Interrupting a turn](#interrupting-a-turn) |
+| `POST /api/v1/threads/{id}/irc` | Body `{"from": "<sender>", "body": "<text>", "replyTo": "<message id>", "id": "<message id>"}`: an [IRC message](#irc-messages) to the thread's agent. `201 {"receipt": "injected" \| "woken" \| "revived", "id", "turn": {...} \| null}`; a repeated `id` is answered as the first time and delivered once |
+| `GET /api/v1/threads/{id}/turns/{turn}/reply?part=&offset=&limit=` | A page of a turn's full reply, error or prompt: [Full replies](#full-replies) |
+| `GET /api/v1/threads/{id}/diff`, `/tree`, `/files/<path>` | What the thread changed, read from its stored result without pulling it: [Inspecting a result](#inspecting-a-result) |
+| `POST /api/v1/threads/{id}/stop` | Abort the running turn and cancel queued ones; `200 {"stoppedRunning": boolean, "cancelled": <number of queued turns cancelled>}` |
+| `POST /api/v1/threads/{id}/turns/{turn}/questions/{qid}/answer` | Answer a question the agent asked. Body `{"selected": ["label"], "answer": "text"}`: option labels, free text, or both (at least one; a question without `multi` takes at most one label; `answer` is trimmed and at most 4000 bytes). `200` with the [question](#questions) (`answeredBy` is the caller). `400` `select an option or give an answer`, `answer is longer than 4000 bytes`, `the question takes one option`, `"<label>" is not an option` or `option "<label>" is selected twice`; `404` for an unknown turn or question; `409` `question is not waiting for an answer` when it is answered or expired or its turn is not running |
+| `GET /api/v1/threads/{id}/result` | The result branch as a git bundle (`application/octet-stream`) with headers `X-Omp-Branch` (`omp-cloud/<id>`), `X-Omp-Head` (when a turn recorded one) and `X-Omp-Base` (the base commit, empty for a full-history thread); `404` `no result yet` |
+| `GET /api/v1/threads/{id}/conversation` | The newest `omp session pack` archive (`application/x-tar`): the export the runner packs after every turn, else the uploaded archive; `404` `no conversation yet`. Every export of a thread carries the same session id, never the uploaded one's, and keeps the session header's timestamp, so the file `omp session unpack` writes keeps its name from one export to the next. Entry ids and timestamps are unchanged, so `omp stats` counts each request once however many local copies hold it |
+| `DELETE /api/v1/threads/{id}` | Delete the thread with its turns, events and files; `202 {"status": "deleting"}`. Every route answers `404` for it afterwards |
+| `POST /api/v1/logins` | Body `{"provider": "openai-codex"}`: start logging the cloud broker in to a provider; `201` with the [login](#logins). Every `/api/v1/logins` route is owner token only |
+| `GET /api/v1/logins/{id}` | The login |
+| `POST /api/v1/logins/{id}/input` | Body `{"input": "<redirect URL or code>"}`: finish a login whose provider redirects the browser to `localhost`; `200` with the login. `409` `login is not waiting for input` once it is done or failed |
+| `DELETE /api/v1/logins/{id}` | Cancel a waiting login; `202 {"status": "cancelled"}`. `409` `login is not waiting` once it is done or failed |
+| `GET /api/v1/settings` | `{settings: [setting]}` for every registered [setting](#settings) |
+| `PUT /api/v1/settings` | Owner token only. Body `{"settings": {"git.push": "ask", "git.protected": null}}`: set keys, `null` resetting one to its default; `200` as `GET`. `400` `unknown setting <key>` or the validator's message applies nothing; `400` `invalid JSON body: expected {"settings": {…}}` for any other body; `413` `request body is too large` over 64 KiB |
+| `GET /api/v1/settings/audit?before=<seq>&limit=<n>` | `{entries: [{seq, at, actor, action, key, old, new}], next}`, newest first, `limit` 1 to 200 (default 50); pass `next` as `before` for the following page, `0` at the end; `400` `before must be an integer from 0 to 9007199254740991` or `limit must be an integer from 1 to 200` |
+| `GET /api/v1/settings/export` | The stored values as nested YAML (`application/yaml`) |
+| `PUT /api/v1/settings/import?mode=replace\|merge` | Owner token only. Body: a YAML settings file, at most 64 KiB (`413` `request body is too large`); `200` as `GET`. `replace` (the default) resets every key the file does not name, `merge` keeps them. `400` `mode must be replace or merge`, `the body is not valid UTF-8`, `invalid YAML: <message>`, an unknown key or an invalid value applies nothing |
+| `POST /api/v1/dashboard/links` | Mint a one-time sign-in link for the [dashboard](#dashboard); `201 {url, expiresAt}`, `404` `the dashboard is not configured` |
+| `GET /api/v1/events` | The global event stream of the owner's threads: [Dashboard](#dashboard) |
+| `GET /api/v1/usage?since=<ISO>` | The owner's spend per thread and day: [Dashboard](#dashboard) |
+| `GET /api/v1/vms` | The owner's VMs with live vmon data: [Dashboard](#dashboard) |
+| `POST /api/v1/pairing/redeem`, `POST /api/v1/pairing/claim` | Public pairing steps of a new device: [Devices and pairing](#devices-and-pairing) |
+| `POST /api/v1/pairing/offers`, `GET`, `DELETE /api/v1/pairing/offers/{id}`, `POST /api/v1/pairing/offers/{id}/approve`, `POST …/decline` | The owner's pairing offers (owner token only) |
+| `GET /api/v1/devices`, `DELETE /api/v1/devices/{id}` | List and revoke devices: [Devices](#devices) |
+| `GET /api/v1/update` | The service's own update state (owner token only): [Update routes](#update-routes) |
+| `POST /api/v1/update/check` | Check the release feed now (owner token only); `202 {}` |
+| `POST /api/v1/update/apply` | Install the staged release and restart the service (owner token only); `202 {"applying": {"version"}}`, `409` with a reason |
+| `GET /api/v1/dashboard/static{path}` (also `HEAD`) | The dashboard page's static files for paired devices: [Dashboard static relay](#dashboard-static-relay) |
+
+The two downloads support a single `Range` (`206` with `Content-Range`, `416` when unsatisfiable) and send `Accept-Ranges: bytes`.
+
+JSON bodies are limited: a message or an IRC message to 32768 bytes of text plus 4 KiB, an answer to 12416 bytes (4000 bytes of text, 20 options of 200 bytes plus 16 bytes of framing each, 4 KiB), a login 8 KiB, a pairing offer 1 KiB, a redeem or claim 2 KiB, a settings write or import 64 KiB. Over the limit is `413` `request body is too large`; an empty body, invalid UTF-8, a body that is not one JSON object, or whose fields have the wrong type (`null` included, except `replyTo` and `id` of an IRC message), is `400` `invalid JSON body`. A missing `text`, `selected` or `answer` counts as empty.
+
+### Thread summary and detail
+
+Every field is always present: absent values are `null`, `""`, `0`, `false` or `[]`. The only exceptions are `warnings` (always `[]`), which only the creation response carries, and `replayed`, which only a [replayed create](#idempotent-create) carries.
+
+A summary is `{id, title, name, owner, phase, error, turns, queued, model, thinking, ompVersion, latest, question, result, repo, workspace, createdAt, lastActivityAt, archivedAt, metrics, activity, origin, ref, session, scratch}`; `turns` is the number of turns and `queued` the number waiting to run. `repo` is `{name, remoteURL, baseRef, localBranch}` of the repository the thread was handed off from (`remoteURL` has no credentials and is `""` for a full-history upload without a remote) and `workspace` is the client's repository root as it sent it in `paths.workspace` (`""` when it sent none), so a list can group threads by repository. A detail has the same fields except that `turns` is the array of [turn objects](#turns), its `repo` is the fuller `{name, remoteURL, baseRef, baseCommit, handoffCommit, localBranch}`, plus `paths` (`{home, workspace}`, as sent), `configOverlays` (as sent), `policy` (what the thread [tightened](#agent-policy) of the service's policy, as validated; `{}` for none) and `vm`: `null` before the thread has a VM (and after it was [archived](#archive)), else `{sandboxId, state, pid}` with `state` `running` or `paused` and `pid` omp's process id in the VM (`null` before omp starts).
+
+- `phase` is one of:
+
+  | Phase | Meaning |
+  |---|---|
+  | `starting` | Turns are queued and none has started yet: the VM is being prepared |
+  | `working` | A turn is running, or queued after an earlier one started |
+  | `waiting` | The running turn asked a question nobody has answered |
+  | `idle` | Nothing is queued or running |
+  | `failed` | The thread cannot go on; `error` says why (it could not be prepared, omp kept failing, or its VM was lost again and could not be restored). It takes no more messages, [IRC messages](#irc-messages) included |
+
+- `title` is the first non-empty line of the first message, trimmed and cut to 80 characters. `model` and `thinking` are as requested; `""` means `defaultModel` and omp's default thinking level. `ompVersion` is the omp version the thread's VM runs.
+- `latest` is `null` or the done or failed turn with the highest id: `{id, state, title, reply, error, completedAt}`, with `reply` cut to 3000 characters and `error` to 1000.
+- `question` is `null`, or the oldest unanswered question of the running turn, in which case `phase` is `waiting`: `{turn, id, ask, kind, text, header, options: [{label, description}], multi, recommended, askedAt, expiresAt, remaining}`. `recommended` is an index into `options` or `null`, and `remaining` counts the unanswered questions of the same ask, this one included. `kind` and `expiresAt` are described under [Questions](#questions).
+- `result` is `null` or the state of the result branch, from the newest turn that recorded a head: `{branch, head, base, filesChanged, insertions, deletions, pushed, pushError, pushRef, updatedAt}`, with `pushError` cut to 300 characters and `pushRef` the remote branch the head was [pushed](#push-policy) to (`""` when it was not). `filesChanged`, `insertions` and `deletions` measure the branch from the handoff commit: everything the cloud changed, across all turns so far.
+- `lastActivityAt` is the latest of the thread's creation and its turns' queued, started and completed times.
+- `name` is the thread's short human name, `""` when it has none; clients show `name` when it is set and `title` otherwise, and keep the id visible. It is set at [creation](#creating-a-thread) and does not change.
+- `archivedAt` is `null`, or the ISO time the [archive](#archive) sweep released the thread's VM. The thread then has no `vm`; the next message, an [IRC message](#irc-messages) included, restores it.
+- `metrics` is `{usage, requests, tools, workMs, context, turns}`, computed from the thread's turns: `usage` is `{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, cost}` summed over all turns (zeros when none reported usage); `requests` and `tools` are the model requests (assistant messages) and tool calls summed over turns; `workMs` is the sum of `completedAt - startedAt` over finished turns, in milliseconds; `context` is `null` before omp reported any, else `{tokens, window, at}`, the latest context use omp reported (while a turn runs it follows the turn), `window` `0` when the model's window is unknown, `at` the ISO time of the report; `turns` is `[{n, cost, contextTokens}]` for the last 12 finished (done or failed) turns, oldest first, `n` the turn id, `cost` its USD cost (`0` without usage) and `contextTokens` its context at its end (`null` when unreported).
+- `activity` is `null`, or while a turn runs its latest tool call or assistant message: `{kind, text, at}` with `kind` `tool` or `assistant`, `text` as in the [event](#events) of that kind (at most 500 characters) and `at` its time. It is `null` when no turn runs and before the running turn has shown either.
+- `origin` says who started the thread: `"tool"` (an agent, through the plugin's `cloud` tool), `"user"` (a person) or `""` (unknown: the client sent none). `ref` is the caller's short reference (`""` for none), `session` the id of the omp session that started the thread (`""` for none), and `scratch` is `true` for a thread without a repository ([scratch threads](#scratch-threads)). All four are set at [creation](#creating-a-thread) and never change; the list can [filter](#listing-threads) by the first three.
+
+### Turns
+
+A turn is `{id, state, text, by, origin, ircFrom, ircId, ircReplyTo, queuedAt, startedAt, completedAt, reply, title, error, usage, head, filesChanged, insertions, deletions, pushed, pushError, pushRef, requests, tools, context, questions}`. `text` is cut to 2000 bytes. `by` is who sent it: `owner`, or `device:<id>` for a paired device (the sender's name for an `irc` turn, below). `state` moves `queued → running → done | failed`, or `queued → cancelled`. A stopped turn ends `failed` with `error` `stopped by <by>`; a cancelled one has `error` `cancelled by <by>`, `<by>` being `owner` or `device:<id>`. `title` is the first non-empty line of `reply` with leading `#`, `*`, `-`, `>` and whitespace removed, at most 80 characters (`""` before a reply). `usage` is `null` or `{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, cost}` with `cost` in USD. `head` and the counts are the branch after the turn, measured like `result`'s. `pushed`, `pushError` and `pushRef` (the remote branch it was pushed to, `""` when it was not) record the [push](#push-policy) at the end of the turn. `requests` is the number of model requests (assistant messages) and `tools` the number of tool calls of the turn (`0` until it ends); `context` is `null` or `{tokens, window}`, the context omp reported in use when the turn ended and the model's context window (`window` `0` when unknown).
+
+`origin` is `"irc"` for a turn an [IRC message](#irc-messages) started and `""` for every other turn. In an `irc` turn `text` is the message's body (the full body is under `?part=text` of [Full replies](#full-replies)), `by` and `ircFrom` the sender, `ircId` the message's id and `ircReplyTo` the `replyTo` it carried (`""` for none); the three `irc` fields are `""` in other turns. An `irc` turn is a wake of the idle agent: it runs like any turn, and its `reply` is the agent's answer to the sender. A client that sent the message relays it: the plugin returns it to the sender as an IRC message with `replyTo` the turn's `ircId`.
+
+### Questions
+
+`turns[].questions` lists the questions a turn asked, each `{id, ask, key, kind, text, header, options, multi, recommended, askedAt, expiresAt, selected, answer, answeredBy, answeredAt, expired}`. `id` is 1-based within the turn, `ask` numbers the agent's `ask` calls within the turn (the questions of one call are answered together), `key` is omp's question id (`omp-cloud:push` for the [push question](#push-policy), `approval:<tool>` for an [approval](#agent-policy)), `selected` are option labels and `answer` is free text. A question nobody answered in time has `expired: true` and `answeredBy: "timeout"`; one that a stop ended has `answeredBy: "stop"`; one whose turn ended while it was still open has `answeredBy: "dropped"`.
+
+`kind` is derived from `key`: `"approval"` for `approval:*`, `"push"` for `omp-cloud:push`, else `"ask"`, so a client can tell the agent's own questions from the owner's decisions without parsing keys. Only an `ask` is the agent asking for input; an approval or push question is a decision about what the agent may do (exactly `["Approve"]` or `["Push"]` says yes). `expiresAt` is the ISO time an unanswered question times out (`askedAt` plus `runner.questionTimeoutSeconds`), `null` once it is answered or when no timeout applies.
+
+## Events
+
+`GET /api/v1/threads/{id}/events` streams the thread's append-only event log as `text/event-stream; charset=utf-8` with `Cache-Control: no-store`. It first sends every stored event with a sequence number above `after`, then each new one as it is appended, and a `: keepalive` comment every 15 seconds. When there is nothing to catch up on, it starts with a `: connected` comment so the response headers go out at once. The stream ends when the thread is deleted, the client disconnects or the device that opened it is revoked.
+
+- `after` is a non-negative integer (`400` `after must be a non-negative integer` otherwise). Without it, the `Last-Event-ID` header is used (a bad one is the same `400`), so an `EventSource` resumes where it left off; without either, the stream starts at the first event.
+- Each event is one message without an `event:` field: `id: <seq>` and `data: {"seq", "at", "kind", "turn", "text"}`. `seq` is 1-based and gapless within the thread; `turn` is the turn the event belongs to, or `null`; `text` is at most 500 characters, except the JSON kinds of the [live](#live-events) and [child](#child-events) events (8000) and the [`irc` and `irc_in` events](#irc-events) (262144).
+
+The service writes the lifecycle kinds, the first eleven rows below (`turn_queued` to `thread_failed`), in the same transaction as the change they describe; clients refetch the thread when they see one. The runner adds progress kinds as the agent works: `vm` (the VM was created, resumed, paused or lost; omp started or restarted; a template build, a restore from the archive or the archive's release of the VM), `assistant` (an assistant message's text), `tool` (a tool call: its name and intent or arguments), `tool_error` (a tool call that failed), `notice` (retries, context compaction, omp notices and conditions of the runner or service: a lost connection to the VM, a result or conversation that could not be saved, a postponed archive, a dropped IRC message) and `push` (what became of a turn's result under the [push policy](#push-policy); `turn` is the turn): `pushed <target> to <remote>`, `push declined by <principal>`, `push question expired` or `push failed: <error>`. A lost VM (killed, or gone from vmon) does not fail the thread: the event `the VM was lost; restoring the thread on a new VM` appears, a running turn is requeued (a turn that was asked to stop ends `failed`) and the next turn runs on a new VM restored from the thread's newest state: the repository from the last result (`result.bundle`, else the handoff; the [archive](#archive) snapshot when it is newer) and the conversation from the last export (`session-export.tar`, else the one the thread was created with). Work the lost VM did after its last completed turn is redone. A thread whose VM is lost a third time in a row without a completed turn in between fails with `the VM was lost again and could not be restored`.
+
+| Kind | When | Text |
+|---|---|---|
+| `turn_queued` | A thread was created, a message sent, or an [IRC message](#irc-messages) started a turn | `queued by <principal>` (`queued by <from>` for an IRC message) |
+| `turn_started` | A turn started running | `started` |
+| `turn_done` | A turn finished | the turn's title, or `done` |
+| `turn_failed` | A turn failed or a stopped turn ended | the turn's error |
+| `turn_cancelled` | A stop cancelled a queued turn | `cancelled by <principal>` |
+| `turn_requeued` | A running turn was put back in the queue after its VM or omp process was lost | `requeued` |
+| `stop_requested` | A stop reached the running turn | `stop requested by <principal>` |
+| `question_asked` | The agent asked (one event per question, an approval included), or the service asked whether to push | `question <id>: <text>` |
+| `question_answered` | Someone answered | `question <id> answered by <principal>` |
+| `question_expired` | A timeout, stop or turn end closed an open question | `question <id> expired: <timeout\|stop\|dropped>` |
+| `thread_failed` | The thread cannot go on (`turn` is `null`) | the error |
+| `irc_in` | A peer's [IRC message](#irc-messages) reached the thread's agent: on the running turn it was handed to, or on the turn it queued | The message as JSON, [below](#irc-events) |
+| `irc` | The thread's agent wrote an IRC message to a peer (the runner records it; `turn` is the running turn or `null`) | The message as JSON, [below](#irc-events) |
+| `usage` | An assistant message of a running turn ended: one model request | One JSON object, [below](#live-events) |
+| `tool_start` | A tool call of a running turn started | One JSON object, [below](#live-events) |
+| `tool_end` | A tool call ended | One JSON object, [below](#live-events) |
+| `child_start` | A background job or subagent the agent started in the VM began | One JSON object, [below](#child-events) |
+| `child_progress` | A subagent the agent started reported progress | One JSON object, [below](#child-events) |
+| `child_end` | That job or subagent ended | One JSON object, [below](#child-events) |
+
+### Live events
+
+`usage`, `tool_start` and `tool_end` are progress kinds the runner writes next to `assistant`, `tool` and `tool_error`: they tell a client what a turn costs and does while it runs, before `turn_done` adds it to the thread's `metrics`. They are not lifecycle kinds (nothing to refetch), `turn` is the running turn, and their `text` is one JSON object, cut at 8000 characters instead of 500 (the runner keeps them well under it, so the JSON always parses). A finished turn's `usage` field is the authoritative total.
+
+- `usage`, once per model request (each assistant message omp reports usage for): `{"input", "output", "cacheRead", "cacheWrite", "cost", "model", "stopReason", "context": {"tokens", "window"}}`. The four token fields are counts and `cost` is USD, as omp reports them for that request; `model` is `provider/id` (the id alone when omp names no provider) and `stopReason` omp's (`stop`, `toolUse`, `error`, …, `""` when none). `context.tokens` is what the request ended with, the sum of its four token fields (an estimate of the context in use, omp's `get_state` reading comes with the turn's `context`), and `context.window` the model's context window as omp last reported it, `0` until it has.
+- `tool_start`: `{"id", "tool", "intent", "args"}`. `id` is omp's tool call id, the same on the matching `tool_end`; `tool` the tool's name; `intent` omp's one-line intent and `args` the compact argument JSON (whitespace collapsed), each cut at 200 characters followed by `…` (`""` for none).
+- `tool_end`: `{"id", "tool", "ok", "ms", "error", "async", "detached", "spawned"}`. `ok` is `false` when the call failed, and `error` then holds the first line of its result (cut at 200 characters followed by `…`; `""` when ok). `ms` is the call's duration in milliseconds as the runner measured it between the two events (`null` when it did not see the start, e.g. after a reconnect). `spawned` lists the background jobs the call started and left running, `[{"agent", "job"}]` with at most 16 entries: a `task` call's agents (`agent` is the subagent's id, readable as `agent://<agent>` and `history://<agent>` in omp) and a background `bash` job (`agent` is `""`). `detached` is `true` when `spawned` is not empty (the call returned while those jobs run) and `async` is `true` then too, and for a call that asked for background execution (`args.async`). A failed call spawned nothing. The ids of a `task` call are only known when it ends, so `tool_start` of a `task` call carries none.
+
+A client that reconnects with `after=<seq>` loses nothing: the events are stored like every other, gapless by `seq`. omp's output while nobody is attached (a paused or reconnecting VM) is lost, so a `tool_end` may lack its `tool_start` and a request's `usage` may be missing; the turn's own `usage` total at its end is exact.
+
+### Child events
+
+`child_start`, `child_progress` and `child_end` (capability `events.children`) tell a client about the background jobs and subagents the cloud agent starts inside its VM: a `task` subagent that runs detached, a background `bash` job, an `eval` job. They are progress kinds, not lifecycle kinds, their `text` is one JSON object (cut at 8000 characters, far above what they hold) and they are stored in the thread's log like every other event. `turn` is the turn that **spawned** the child, also on its later events: a child may outlive that turn (omp keeps working while a job runs, and the VM is not paused until omp is idle), so a `child_progress` or `child_end` can arrive after the turn's `turn_done`, while the thread is idle.
+
+- `child_start`: `{"job", "agent", "kind", "label", "parentCall", "parent", "description"}`. `job` names the child in every later event; for a `task` child it is the subagent's id, the same as `agent`. `agent` is the subagent's id (`""` for a `bash` or `eval` job; readable as `agent://<agent>` in omp). `kind` is `task`, `bash` or `eval`. `label` is the subagent's id, a bash job's command or an eval job's title or first line of code, whitespace collapsed and cut at 200 characters (`bash` or `eval` when none is known). `parentCall` is the tool call that started it (`tool_start`/`tool_end` `id`; `""` when unknown). `parent` is the `agent` of the child that started this one, for a subagent that a subagent spawned (omp names those `<parent>.<name>`), else `""`. `description` is the subagent's one-line description (`""` for none).
+- `child_progress` (`task` children only): `{"job", "agent", "tools", "requests", "tokens", "cost", "tool", "args", "intent", "stage", "percent", "context", "ms"}`. `tools`, `requests` and `tokens` are counts (tokens as omp counts them for the subagent: input, output and cache writes), `cost` is USD, `tool` the name of the tool call in flight (`""` for none), `args` its compact arguments, `intent` omp's one-line intent of the call (else the last intent), `stage` the subagent's own one-line description of its step (`""` when omp does not estimate one), `percent` its self-estimated completion, rounded to an integer (`null` when none), `context` `{"tokens", "window"}` or `null` (also when the window is unknown) and `ms` how long it has run. The runner writes at most one per child every 2 seconds, and only when something it shows changed.
+- `child_end`: `{"job", "agent", "kind", "status", "ms", "error", "inferred"}`. `status` is `completed`, `failed` or `cancelled` and `ms` the child's duration (omp's own when it reported one, else measured by the runner from its start). `error` is always present, cut at 200 characters, `""` when the child ended well: `the subagent failed`, `the subagent was aborted`, `the job failed` or `the job was cancelled` when omp reported such an end, or the reason the runner gave up on the child. `inferred` is `false` when omp reported the end and `true` when the runner decided it: omp said it has no background work left while the child was open, or delivered a job's result without a status (`completed`, `error` `""`: its result had been read inline or the job was cancelled, omp does not say which), or the child cannot go on, `cancelled` with the reason in `error`: `the VM was paused`, `the VM was lost`, `the VM was released by the archive`, `omp exited (<reason>)`, `omp was restarted, which ended its jobs` or `the thread failed`. A thread that is deleted writes nothing.
+
+A child that ends and a child with the same `job` that starts later are two runs: omp reuses job ids, and a subagent gets a follow-up turn. A client treats a `child_start` for a `job` it has seen end as a new child; a `child_start` for a `job` that is still open does not occur (the runner writes one per open `job`).
+
+A job whose result the agent read itself is not delivered again, so its end is `inferred`; omp's output while nobody is attached (a paused or reconnecting VM) is lost, so a client may see a `child_end` with `inferred` where the real end was missed. A client that does not know `events.children` ignores the kinds.
+
+### IRC events
+
+The `irc` and `irc_in` kinds are not lifecycle kinds: a client has nothing to refetch when it sees one, and the plugin acts only on `irc`. Their `text` is one message as JSON, `{"id", "from", "to", "body", "replyTo", "at"}` (`replyTo` `""` for none, `at` the event's time). The body is not cut to 500 characters: a body of up to 32768 bytes of UTF-8, the limit of `POST …/irc` and of a message, arrives whole (these events are cut only at 262144 characters). The one exception is an `irc` message the agent wrote that is longer than 32768 bytes: the runner keeps the first part and ends the body with a marker, `[omp-cloud: this message was cut: it is <n> bytes and the limit is 32768. The whole text is in the sending agent's transcript (its write call): read history://<the sending agent's id>]`; the part and the marker together are at most 32768 bytes, and the cut never splits a character. For `irc_in` the service writes the event in the same transaction as the `POST …/irc` that delivered it, and `to` is `""`. For `irc` the runner writes it from the VM extension ([below](#the-vm-side-of-irc)): `from` is the VM-side sender (`Main`, or a nested subagent), `to` the id it addressed (`Parent`, the thread's parent, unless it named another). The runner stores an `irc` message once per `id`; a frame that omp's output replays is dropped, as is a message whose `id`, `from` or `to` is empty or longer than 200 characters or whose body is only whitespace.
+
+### Events as JSON
+
+`GET /api/v1/threads/{id}/events?format=json&after=<seq>&limit=<n>&kind=<k,…>&turn=<n>` answers one page as JSON instead of a stream: `{events: [{seq, at, kind, turn, text}], next: number | null}`. `after` is an integer from 0 (default `0`), `limit` is 1 to 500 (default 100), `kind` a comma list of at most 32 event kinds (each `[a-z][a-z0-9_]{0,31}`) and `turn` a turn id from 1 (both filter), and the events come in `seq` order. `next` is the `after` for the following page, `null` at the end. A bad parameter is `400` `<name> must be an integer from <min> to <max>` (`after` 0 to 9007199254740991, `limit` 1 to 500, `turn` 1 to 9007199254740991) or `kind must be a comma list of at most 32 event kinds`. `Last-Event-ID` is ignored. Without `format=json` the route is the stream above.
+
+## Listing threads
+
+`GET /api/v1/threads` answers `{threads: [summary], next: string | null, total: number}`, newest `lastActivityAt` first (ties by id, descending). Deleted threads never appear. `total` counts every thread that matches the filters, whatever the page. All parameters are optional:
+
+| Parameter | Meaning |
+|---|---|
+| `limit` | 1 to 200 (default 50), threads per page |
+| `before` | The opaque cursor a previous answer gave as `next`. It still resumes correctly when the thread it points at was deleted |
+| `phase` | A comma list of `starting`, `working`, `waiting`, `idle`, `failed` (`deleted` is a `400`) |
+| `origin`, `ref`, `session` | Exact match on the thread's [metadata](#thread-summary-and-detail): `origin` is `tool` or `user` (unknown origin, `""`, cannot be filtered); `ref` is 1 to 64 characters of letters, digits, `.`, `_` and `-`; `session` is at most 128 characters |
+| `repo` | The repository name (`repo.name`), at most 512 characters |
+| `since` | An ISO 8601 date, or date and time with a zone: threads whose `lastActivityAt` is at or after it |
+
+A bad value is `400` naming the parameter (`limit must be an integer from 1 to 200`, `before is not a valid cursor`, `phase must be a comma list of starting, working, waiting, idle, failed`, `since must be an ISO 8601 date or date-time with a zone`, `origin must be "tool" or "user"`, `ref must be 1 to 64 characters of letters, digits, . _ or -`, `session must be at most 128 characters without control characters`) and an empty value `<name> must not be empty`.
+
+## Full replies
+
+`GET /api/v1/threads/{id}/turns/{turn}/reply?part=reply|error|text&offset=0&limit=8000` pages the full text of one turn, which the summary and detail cut (`reply` at 3000 characters in `latest`, `text` at 2000 bytes in a turn). The answer is `{turn, part, total, offset, text, next}`: `part` is `reply` (default), `error` or `text` (the turn's prompt); `total` is the length of that text; `text` is the page and `next` the offset of the following page, `null` at the end. Offsets and `total` count UTF-16 code units (JavaScript string indices), `limit` is 1 to 32000 (default 8000). A page never splits a surrogate pair: an `offset` inside one starts after it (the answer's `offset` says where) and a page ends before a pair it would cut. An `offset` at or past the end answers an empty `text` and `next: null`. `404` `no turn <n>`; `400` `part must be one of reply, error, text`, `offset must be an integer from 0 to 9007199254740991` or `limit must be an integer from 1 to 32000`.
+
+## Interrupting a turn
+
+`POST /api/v1/threads/{id}/messages` with `"mode": "interrupt"` is an atomic stop-and-send: in one transaction it stops the running turn exactly as `POST …/stop` does (`stop_requested` event, `error` `stopped by <by>`, its open questions expire with `answeredBy: "stop"`), cancels every queued turn (`turn_cancelled` event, `error` `cancelled by <by>`) and queues the new message as the next turn id, so turn ids still follow the order the turns run in. The answer is `201 {"turn": {...}, "interrupted": boolean, "cancelled": [turn ids]}`: `interrupted` is `true` only when a turn was running, `cancelled` lists the queued turns that were cancelled, and with nothing running or queued (`false`, `[]`) the message is queued as usual. `mode` `queue` (the default) answers `interrupted: false` and `cancelled: []` and appends the message after everything already queued. The `409`s of a plain message apply (`thread has 200 turns; start a new one`, `thread has failed; start a new one`), and when the message is refused nothing changes: the running turn is not stopped and no queued turn is cancelled. A message never reaches a running turn: `queue` runs after it and `interrupt` stops it. To say something to the agent while it works, send an [IRC message](#irc-messages).
+
+## IRC messages
+
+`POST /api/v1/threads/{id}/irc` delivers a message to the thread's agent the way omp agents message each other: into the turn that is running, without stopping or splitting it, or as a new turn when the agent is idle. The body is `{"from": "<sender>", "body": "<text>", "replyTo": "<message id>", "id": "<message id>"}`:
+
+- `from` is required, 1 to 64 characters of `[A-Za-z0-9._-]`: the sender's name as the agent sees it. `id` names the message, with the same characters and limit; the service makes `irc_<uuid>` when it is absent, `null` or `""`. `replyTo` (same pattern, optional or `null`) is the id of the message this one answers. A bad one is `400` `from must be 1 to 64 characters of letters, digits, '.', '_' and '-'` (`id`, `replyTo` likewise). `from` and `body` must be strings; only `id` and `replyTo` may be `null`.
+- `body` is 1 to 32768 bytes of text that is not only whitespace (`400` `body must be 1 to 32768 bytes`; a missing `body` counts as empty). The JSON body is limited to 36864 bytes (32768 plus 4 KiB): over the limit is `413` `request body is too large`, and a body that is not one JSON object or has a field of the wrong type is `400` `invalid JSON body`.
+
+The answer is `201 {"receipt", "id", "turn"}`. `id` is the message's id and `turn` the turn object (as in `POST …/messages`) or `null`. `receipt` says what became of the message:
+
+| `receipt` | When | What happened |
+|---|---|---|
+| `injected` | A turn is running and is not being stopped | The message is stored and an `irc_in` event lands on the running turn; the runner hands it to omp inside that turn and the agent reads it at its next step boundary. `turn` is `null` |
+| `woken` | Otherwise: the thread is idle, or has only queued turns, or its running turn is being stopped | The message becomes a new queued turn of `origin` `irc` (event `turn_queued` `queued by <from>`, then `irc_in` on that turn); `turn` is that turn |
+| `revived` | As `woken`, for an [archived](#archive) thread | As `woken`; the VM is restored as for any message |
+
+A message the runner has not handed to omp when the running turn ends becomes a queued `irc` turn of its own, in the order the messages arrived. One the thread has no room for (`200` turns) or cannot take (it failed) is dropped with a `notice` event `an IRC message from <from> was dropped: <reason>` (`the thread holds 200 turns` or `the thread has failed`), and a stop drops the messages still waiting with `<n> IRC message not delivered: the turn was stopped` (`messages` for several).
+
+**Retries.** The service keeps messages by `id`, per thread. A repeated `id` is not delivered again: the answer is the first one's (`injected` with `turn: null` while the message waits in a running turn's inbox, `woken` with the turn it created) and the body of the repeat is ignored. The check comes before the thread is looked at again, so a repeat still answers after the thread filled up or failed. A client that did not see the answer therefore repeats the POST with the same `id`. A repeat of a message whose first answer was `revived` answers `woken` with the same turn. The plugin repeats an ambiguous send (connection reset or refused, timeout, `429`, `5xx`) up to 4 POSTs in all, every one with the same `id`; a `4xx` is final and sent once; after the last attempt the error says the outcome is unknown, the message may have been delivered. `POST …/messages` has no such key: a repeated message queues a second turn.
+
+**Errors and access.** `400` as above, `401` and `404` (an unknown, deleted or another owner's thread) as for `POST …/messages`, `409` `thread has failed; start a new one` (not for a repeated `id`), `409` `thread has 200 turns; start a new one` when the message would need a turn and the thread holds 200 (an `injected` message needs none), `413` `request body is too large`. Authentication, owner scoping and device tokens are those of `POST …/messages`; a revoked device's request fails like any other.
+
+### The VM side of IRC
+
+Each VM's omp runs the VM extension the service ships with the thread: `~/.omp-cloud/irc-peer.ts` and the thread's `~/.omp-cloud/irc.json` are written when the VM is provisioned (and again when omp starts without them), and omp is started with `-e ~/.omp-cloud/irc-peer.ts`. The VM extension registers the thread's parent as an idle agent of omp's registry named `Parent` (a constant, because the VM's own agent is `Main`); the agent messages it with `write` to `agent://Parent`, and a message to any registered peer becomes an `irc` event. The sender of an incoming message becomes a peer the agent can write back to; a sender named like the VM's own agent is shown as `Parent`. Incoming messages come as the slash command `/irc-in <json>` (`{id, from, body, replyTo?}`): omp runs an extension command at once even while a turn streams, and the VM extension hands the message to omp's own incoming-IRC delivery, so the agent sees an ordinary IRC message. The runner sends it to a running turn as an RPC `prompt` after the turn's own prompt was acknowledged and without a streaming behaviour, so the turn is neither aborted nor split; an `irc` turn's prompt is the same command.
+
+When the runner finds the VM's omp without `/irc-in` (it asks `get_available_commands` when omp starts), messages reach the agent as plain text, `Message from agent <from> (reply to <id>):` and the body (an idle thread's turn prompt; `steer` for a running turn); the agent has no parent to write to, so no `irc` events appear, and one `notice` event says `the VM's omp has no IRC extension: messages from peers reach the agent as plain text and the agent cannot write to its parent`.
+
+## Inspecting a result
+
+Three routes read what a thread changed, without pulling the branch: they are computed with git from the thread's stored result bundle and its base (the handoff commit; the synthesized one for a [scratch thread](#scratch-threads)), and every answer is capped. `404` `no result yet` for `diff`, and for `tree` and `files` with `ref=head`, when no turn recorded a head; `ref=base` needs none. They work for the owner and for a device.
+
+- `GET /api/v1/threads/{id}/diff?turn=<n>&path=<p>&stat=1&context=<0-20>&maxBytes=<1-1048576>`: the change between the base and the newest recorded head, or, with `turn`, between the previous recorded head (the handoff commit for the first) and that turn's head (`404` `no turn <n>` or `turn <n> recorded no head`). `path` limits it to a file or directory, `context` is the unified-diff context (default 3), `maxBytes` the most diff returned (default 65536). Without `stat` the answer is `text/plain` unified diff, cut at `maxBytes` on a character boundary; headers `X-Omp-Base` and `X-Omp-Head` always, and `X-Omp-Truncated: <full length in bytes>` when it was cut. With `stat=1` (or `true`) it is JSON `{base, head, files: [{path, status: "A"|"M"|"D"|"R", insertions, deletions}], insertions, deletions, truncated}`: renames are detected, `files` lists at most 5000 files with `truncated: true` when more changed, and the totals count them all.
+- `GET /api/v1/threads/{id}/tree?ref=head|base&path=<dir>&recursive=1`: `{ref, commit, path, entries: [{path, type: "file" | "dir", size}], truncated}`. `ref` `head` (default) is the newest recorded head, `base` the handoff commit; at most 5000 entries, `truncated: true` when there are more. `entries[].path` is the full repository path and `size` is `0` for a directory. `404` `no such directory`.
+- `GET /api/v1/threads/{id}/files/<path…>?ref=head|base&offset=0&limit=65536`: `{path, ref, commit, size, binary, offset, text, next}`. `text` is a page of the file as UTF-8 (whole characters), `offset`, `next` and `size` count bytes of the file, `limit` is 1 to 1048576 (default 65536). A binary file answers `binary: true` and `text: ""`. `404` `no such file`; `400` `path is required` without a path.
+
+`path` is repository-relative, without a leading `/`; a trailing `/` is dropped, and an empty, `.` or `..` segment, a segment `.git` (any case), a control character or a path over 4096 bytes is `400`. `ref` other than `head` or `base` is `400` `ref must be head or base`; `stat` and `recursive` take `0`, `1`, `false` or `true` (`400` `<name> must be 1 or 0`). At most 2 inspections run at once, process-wide; one that finds no place within 30 seconds answers `503` `inspection busy; retry shortly` with `Retry-After: 5`, and a client that goes away leaves the queue. `404` `the stored result does not hold the base <sha>` or `…the head <sha>` (`diff`), `…hold head <sha>` or `…base <sha>` (`tree`, `files`) when the stored bundle lacks a commit it needs.
+
+## Version and capabilities
+
+`GET /api/v1/whoami` tells a client what this service build serves, so a client can refuse a feature the service lacks instead of reading empty data:
+
+- `service`: `{version, api}`. `version` is the service's version, the one a release build carries (`omp-cloud version` prints it), else the checkout's `package.json` `version`, and `api` an integer that rises when the contract gains something; this build reports `3`.
+- `capabilities`: exactly the features this build serves, among `threads.paging`, `threads.meta`, `threads.idempotency`, `threads.scratch`, `turns.reply`, `events.json`, `inspect`, `messages.interrupt`, `questions.meta`, `threads.irc` (the [IRC route](#irc-messages), the `origin` and `irc*` turn fields and the `irc` and `irc_in` events), `events.live` (the [live events](#live-events) `usage`, `tool_start` and `tool_end`) and `events.children` (the [child events](#child-events) `child_start`, `child_progress` and `child_end`).
+- `limits`: `{maxMessageBytes: 32768, maxAnswerBytes: 4000, maxUploadBytes, listMax: 200, maxTurns: 200}`, the constants the service enforces.
+- `spend`: `{todayUSD, dayCapUSD}`, the owner's cost for the current UTC day and `policy.spend.dayUSD` (`0` is no cap).
+- `models`: `[{id: "provider/id"}]`, what the cloud can run now (the gateway's models plus `models.direct`).
+- `update`: `{state, available}`. `state` is the [update state](#update-routes) and `available` the newer version a managed install has found while the state is not `idle` (it is being fetched, ready, being installed or failed), else `null`. Devices see it; only the owner token acts on it.
+- `defaultModel` is the model of a thread that names none; `modelPatterns` are `provider/*` for every provider the cloud can run right now (the gateway serves it, because the cloud broker holds a login for it, or the service routes it directly).
+- `maxUploadBytes` is the largest `source` part, 1 GiB (also in `limits`).
+- `ompVersion` is the omp version a thread that names none runs, the owner's omp on the service host: Tern's managed install when its `manager.json` names `tern`, else the first `omp` on the service's `PATH` (skipping `node_modules/.bin`).
+- `gitHosts` are the git hosts (`host` or `host:port`, sorted) the service holds a credential for, so a handoff from one of their remotes may ship only what the remote lacks ([delta mode](#creating-a-thread)).
+- `vms` counts the owner's VMs, `{running, paused}`; `threads` counts the owner's threads by phase, `{starting, working, waiting, idle, failed}`.
+- `device` is `{id, name}` when a [device](#devices-and-pairing) called and `null` for the owner token; `remote` is `{fingerprint}` when the service has a [remote listener](#listeners), else `null`.
+
+## Updates
+
+The service reads a release feed in the background, downloads and verifies a newer release, and installs it on one click, or by itself in `auto` mode when that needs no downtime. Only a [managed install](#the-managed-install) updates; a service run from a git checkout reports `unsupported` and is updated with `git pull`. Releases are GitHub Releases of `TechDufus/omp-cloud` (the default feed). A private repository or fork is read with a token ([`update.token`](#the-feed-and-its-token)); a public one is read anonymously. Each release pins the vibemon it was tested with ([vibemon](#vibemon)). The dashboard and the plugin show and apply updates through the routes below.
+
+**`auto`** installs a staged release by itself, checked once a minute, only when it is safe with no downtime: no thread is starting, working or waiting now and none has been for 10 minutes (a service that has just started counts as having been busy at its start), the installed vibemon is the tag `requires.vmon.version` names, and `requires.schema` equals the database's schema version. Otherwise the release stays `ready` for a click. It does not start while the state holds an `error`, so a failed update waits for the owner's click or for the next hourly check, which clears the error. The reasoning is in [Updating](updating.md#auto).
+
+### Health
+
+`GET /api/v1/health` needs no token and answers on the API listener and on the remote listener (after its source check): `200 {"status": "ok", "version": "<version>", "build": {"id", "commit", "createdAt"}, "schema": <n>}`. `version` and `build` are the running binary's: a release build's `id` is `<YYYYMMDDHHMMSS>-<7 characters of the commit>`, a checkout's `build` is `{"id": "dev", "commit": "", "createdAt": ""}`. `schema` is the number of database migrations the binary knows. The updater polls it after a restart to see which version answers; a monitor may too. Only `GET` is a route: another method takes the ordinary path (`401` without a token, `404` with one).
+
+### Update routes
+
+Owner token only: a device gets `403` `only the owner token can do this; it works on the server machine`, even for the `GET` (it reads `whoami.update`). The dashboard's owner session may call them.
+
+| Route | Answer |
+|---|---|
+| `GET /api/v1/update` | `200` with the status below |
+| `POST /api/v1/update/check` | `202 {}`: a check starts and the answer does not wait for it; a check that is running is shared. It works in every `update.mode`, `off` included, and does nothing on an install that cannot update |
+| `POST /api/v1/update/apply` | `202 {"applying": {"version": "<v>"}}`: the staged release is being installed ([Applying an update](#applying-an-update)). `409` `{"error": "<reason>"}`, a reason being `this omp-cloud runs from a git checkout; update it with git pull and restart it`, `omp-cloud <v> is already being installed`, `a check is running; try again in a moment`, `no update is ready`, `the staged omp-cloud <v> is missing or damaged; check for updates again` or `could not start the update: <why>` (the applier's unit would not start) |
+
+```json
+{"mode": "notify", "managed": true, "state": "ready",
+ "current": {"version": "<X.Y.Z>", "build": {"id": "<YYYYMMDDHHMMSS>-<sha7>", "commit": "<sha>", "createdAt": "<ISO time>"}},
+ "latest": {"version": "<X.Y.Z>", "notes": "<markdown>", "publishedAt": "<ISO time>"},
+ "staged": "<X.Y.Z>", "applying": null, "error": null, "message": null, "checkedAt": "<ISO time>",
+ "components": {"vmon": {"installed": "v<X.Y.Z>", "required": "v<X.Y.Z>", "helper": true},
+                "omp": {"host": "<X.Y.Z>", "broker": "<X.Y.Z>", "gateway": "<X.Y.Z>"}},
+ "last": null}
+```
+
+- `mode` is the [`update.mode`](#settings) setting; `managed` says whether this process runs from a [managed install](#the-managed-install).
+- `state` is the first that applies, in this order:
+
+  | State | Meaning |
+  |---|---|
+  | `unsupported` | The install is not managed (a checkout): `message` says `this omp-cloud runs from a git checkout; update it with git pull and restart it` |
+  | `applying` | An apply is running: `applying` names its step |
+  | `checking` | This process is reading the feed |
+  | `downloading` | It is downloading and verifying a newer release |
+  | `failed` | `error` says why the last check, download or apply failed. A release that is still staged can be applied again |
+  | `ready` | A release newer than the running one is downloaded, verified and staged (`staged`) |
+  | `idle` | Nothing to do |
+
+- `current` is the running binary's `version` and `build` (`{id, commit, createdAt}`). `latest` is the newest release the last check saw, `null` before the first check or when the feed has none: `{version, notes, publishedAt}`, `notes` being markdown and `publishedAt` GitHub's `published_at` (a static feed's `build.createdAt`). `staged` is the version downloaded and verified under `versions/`, else `null`; `checkedAt` is the ISO time the feed was last read, else `null`.
+- `applying` is `null`, or `{version, step, startedAt}` with `step` one of `starting`, `backup`, `vmon`, `omp`, `swap`, `health` or `rollback` (`omp` never appears when [`update.ompUnits`](#settings) is `[]`). An apply record 15 minutes old or older counts as dead: the next status read, check or apply turns it into `failed` with `error` `the update to <v> did not finish (its step was <step>)`.
+- `error` is `null` for an install that cannot update. `message` is `null` for an install that can.
+- `components` is what an update touches. `vmon.installed` is the installed vibemon tag (`/opt/vmon/vmon --version`) or `null`; `vmon.required` is the tag the latest release requires, else this build's pin; `vmon.helper` says whether the [root helper](#vibemon) is usable. `omp.host` is the omp the service runs with (the host's); `omp.broker` and `omp.gateway` are the versions of the omp that the `omp-auth-broker` and `omp-auth-gateway` user units run, `null` when a unit is not running or the version is unknown. They are looked up at most once a minute, for that fixed pair whatever [`update.ompUnits`](#settings) holds.
+- `last` is `null` or what the last apply came to: `{version, notes, at, result: "installed" | "failed", message}`. The dashboard shows `Updated to <v>` from it. It is kept until the next apply starts.
+
+### The feed and its token
+
+`update.feed` is one of:
+
+- `github:<owner>/<repo>` (default `github:TechDufus/omp-cloud`): the latest GitHub release of the repository (GitHub's `latest` skips prereleases and drafts). The service calls `GET https://api.github.com/repos/<owner>/<repo>/releases/latest`, finds the assets by name and downloads each with `GET …/releases/assets/<id>` and `Accept: application/octet-stream`, following at most 5 redirects itself. The release tag without its leading `v` must equal `release.json`'s `version` (`release tag <tag> does not match the version <v> in its release.json`).
+- An `http(s)://` base URL (self-hosting, tests): a static feed. A `/` is added to the base when it lacks one, and it may carry no credentials, query or fragment. The service reads `<base>release.json`, then `<base><asset>` for each file `release.json` lists, with `<base><asset>.sha256`, and `<base>notes.md`. `publishedAt` is `build.createdAt`.
+
+No release is not an error: a feed with none (`no release of <owner>/<repo> is visible (none is published, or it is a private repository or fork and update.token is not set)`, `no release of <owner>/<repo> is visible to update.token`, `no release.json at <base>`, or a `404` on a release binary) leaves the state `idle` and `latest` `null`; a `404` on only a `.sha256` sidecar is tolerated. Anything else (`GitHub refused the request (401|403): check update.token`, `GitHub answered <status>`, `the feed at <origin> cannot be reached: <reason>`, `the feed redirected more than 5 times`, `the feed answered more than <n> bytes where a small document is expected`, a `release.json` that fails the checks below) is the state's `error`. Answers are limited to 2 MiB, a request to 30 s, a download to 20 minutes.
+
+A release is the assets `release.json`, `omp-cloud-linux-x86_64`, `omp-cloud-linux-arm64`, a `<binary>.sha256` sidecar for each binary (`sha256sum` format, `<hex>  <name>`) and `notes.md` (the release's `CHANGELOG.md` section); it also carries `THIRD-PARTY-NOTICES.txt` (with a `.sha256` sidecar) and `install.sh`, which the updater ignores. `release.json` is strict: a missing or mistyped field is an error naming it, unknown keys are ignored.
+
+```json
+{
+  "product": "omp-cloud",
+  "version": "<X.Y.Z>",
+  "build": {"id": "<YYYYMMDDHHMMSS>-<sha7>", "commit": "<sha>", "createdAt": "<ISO time>"},
+  "notes": "<markdown, may be empty>",
+  "files": [{"name": "omp-cloud-linux-x86_64", "platform": "linux", "arch": "x86_64", "size": 198000000, "sha256": "<64 hex digits>"},
+            {"name": "omp-cloud-linux-arm64", "platform": "linux", "arch": "arm64", "size": 151000000, "sha256": "<64 hex digits>"}],
+  "plugin": {"version": "<X.Y.Z>"},
+  "requires": {"vmon": {"version": "v<X.Y.Z>"}, "omp": {"min": "<X.Y.Z>"}, "schema": <n>}
+}
+```
+
+`version`, `plugin.version` and `requires.omp.min` are `X.Y.Z` or `X.Y.Z-pre`, without a leading `v`; `notes` is at most 200000 characters; `files` is not empty, each `name` a plain file name, `platform` `linux`, `arch` `x86_64` or `arm64`, `size` a positive integer, `sha256` 64 lowercase hex digits, and at most one file per architecture (`release.json: two files for linux/<arch>`); `requires.vmon.version` is a tag like `v0.4.0`; `requires.schema` a positive integer. A release build fills `requires` from the repository: `infra/vmon.json`, the omp the repository pins (`@oh-my-pi/pi-coding-agent`) and the number of database migrations.
+
+**Staging.** For a release newer than the running version the service downloads this machine's file (`omp-cloud-linux-<arch>`), checks its size and SHA-256 against `release.json` and against the sidecar when the release has one, makes it executable and runs `<file> version`, which must print `omp-cloud <version>` (optionally followed by a space and the build id). Only then is it moved to `<app>/versions/<version>/omp-cloud`; a failed download leaves nothing there. The messages: `the download is <n> bytes, the release says <m>`, `the download is longer than the <n> bytes the release declares`, `the download does not match the SHA-256 in release.json`, `the download does not match its <file>.sha256`, `the downloaded omp-cloud does not run (<file> version exited <code>)`, `the downloaded omp-cloud says "<output>", not "omp-cloud <version>"`, `release <version> has no omp-cloud-linux-<arch>`. A staged file that already has the right size and digest is not fetched again.
+
+**When it checks.** With `update.mode` `notify` or `auto` the service checks about a minute after it starts and then every hour, on a managed install only; `off` never checks by itself. A failed check keeps an already staged release applicable.
+
+**`update.token`** is how the feed is read for a private repository or fork. Its value is resolved as a git host's credential is: `!<command>` runs the command and uses its output (the service logs the program once, `update.token runs <program>`, never the output); an upper-case name (`[A-Z_][A-Z0-9_]*`) names an environment variable of the service, whose value is used when it is set and not blank; anything else, an unset name included, is the token itself. Empty reads the feed anonymously, as a public repository allows. The token goes to the feed's own origin as `Authorization: Bearer <token>` and never to the place a redirect points (a release asset redirects to a signed storage URL).
+
+A token typed in as a literal is a secret and is shown as `(set)`: in `GET /api/v1/settings` (`value`; its default is shown as `""`), in the [audit](#settings) (`old`, `new`; a row stores `(set)` instead of the token) and nowhere in the YAML export, which leaves such a key out (it would import back as `(set)`); an import audits no literal either. The stored value stays in the database for the service to use. A `!command` and an environment variable's name are references, not secrets, and show as they are, so prefer them.
+
+### The managed install
+
+The updater needs an install of its own in the app directory (`OMP_CLOUD_APP_DIR`, default `~/.local/share/omp-cloud/app`):
+
+```text
+<app>/manager.json                 {"manager":"omp-cloud","name":"omp-cloud"}
+<app>/versions/<version>/omp-cloud the executables (0755): the current version, at most two older ones, and a staged newer one
+<app>/bin/omp-cloud                a relative symlink to ../versions/<version>/omp-cloud: what the service unit and the shell run
+<app>/state.json                   the updater's state, written atomically under <app>/state.lock
+```
+
+A process is **managed** when its executable's real path (symlinks resolved) is inside `<app>/versions/<version>/`; otherwise it runs from a checkout and updates are `unsupported`. `omp-cloud setup` makes an install managed ([the command](#the-omp-cloud-command)): it copies the release binary it runs into `<app>/versions/<version>/` and links `<app>/bin/omp-cloud`, which the `omp-cloud` user unit runs. `omp-cloud setup --checkout` (`mise run infra:up`) runs the unit from the checkout instead, so a checkout is never managed. `omp-cloud install` turns the binary it runs into a managed install by hand.
+
+`state.json` is `{version: 1, checked, latest: {manifest, publishedAt}, staged, applying: {version, step, startedAt, from, backup}, error, installed, previous, last}`: the service, the applier and the CLI all read it, and a damaged file falls back to empty values instead of blocking an update.
+
+### Applying an update
+
+Apply runs outside the service, which it restarts: the service starts `systemd-run --user --unit=omp-cloud-update --collect --setenv=NAME=VALUE… <app>/versions/<v>/omp-cloud update apply-staged --version <v> --config <service.json>` (the new binary, one apply at a time). The applier gets the whole `Environment` of the service unit (`update.unit`) plus `OMP_CLOUD_APP_DIR`, each as a `--setenv`, and nothing from the service's own process environment; a unit that is not loaded gives it the app directory only. Each step is recorded in `state.json`, so `GET /api/v1/update` shows `applying.step`:
+
+| `step` | What happens |
+|---|---|
+| `starting` | The apply is recorded. Before anything changes the applier refuses what cannot work (below) |
+| `backup` | Only when the release's `requires.schema` is above the database's: the archive `omp-cloud backup` makes (newest 7 kept) |
+| `vmon` | Only when the installed vibemon is not `requires.vmon.version`: the [root helper](#vibemon) installs it. Without the helper and its sudo rule it stops before anything changed |
+| `omp` | Checks the units of [`update.ompUnits`](#settings) (default `omp-auth-broker` and `omp-auth-gateway`) and restarts each one whose running omp differs from the host's; a unit whose omp cannot be read is left alone. An empty list skips the step: no unit is queried or restarted and the step is not recorded |
+| `swap` | Points `bin/omp-cloud` at the new version (a temporary link renamed over the old one) and restarts the service unit |
+| `health` | Polls `GET /api/v1/health` on the API listener's address (`listen`) every second until it reports the new `version`, for at most 60 s |
+| `rollback` | A failure after `swap`: points `bin/omp-cloud` back and restarts, then waits up to 60 s for the old version's health. When the `backup` step ran, the service is stopped and the database restored from that archive first (threads created since lose their rows; their files are swept as orphans at the next start) |
+
+Success is the message `updated to <v>`: `staged` is cleared, `installed` and `previous` recorded, and old versions pruned (current, the two newest older ones, and any newer). The new binary then refreshes the omp plugin from its own bundle (not an `applying.step`). A failure of the pruning or the refresh neither fails nor rolls back the update: it is appended to the message as `(pruning old versions failed: <why>)` or `(the omp plugin was not refreshed: <why>; run omp-cloud setup to retry)`. A failure before `swap` leaves the omp-cloud install as it was (a vibemon that was already moved stays moved); one after it is rolled back. Either way the state is `failed` with `error` the reason, `last.result` `failed`, and the release stays staged for a retry. The reasons:
+
+- Before `swap`: `omp-cloud <v> is not staged; check for updates first`, `cannot tell which omp-cloud version is installed (bin/omp-cloud is not a managed link)`, `omp-cloud <v> is not newer than <old>`, `the staged omp-cloud <v> is missing; check for updates again`, `vibemon <tag> is needed (<installed or none> is installed) and the root helper is not installed: run omp-cloud setup once`, `omp <min> or newer is needed, this host has <host>`, `the backup before the schema change failed: <why>`, `installing vibemon <tag> failed: <why>`, `restarting <unit> onto omp <host> failed: <why>`.
+- After `swap`: `switching to <v> failed: <why>` or `the service did not report <v> within 60 s (<what it answered>)`, followed by `; rolled back to <old>`. A rollback that goes wrong says so: `rolled back to <old>, which did not come up: <why>`, `rolled back to <old>, but restoring the database from <archive> failed: <why>` or `rolling back to <old> failed: <why>`.
+
+The restart is the one thing a client sees: the service is unreachable for a moment while it restarts, and dashboard sign-ins are carried over ([below](#dashboard-sessions-and-an-update-restart)).
+
+### vibemon
+
+The version of vibemon (`vmon`) is pinned per release (`infra/vmon.json`, `requires.vmon.version`) and moved only through a root helper that `omp-cloud setup` installs; why, how it is installed and what a vibemon change costs a running turn are in [Updating](updating.md#vibemon-is-pinned). The contract of the helper, `/usr/local/libexec/omp-cloud/vmon-install`:
+
+- It takes one argument, a tag matching `^v[0-9]+\.[0-9]+\.[0-9]+$` (anything else exits `2` before a download). A tag older than the installed vibemon is refused before any download (`refusing to downgrade: vmon v<installed> is installed and <tag> is older`; the comparison is numeric, so `v0.10.0` is newer than `v0.9.0`); any newer release installs, there is no maximum, and the tag that is already installed is a no-op. It never takes a file, URL or checksum from its caller. It installs `x86_64` only; one install runs at a time.
+- The last line of its stdout is JSON: `{"ok": true, "version": "<tag>"}` or `{"ok": false, "error": "<why>"}`; the exit status is `0`, `1` or `2` (a bad invocation).
+- `components.vmon.helper` is `true` when the helper file exists and `sudo -n -l <helper>` allows it. The service runs it as `sudo -n <helper> <tag>` with a 5 minute limit.
+
+### The omp-cloud command
+
+`omp-cloud` is one executable (`src/bin.ts`; a release build compiles it, and a checkout runs the same entries with `bun run`). `serve` needs an omp on the host (a Tern install, else `omp` on `PATH`), and the release binary carries the native addon of omp's SDK (`~/.omp/natives/<version>/` is filled on first start). The commands that are part of the contract:
+
+```text
+omp-cloud <version> (<build id>)
+
+usage: omp-cloud [command] [options]
+
+  setup [--yes] [--no-login] [--no-plugin] [--no-linger] [--no-wait] [--team <slug>] [--max-sandboxes <n>]
+        [--migrate-team] [--checkout] [--json]
+                                         set up this host: vibemon, the services, the plugin and the model login (asks for sudo once)
+  doctor [--json]                        check the host and the stack, with a fix beside each failure
+  login [<provider>]                     log the service in to a model provider
+  uninstall [--purge] [--yes] [--checkout]
+                                         remove what setup installed (--purge also deletes data and vibemon); backups are kept
+  serve [--config <path>]                run the service (the default with no command)
+  ssh-pair --name <n> --platform <p> [--config <path>]
+                                         pair a device over ssh (prints one JSON line; used by /cloud connect user@host)
+  update                                 check for a new release and download it
+  update apply                           install the downloaded release and restart the service
+  install [--from <binary>] [--config <path>]
+                                         turn this install into a managed one (updates itself in place)
+  backup [--keep N] [--config <path>]    one archive of the database, blobs and git cache
+  version                                print the version and build id
+  --help                                 this text
+
+Config: --config <path>, else $OMP_CLOUD_CONFIG, else ~/.config/omp-cloud/service.json.
+```
+
+- `version` prints `omp-cloud <version> (<build id>)`; `--help`, `-h` and `help` print the help on stdout and exit `0`. An unknown command exits `2` with the help on stderr. `omp-cloud --config <path>` serves.
+- `setup`, `doctor`, `login` and `uninstall` are the host's install lifecycle, described in [Install](install.md). `setup` and `uninstall` run as the owner's user and refuse root; each asks for sudo once for its root part (`sudo -- <binary> setup system …`), and a second `setup` run reports what is already right. `doctor` exits `1` when any check fails; `uninstall` keeps backups.
+- `ssh-pair` is [SSH pairing](#ssh-pairing-omp-cloud-ssh-pair); its output is a contract.
+- `update [--config <path>]` checks the feed, downloads and verifies a newer release and prints `omp-cloud <v> (<build id>)`, `state:`, and the latest, staged, applying, error, checked and last lines that apply; the exit status is `1` when the state is `failed`. On an install that cannot update it prints the `unsupported` message and exits `1`. `update`, `update apply` and `update apply-staged` take only `--config <path>` (`apply-staged` also `--version`): a bad argument prints the usage and exits `2`, and `update --help` prints it and exits `0`.
+- `update apply [--config <path>]` installs the staged release. It checks first when the state is not `ready`, and prints the status and `no update is ready` (or `no update is staged`), exit `1`, when there is nothing to install. It asks the running service with `POST /api/v1/update/apply`, using the owner token from `OMP_CLOUD_TOKEN`, else `service.token` beside the config, and prints `the service is installing omp-cloud <v>; run omp-cloud update to follow it`; a `409` is printed and exits `1`. When the service cannot be asked (not running, no token, not the owner token) it prints `the service could not be asked (no owner token or not running): installing omp-cloud <v> from here` and applies the release itself, the same steps; the exit status is `0` or `1`. `update apply-staged --version <v> --config <path>` is the applier the service starts; it is not for hand use.
+- `install [--from <binary>] [--config <path>]` turns the current install into a managed one: it runs the binary's `version` (which must print `omp-cloud <version>`), copies it to `<app>/versions/<version>/omp-cloud`, writes `manager.json`, points `<app>/bin/omp-cloud` at it, links `~/.local/bin/omp-cloud` to `<app>/bin/omp-cloud` and points the service unit (`update.unit`) at `<app>/bin/omp-cloud serve --config <path>`: a persistent unit through a drop-in, `$XDG_CONFIG_HOME/systemd/user/<unit>.service.d/managed.conf` (`~/.config/systemd/user/…` when it is unset; reset `ExecStart=`, then the managed one, `WorkingDirectory=<app>`), then a daemon reload and a restart when it runs; a transient unit is stopped and started again on the managed binary with its whole `Environment` and `OMP_CLOUD_APP_DIR`. It prints one line for each thing it changed and a second run changes nothing; an error is `omp-cloud: <message>` with exit `1`. Without `--from` it installs the binary it runs from, and refuses a `bun` (`run omp-cloud install from a release binary, or pass --from <binary>`).
+- `backup [--keep N] [--config <path>]` writes one archive of the database (a consistent online copy), the blobs and the git cache to `<dataDir>/../backups/omp-cloud-<UTC timestamp>.tar.gz` (the directory `0700`, the archive `0600`), keeping the newest `N` (default 7; `--keep needs a positive integer` otherwise). It prints `<path> (<bytes> bytes)` and `removed <path>` for each pruned archive, and exits `1` on an error, `no database at <path>` included. `mise run backup` is the same code.
+
+### Dashboard sessions and an update restart
+
+Dashboard sessions are in memory, so the restart an update needs would sign every browser out. When the service shuts down while an apply is running and has reached `swap` or `rollback`, it writes its live sessions to `<dataDir>/dashboard-sessions.handoff` (0600, written atomically): `{version: 1, writtenAt, sessions: [{hash, createdAt, lastSeen}]}`, the SHA-256 of each session id with its times in epoch milliseconds, never a cookie. The next process takes them over at start when the file is less than 2 minutes old and deletes it either way; a damaged, oversized or future-dated file is ignored. Any other restart writes nothing and signs everyone out.
+
+## Creating a thread
+
+`POST /api/v1/threads` takes `multipart/form-data`, read in part order:
+
+| Part | Content | Limit |
+|---|---|---|
+| `request` (first) | JSON, below | 2 MiB |
+| `source` | git bundle: `refs/omp-cloud/handoff`; in delta mode thin, with the prerequisite `^<baseCommit>` | 1 GiB |
+| `conversation` | `omp session pack` archive of the conversation to continue | 64 MiB |
+| `setup` | tar.gz extracted into `~/.omp/agent` in the VM | 64 MiB |
+
+```json
+{
+  "prompt": "...", "name": "Fix login redirect", "model": "provider/id", "thinking": "high",
+  "repo": {"name": "app", "remoteURL": "https://github.com/acme/app.git", "baseRef": "main",
+           "baseCommit": "<sha>", "handoffCommit": "<sha>", "localBranch": "main"},
+  "paths": {"home": "/home/ada", "workspace": "/home/ada/src/app"},
+  "author": {"name": "Ada", "email": "ada@example.com"},
+  "secretFiles": [{"path": ".env", "content": "<base64>"}],
+  "secretEnv": {"API_KEY": "..."},
+  "configOverlays": ["overlays/work.yml"],
+  "ompVersion": "18.12.3",
+  "policy": {"egress": ["api.github.com"], "fetch": false, "spend.turnUSD": 0.5}
+}
+```
+
+Unknown fields are ignored. An empty `baseCommit` is a full-history upload and needs `source` (`400` `a full-history handoff needs the source part`). With `baseCommit` set (delta mode) the bundle holds only what the remote lacks and the service fetches the base itself: it needs a credential for the remote's host, a `baseRef` and `source`, which may be left out when `handoffCommit` equals `baseCommit` (`400` `the source part is required when the handoff has commits beyond the base`). In delta mode the service reads `remoteURL` as git does: an `ssh://` or scp-style (`host:owner/repo.git`) remote of a configured host becomes `https://host/owner/repo.git`, and that normalized URL is what the thread stores and the VM's `origin` shows; a full-history thread stores the remote as sent, minus credentials. It fetches `refs/heads/<baseRef>` (then the bare `baseCommit`) into its git cache, checks the bundle against it and, when the VM is created, uploads the whole history it composes from the cache and the bundle. The result bundle stays thin: it excludes `^<baseCommit>`, so the owner's repository (which has the base) can fetch it. Credentials in `remoteURL` (URL userinfo, scp-style `user@`) are dropped before it is stored; the service's own credentials never leave it: git reads them from a private file for one call, and they are not in the VM.
+
+`remoteURL` is at most 2048 bytes without control characters (`400` `repo.remoteURL is not a valid git URL` when it does not parse, or has an empty host without being a `file:` URL). A `file:` URL (`file:///srv/app.git`) has no host and no credentials and is stored as sent; it is never on a configured git host, so a delta handoff over it is refused and a push of such a thread records `pushError` `the service has no git credentials for <remote>`.
+
+| Check | Failure |
+|---|---|
+| `prompt` is 1 to 32768 bytes of UTF-8; `repo.name` is set; `handoffCommit` (and `baseCommit` when set) is 40 or 64 lowercase hex characters (a scratch thread has none); `repo.name`, `baseRef`, `localBranch`, `author.*` and `model` are at most 512 bytes without control characters; `model` is empty or `<provider>/<id>`, optionally with a `:<thinking>` suffix; `paths.home` and `paths.workspace` are empty or absolute in the client's own form (POSIX `/home/ada`, Windows drive `C:\Users\ada` or `C:/Users/ada`, UNC `\\server\share\ada`), at most 512 bytes without control characters; `thinking` is empty or one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; `configOverlays` holds at most 8 relative paths of at most 512 characters (segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`); `ompVersion` is empty or `<major>.<minor>.<patch>`; a text field that is not a string | `400` naming the field: `prompt must be 1 to 32768 bytes of UTF-8`, `repo.name is required`, `thinking must be one of off, minimal, low, medium, high, xhigh, max`, `ompVersion must be empty or <major>.<minor>.<patch>`, `model must be empty or <provider>/<id>, optionally with a :<thinking> suffix`, `<field> must be a string` |
+| `name` (optional) is a string of one line (no control characters) with at most 60 code points once trimmed and whitespace-collapsed | `400` `name must be one line of at most 60 characters` |
+| `policy` is an object of the keys `bash.patterns`, `tools.approval`, `fetch`, `webSearch`, `browser`, `egress`, `spend.turnUSD`, `spend.threadUSD`, `spend.dayUSD`, `models.allowed`, each with the value its setting `policy.<key>` takes (`policy` absent or `null` is none; a `null` key is refused like any invalid value) | `400` `unknown policy key <key>`, `policy must be an object`, or the setting's message |
+| `policy.egress` of the thread names a destination outside a non-empty service `policy.egress` | `400` `policy.egress of a thread may only narrow the service's list` |
+| The model is outside the service's or the thread's non-empty `models.allowed` | `409` `the cloud policy does not allow <model>` (the model as requested, or `defaultModel`) |
+| `model`'s provider matches none of `modelPatterns` | `409` `the cloud cannot run <provider> models; log the cloud broker in with /cloud login <provider>` |
+| Delta mode: `remoteURL` and `baseRef`, and, unless nothing changed, `source` | `400` `a delta handoff (repo.baseCommit) needs repo.remoteURL` or `… needs repo.baseRef` |
+| Delta mode: the service holds no credential for the remote's host (`service.json` `git.hosts`; see `whoami.gitHosts`) | `400` `the service has no git credentials for <host>; hand off the whole repository instead` |
+| Delta mode: the service cannot fetch `baseCommit` from the remote (the branch is gone and the commit is not reachable by id, or the fetch failed), or `baseRef` is not a branch name | `409` `the base commit <sha> is not on <remote>` (`<remote>` is the normalized https URL), followed by git's scrubbed reason in parentheses unless the branch is simply missing, or `repo.baseRef "<ref>" is not a branch name`; nothing is stored |
+| Delta mode: `source` is not a bundle that applies on `baseCommit`, its `refs/omp-cloud/handoff` is not `handoffCommit`, or `handoffCommit` does not descend from `baseCommit` | `400` `the source bundle does not apply on the base commit: <reason>`, `the source bundle is unusable: <reason>`, `the uploaded source is at <sha>, not the handoff commit <sha>` or `the handoff commit does not descend from the base commit` |
+| `secretFiles`: at most 32, relative, clean (`/` separators: a path with a backslash is refused, the VM is Linux), not under `.git`, unique, base64; `secretEnv`: at most 64, valid names that are not reserved (`HOME`, `PATH`, `OMP_*`, `MISE_*`); file contents, names and values together at most 1 MiB | `400` |
+| The body is `multipart/form-data` whose first part is `request`; no part is unknown, repeated, empty (`conversation`) or malformed | `400` `expected a multipart/form-data body`, `the first part must be "request"`, `the request part is not valid JSON`, `the request must be a JSON object`, `the upload ended early or is malformed`, `part "<name>" is repeated`, `unknown part "<name>"` or `the conversation part is empty` |
+| `Content-Length` over the sum of the part limits plus 1 MiB, or a part over its limit | `413` `upload is too large`, `part "<name>" is too large` or `the request part is too large` |
+| Free space on the data volume is at least twice the `Content-Length` (twice the maximum body without one) | `507` `insufficient storage on the service data volume` |
+
+An empty `model` runs `defaultModel`; a model the cloud cannot run fails the request instead of running something else. `configOverlays` name files inside the `setup` tarball, relative to `~/.omp/agent`: omp in the VM loads them in that order with `--config`, before the service's own settings, so the thread runs with the overlays of the session that handed it off; one that is missing from the setup fails the thread. `ompVersion` picks the omp version the VM runs (empty means `whoami.ompVersion`); the first thread on a version the service has not used yet waits for its VM template to build, and `vm` events say so (`building the omp <version> VM template`). `paths` are recorded as sent: the VM always works in `/home/user/work`, and restoring the conversation tells the model where its earlier paths moved.
+
+The optional `name` is a short human label for the thread (the plugin sends 2 to 6 words describing the purpose, so threads are easy to tell apart in a list). It is trimmed and its runs of whitespace collapsed to single spaces, it may hold no control characters and at most 60 code points remain after that. Absent, `null` and empty mean no name, stored as `""`; anything else invalid (a longer text, a line break, a value that is not a string) is a `400` `name must be one line of at most 60 characters`. The name is for display only: the id stays the thread's identity and `title` still comes from the prompt.
+
+The optional `policy` object tightens the [agent policy](#agent-policy) for this thread only: flat keys that mirror the `policy.*` settings without the prefix. An unknown key is a `400` `unknown policy key <key>`, an invalid value a `400` naming the setting (`policy.fetch must be true or false`), and a `policy` that is not an object a `400` `policy must be an object`. Absent, `null` and `{}` ask for nothing. The value is stored as validated (an `egress` list is lowercased) and served in the thread detail. A thread can only tighten the service's policy (the rules are under [agent policy](#agent-policy)).
+
+`origin`, `ref` and `session` are optional metadata: `origin` is `"tool"` or `"user"` (`400` `origin must be "tool" or "user"`), `ref` is 1 to 64 characters of letters, digits, `.`, `_` and `-` (`400` `ref must be 1 to 64 characters of letters, digits, . _ or -`) and `session` the omp session id, at most 128 characters without control characters (`400` `session must be at most 128 characters without control characters`). A non-string value is `400` `<field> must be a string`; `null` and `""` mean absent. They are stored on the thread and served in its summary.
+
+The thread gets a random 12-character id (`[a-z0-9]`) and becomes visible only once every part is stored: the response is `201` with its summary (phase `starting`, one queued turn) and `warnings` (always `[]`). Any failure stores nothing; a create from a device revoked meanwhile is `401`. The files live under the service's data directory as `threads/<id>/{source.bundle,session.tar,setup.tar.gz,secrets.json}`; `secrets.json` holds the shipped secret files and variables and is never served. The runner adds `result.bundle` and `session-export.tar` (the newest export, never uploaded). A delta thread's refs also live in the service's git cache (`git/cache/<sha256 of the normalized remote URL>.git`, a bare repository shared by the threads of one remote); deleting the thread removes its refs.
+
+### Idempotent create
+
+`POST /api/v1/threads` accepts `Idempotency-Key: <[A-Za-z0-9._:-]{1,128}>` (`400` `Idempotency-Key must be 1 to 128 characters of letters, digits, . _ : or -`, before the body is read). The first request with a key creates the thread as above (`201`) and the service stores the key with the SHA-256 of the request's `prompt`, exactly as received. A later request by the same owner with the same key and prompt, while that thread is not deleted, answers `200` with the existing thread's summary plus `"replayed": true` and creates nothing. Only the `request` part is read: a replay must still be a `multipart/form-data` body whose first part is `request` (anything else is the usual `400`), and a `request` without a string `prompt` is `400` `prompt must be a string`. The same key with a different prompt answers `409` `{"error": "Idempotency-Key <key> was used for a different request (thread <id>)"}` and creates nothing. A request that arrives while the first one with the same key is still being created answers `409` `a request with this Idempotency-Key is still in progress`; the client retries. A create that fails frees its key, and deleting the thread frees it too (for any prompt). A client that cannot tell whether its create arrived therefore repeats it with the same key and request and gets the one thread.
+
+### Scratch threads
+
+A thread that works on nothing of the caller's: send `"repo": {"scratch": true}` (optionally `"name"`, default `scratch`) and no `source` part. The service builds the base itself, an empty repository with one empty commit (committed as `omp-cloud <omp-cloud@localhost>`) as `refs/omp-cloud/handoff`, and stores an ordinary full-history thread, so the VM workspace, turns, the result bundle, [inspection](#inspecting-a-result) and the conversation work as for a repository thread. `repo.remoteURL`, `baseRef`, `baseCommit` and `handoffCommit` must be absent (`400` `a scratch repo takes no remoteURL, baseRef, baseCommit or handoffCommit`), a `source` part is `400` `a scratch thread takes no source part`, and a non-boolean `repo.scratch` `400` `repo.scratch must be a boolean`. The thread has no remote, so it never pushes. Its summary has `scratch: true`.
+
+## Logins
+
+`/cloud login <provider>` gives the cloud broker its own login to a provider; it never copies a login from the owner's machine. The OAuth flow runs on the service host against the broker's credential store, so the refresh token is created there and never leaves it.
+
+A login is `{id, provider, state, url, instructions, userCode, account, error}`. `state` is `waiting`, `done` or `failed`. `POST /api/v1/logins` answers once the provider offers a sign-in (within 30 s, else the login is `failed` with `the provider did not offer a sign-in in time`). Open `url` in a browser and follow `instructions`. A provider that redirects to `http://localhost:<port>/…` leaves the browser on a page that does not load: send that page's URL, or the code it shows, as `input` (the answer waits up to 20 s for its effect). A device-code provider shows `userCode` to enter at `url` and needs no input. `account` names the signed-in identity once `state` is `done` (`""` before); `error` says why it failed: `cancelled` after a `DELETE`, `cancelled by a newer login` when starting a new login for the provider replaced it, `login timed out` when it was not finished within 5 minutes. Finished logins stay readable for 10 minutes. `400` `invalid JSON body`, `provider is required`, `input is required` or `unknown provider "<p>"`; `404` `not found` for an unknown login; `413` `request body is too large` over 8 KiB.
+
+## Settings
+
+Settings are the service's run-time knobs, kept in the service database and changed through the API; `service.json` stays bootstrap only. Every registered key has a type, a default and a validator. A setting is `{key, type, value, default, source, doc, choices, updatedAt, updatedBy}`: `type` is `enum`, `string`, `string[]`, `number`, `bool` or `json` (the table shows an enum's values, `list of strings` for `string[]` and `json:` with the shape for `json`), `source` is `default` or `stored`, `choices` lists an enum's values (`[]` otherwise), and `updatedAt` and `updatedBy` are `""` at the default. Setting a key to its default value resets it, so `stored` always means different from the default.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `git.push` | `never`, `ask`, `auto` | `never` | Whether a thread's result branch is pushed to its remote: never, after the owner approves, or automatically |
+| `git.branch` | string | `omp-cloud/{thread}` | The pushed branch's name. `{thread}` stands for the thread id and must appear; no other `{…}` is allowed; the result must be a valid branch name (the rules of `git check-ref-format --branch`) |
+| `git.protected` | list of strings | `["main", "master", "develop", "release/*"]` | Branches a push never writes to, as globs where `*` matches any run of characters, `/` included; at most 100 patterns, each non-empty without whitespace or control characters |
+| `policy.bash.patterns` | json: list of `{match, approval}` | `[]` | Rules over the agent's bash commands: `match` is a glob (1 to 500 characters without control characters, `*` any run) tried on the whole command and on each shell segment of it, and `approval` is `allow`, `deny` or `prompt`; at most 100; [Agent policy](#agent-policy) |
+| `policy.tools.approval` | json: mapping of tool name to `allow`, `deny` or `prompt` | `{}` | What the agent does when it calls the tool; tool names match `^[a-z][a-z0-9_]{0,63}$`; at most 100 tools |
+| `policy.fetch` | bool | `true` | `false` turns off the agent's URL reads and fetch tool |
+| `policy.webSearch` | bool | `true` | `false` removes the agent's web search tool |
+| `policy.browser` | bool | `true` | `false` turns off the agent's browser |
+| `policy.egress` | list of strings | `[]` | The destinations a new VM may reach besides the gateway: IPv4 addresses or CIDRs, or domains optionally prefixed `*.` (lowercased; at most 100); empty is unrestricted |
+| `policy.spend.turnUSD` | number | `0` | The most one turn may cost, in USD (0 to 1000000); `0` is no cap |
+| `policy.spend.threadUSD` | number | `0` | The most all of a thread's turns may cost, in USD (0 to 1000000); `0` is no cap |
+| `policy.spend.dayUSD` | number | `0` | The most the owner's turns may cost since 00:00 UTC, in USD (0 to 1000000); `0` is no cap |
+| `policy.models.allowed` | list of strings | `[]` | `provider/*` or `provider/id` patterns of the models a thread may use (`*` only as the whole id); empty allows any |
+| `lifecycle.archiveAfterDays` | number | `7` | Days without activity before an idle thread's VM is released. Its conversation and work are kept, and the next message restores them (see [Archive](#archive)). A number `>= 0`, fractions allowed; `0` never archives |
+| `update.mode` | `off`, `notify`, `auto` | `notify` | How the service follows omp-cloud releases: `off` never checks by itself, `notify` checks hourly and downloads in the background and the owner installs with one click, `auto` also installs by itself when that is safe with no downtime, else it waits for the click ([the exact rule](#updates); [Updating](updating.md#auto)). `400` `update.mode must be one of off, notify, auto` |
+| `update.feed` | string | `github:TechDufus/omp-cloud` | Where releases come from: `github:<owner>/<repo>` (its latest GitHub release) or an `http(s)` base URL that serves `release.json` and the files; [the feed](#the-feed-and-its-token). `400` `update.feed must be a string`, `update.feed must be github:<owner>/<repo> or an http(s) base URL: "<value>"`, `update.feed is not a valid URL: "<value>"`, `update.feed must not carry credentials; put them in update.token` or `update.feed must not have a query or fragment` |
+| `update.token` | string | `""` | The credential the feed is read with, needed for a private repository or fork: a `!command` whose output is the token (for example `!/usr/bin/gh auth token`), the name of an environment variable of the service, or the token itself; empty reads the feed anonymously. It is trimmed; at most 500 characters without control characters (`update.token must be a string of at most 500 characters without control characters`). A literal token reads back as `(set)` and is kept out of the audit and the export: [the feed and its token](#the-feed-and-its-token) |
+| `update.unit` | string | `omp-cloud` | The service's systemd user unit, which an update restarts: 1 to 100 letters, digits and `: _ . @ -` (`update.unit must be a unit name of letters, digits and : _ . @ -`) |
+| `update.ompUnits` | list of strings | `["omp-auth-broker", "omp-auth-gateway"]` | The systemd user units that run omp for the service: the update's `omp` step restarts the ones running another omp than the host's, and `[]` skips the step. Each entry is a unit name of 1 to 100 letters, digits and `: _ . @ -`, at most 100 entries (`400` `update.ompUnits must be a list of strings`, `update.ompUnits holds at most 100 entries` or `update.ompUnits entries are unit names of letters, digits and : _ . @ -: "<entry>"`) |
+
+One `PUT` is one transaction, and each key it changes writes one audit row (`action` `set`, or `reset` when the key went back to its default; `import` for a key changed by an imported file, a reset included). A change that leaves a key as it was writes nothing. `actor` is the caller's principal (`owner`); `old` and `new` are the JSON values, `null` for the default. The audit log is never trimmed. A validator's `400` message names the key and the rule, for example `git.push must be one of never, ask, auto`, `<key> must be true or false`, `<key> must be a list of strings`, `<key> holds at most 100 entries` or `lifecycle.archiveAfterDays must be a number of days, 0 or more (0 never archives)`.
+
+The export holds the stored values as nested YAML (`git: {push: ask}`) and nothing at their default (`{}` when there is none); an import takes nested keys, dotted keys or both, and walks nested mappings until a path is a key (`<path> is set twice` when a key is given both ways). An empty document is valid, and under `replace` resets every key, a stored literal `update.token` included, since the export leaves it out.
+
+### Push policy
+
+`git.push`, `git.branch` and `git.protected` are read when a turn has finished, so a change applies to the next turn that ends. The VM never pushes (it has no git credentials); the service pushes the result bundle itself, from its git cache, with the credential of the remote's host (`service.json` `git.hosts`). A push is attempted only when the turn is `done` and was not stopped, it reached the model (a turn that only ran a built-in or extension command is not pushed; the next model turn pushes what it changed), git finalize produced a head, the head is not the handoff commit, it differs from the head of the newest turn that was pushed, the thread has a remote and `git.push` is not `never`; otherwise the turn records `pushed: false`, `pushError: ""`, `pushRef: ""` and no `push` event. The target is `git.branch` with `{thread}` replaced by the thread id.
+
+- A remote whose host has no entry in `git.hosts`, or that is not `https` (`http` is accepted only on loopback), records `pushError` `the service has no git credentials for <host>` (the whole remote when it has no host) and asks nothing. So does a protected target: `refusing to push to protected branch <target>` (a `git.protected` glob matches the whole name, `*` standing for any run of characters).
+- `ask` posts a [question](#questions) on the running turn before it completes: `key` `omp-cloud:push`, `header` `Push`, `text` `Push <target> to <remote>?`, options `Push` (`push <head8> to <remote> as <target>`) and `Do not push` (`keep the result on the service`), `recommended` `0`. The turn clock stops while it is open, and it is answered like any question. It is not an agent `ask`: nothing reaches omp. Exactly `["Push"]` pushes; any other answer, a timeout (`runner.questionTimeoutSeconds`) or a stop does not. A stop while it is open ends the wait and the turn completes as it was computed before the question. A service restart reuses the open question.
+- `auto` pushes without asking.
+- The push is `git push <head>:refs/heads/<target>`, never forced. It is refused, with `pushed: false` and `pushError`: `refusing to push to <target>, the default branch of <remote>`, `<target> on <remote> has commits the result lacks; not force-pushing` (the remote branch cannot be fast-forwarded), `the remote refused <target>: <reason>`, `git push timed out after <n> s` (`service.json` `git.pushTimeoutSeconds`, default 120) or `git push failed: <last line of git's error>`; also `"<target>" is not a branch name`, `the result bundle is not stored`, `the result bundle is unusable: <reason>` and `the result bundle is at <got>, not <head>`. Reasons from git are cut to 200 characters. `<remote>` is the remote's URL without credentials, and no error carries a credential.
+- A push records `pushed: true` and `pushRef` (the target branch) on the turn and, through `result`, on the thread; `pushed` and `pushError` of `result` come from the newest turn that recorded a head. A `push` [event](#events) (`turn` is the turn) says what happened: `pushed <target> to <remote>`, `push declined by <principal>`, `push question expired`, `push failed: <error>`.
+
+### Agent policy
+
+The `policy.*` keys bound what the agent may do. They have different reach. `policy.bash.patterns`, `policy.tools.approval`, `policy.fetch`, `policy.webSearch` and `policy.browser` are written into the omp config of a VM when the VM is created or restored, so they apply to VMs provisioned after the change; a running or paused VM keeps the rules it was provisioned with. `policy.egress` is likewise fixed when the sandbox is created. `policy.spend.*` and `policy.models.allowed` are read live.
+
+- **Bash rules.** A VM's omp config carries one `bash.patterns` list: the fixed git guard, then `policy.bash.patterns` in order, then the rules of the shipped `config.yml` and overlays in load order, less the shipped `allow` rules when `policy.tools.approval.bash` is `prompt` or `deny` (omp replaces arrays on a merge, so the service writes them whole; the first rule that applies wins, and a shipped rule can never shadow the guard or the policy). The guard is always on and denies `git push`, `send-pack`, `remote add`, `set-url`, `set-head`, `rename`, `remove` and `rm`, `git config` of `remote.*` and `url.*`, and `gh pr create`, `pr merge`, `repo sync`, `repo create` and `release create`; the agent gets `Tool "bash" is blocked by tool policy.` The globs see the literal command text with quotes removed and are wide on purpose (`echo git push` is blocked too). A shell variable dodges them, so the real boundaries are that the VM holds no git credentials, the [push policy](#push-policy) and `policy.egress`. `approval` is `allow`, `deny` or `prompt` (the owner is asked: see below).
+- **Tool rules.** `policy.tools.approval` maps an omp tool name (`^[a-z][a-z0-9_]{0,63}$`) to `allow`, `deny` or `prompt`. It overrides the same tool's entry in the shipped config. `deny` fails the tool call.
+- **Capabilities.** `policy.fetch: false` turns off URL reads and the fetch tool, `policy.webSearch: false` removes web search and `policy.browser: false` turns off the browser. A shell command such as `curl` is not covered: use `policy.egress`.
+- **Approvals are questions.** A tool call a `prompt` rule or `policy.tools.approval` marks `prompt` stops the turn at that call, and the owner gets a [question](#questions) on the running turn with `header` `Approval`, `key` `approval:<tool>`, `text` omp's request (`Allow tool: bash`, the reason and the command, cut to 4000 bytes), options `Approve` (`run this tool call`) and `Deny` (`block it`), `recommended` `1`. Exactly `["Approve"]` approves; any other answer, free text, a timeout (`runner.questionTimeoutSeconds`: omp has none of its own, so an unanswered approval is denied) or a stop denies, and the agent sees `Tool call denied by user: <tool>` and carries on. The turn clock stops while an approval is open. Every way a turn is aborted (a stop, the turn timeout, a spend cap) first denies the turn's open approvals, recorded as answered by `stop`, `timeout` or `dropped` with `answer` `Denied: no answer within <duration>.` (question timeout) or `Denied: the turn ended before the approval was answered.`. Nothing about an approval reaches omp as an `ask`; nothing else that omp asks of a UI (a `select`, `confirm`, `input` or `editor` of an extension) is shown to anyone, and it is cancelled.
+- **Spend caps.** `policy.spend.turnUSD`, `policy.spend.threadUSD` and `policy.spend.dayUSD` (USD, `0` is no cap) are checked after every assistant message with the cost omp reports for it: the running turn's cost, the thread's completed turns plus the running turn, and the owner's turns completed since 00:00 UTC (turns of deleted threads included) plus the running turn. Going over a cap aborts the turn, which ends `failed` with `error` `spend cap reached: <turn|thread|day> spend <x.xxxx> USD is over the <cap> USD cap`; work already committed in the VM is kept like for any failed turn. A turn that would start with its thread's or the day's spend already at or over the cap fails at once with the same text and omp is not prompted. A cap bites at the first message that crosses it, after that message's money is spent.
+- **Egress.** With a non-empty `policy.egress` (IPv4 addresses or CIDRs, or domains optionally prefixed `*.`; at most 100), a new VM can reach only the gateway's host and those destinations: the sandbox is created with `network: {denyOut: ["0.0.0.0/0"], allowOut: [<gateway host>, ...egress]}`. Empty leaves the network open. The model providers of the service's `models.direct` are reachable only when their host is the gateway's or listed.
+- **Models.** With a non-empty `policy.models.allowed` (`provider/*` or `provider/id`; a `:<thinking>` suffix is ignored), [creating a thread](#creating-a-thread) with a model outside it, or without a model when `defaultModel` is outside it, is refused with `409` `the cloud policy does not allow <model>`.
+
+A thread may tighten this policy and never loosen it. The create request's `policy` (see [creating a thread](#creating-a-thread)) holds the keys below without the `policy.` prefix: `bash.patterns`, `tools.approval`, `fetch`, `webSearch`, `browser`, `egress`, `spend.turnUSD`, `spend.threadUSD`, `spend.dayUSD`, `models.allowed`. Each value is checked by the validator of the setting `policy.<key>`, so it has that setting's type and limits, and is stored on the thread (the detail's `policy`; `{}` for none). The effective policy is the service's settings tightened by the thread's, and is worked out wherever the settings are used: when the VM is provisioned (rules, tool approvals, capabilities), when its sandbox is created (egress), at each spend check and when the thread is created (models). Per key:
+
+- **`bash.patterns`.** When the thread has a `deny` or `prompt` rule: the service's `deny` and `prompt` rules (in their order), then the thread's, then the service's `allow` rules. The thread's `allow` rules are dropped, they could only loosen. The fixed git guard is still first and the shipped rules last. A thread without a `deny` or `prompt` rule leaves the service's rules as they are.
+- **`tools.approval`.** Per tool the stricter of the two (`allow` < `prompt` < `deny`). A thread's `allow` for a tool the service does not name is dropped: it would override the shipped config.
+- **`fetch`, `webSearch`, `browser`.** On only when the service and the thread both leave them on.
+- **`egress`.** The service's list empty: the thread's list. The thread's list empty: the service's. Both non-empty: every entry of the thread's must be in the service's list (compared after lowercasing), else [creating](#creating-a-thread) answers `400` `policy.egress of a thread may only narrow the service's list`; the effective list is the thread's. If the service's list changes later and no longer holds an entry, the effective list is only the entries it still holds, or the service's list when it holds none.
+- **`spend.*`.** The smaller non-zero cap of the two; `0` is no cap.
+- **`models.allowed`.** The model must match every non-empty list, the service's and the thread's; otherwise `409` as above.
+
+### Archive
+
+A thread idle for `lifecycle.archiveAfterDays` days loses its VM and keeps everything else; the sweep, its limits, the snapshot and the orphan removal are described in [Archive](archive.md). Releasing the VM appends a `vm` [event](#events) `archived after <n> day(s) without activity: …`.
+
+An archived thread shows `archivedAt`, the time its VM was released, and its `vm` is `null`. Its `phase` stays `idle`, its result branch, `result`, turns, events and metrics stay readable, and `lastActivityAt` does not move. The next message, an [IRC message](#irc-messages) included, restores it: a `vm` event says `restoring from the archive`, a new VM is created from the stored bundle and the saved conversation, and the turn runs; when its VM exists again `archivedAt` is `null`. Restoring an archive never counts toward the limit of three consecutive lost VMs. If saving the state fails, the thread keeps its VM and a `notice` event says `archive postponed: <reason>`.
+
+## Devices and pairing
+
+Other machines use the API over the remote listener, each with a token of its own that the owner can revoke. The owner token stays the service host's credential.
+
+### Listeners
+
+- **API listener** (`listen` in `service.json`, plain HTTP) serves `/api/v1` and accepts the owner token and device tokens. `listen` must be a loopback address (`localhost`, `::1`, `127.x.x.x`); any other value stops the service at start: `listen must be a loopback address; other machines connect through "remote" (the TLS listener)`.
+- **Dashboard listener** (`dashboard.listen`, plain HTTP, optional) serves the dashboard page and the same `/api/v1` routes with a session cookie: [Dashboard](#dashboard). It is loopback only: any other value stops the service at start with `dashboard.listen must be a loopback address`.
+- **Remote listener** (`remote` in `service.json`, TLS) serves the API to paired devices: `{listen: "0.0.0.0:8443", certFile, keyFile, advertise?: ["10.0.0.42:8443"], allow?: ["10.0.0.0/8"]}`. `listen` may be any host; `certFile` and `keyFile` are absolute. `allow` is a non-empty list of CIDR ranges (`remote.allow entry "<x>" is not a CIDR range such as 10.0.0.0/8`) that replaces the default sources, which are listed under [Service config](configuration.md#service-config) (loopback is not among them). `advertise` is a non-empty list of `host:port` or `[ipv6]:port` entries that pairing codes carry; without it the code lists the host's non-internal IPv4 addresses (interfaces whose name starts with `lo`, `docker`, `br-`, `veth`, `vmon`, `virbr`, `ompsvc`, `cni`, `flannel`, `kube`, `tap` or `tun` left out) and `<hostname>.local`, each with the TLS port, or just the one address when `listen` names a specific host.
+- **Identity.** At start the service loads the certificate and key. It refuses to start when the key file or its directory is accessible to group or other (POSIX; `remote.keyFile <path> must be readable only by its owner (chmod 600, its directory chmod 700)`), when the certificate file does not hold exactly one `CERTIFICATE` PEM block, or when the key is not the certificate's. The fingerprint is `SHA256:` and the standard base64, without padding, of the SHA-256 of the certificate's DER (what `ssh-keygen -l` prints); a pairing code carries the same 32 bytes as unpadded base64url, and either spelling is accepted when comparing. The log line is `omp-cloud remote on https://<host>:<port> (SHA256:…)`.
+- **What the remote listener does first.** It looks at the connection's source address (IPv4-mapped IPv6 counts as IPv4) before it routes anything, the pairing routes included: a source outside `allow`, and always every address the host of `gateway.url` resolves to (VMs can reach it; the service refuses to start when the name does not resolve), gets `403` `{"error": "forbidden"}`. It then accepts device tokens only: the owner token there is the ordinary `401`.
+
+### Tokens and callers
+
+A device token is `ompd_` and 32 random bytes as base64url; the service keeps only its SHA-256. Every request with one looks the device up in the database (no cache), so a revoked or unknown token is `401` at once, with the same body and `WWW-Authenticate` as any bad token. The caller is the owner (`principal` `owner`) either way, so a device sees and changes the same threads. The device's `last_seen_at` and address are written at most once a minute.
+
+Turns record who sent, stopped or answered them in `by`, `stoppedBy` and `answeredBy`: `owner` for the owner token, `device:<id>` for a device. A thread created by a device records `device:<id>` as the sender of its first turn. Event texts (`queued by …`, `stop requested by …`) and a stopped turn's `error` (`stopped by …`) name the same values. The one exception is an [IRC message](#irc-messages): the sender is the `from` the caller names, whichever token it used, and it is the `by` of the `irc` turn the message starts and the name in that turn's `queued by <from>` event.
+
+Only the owner token may call these; a device gets `403` `{"error": "only the owner token can do this; it works on the server machine"}`:
+
+- every [pairing offer](#pairing-offers) route;
+- `DELETE /api/v1/devices/{id}` for any id but its own;
+- `PUT /api/v1/settings` and `PUT /api/v1/settings/import`;
+- every `/api/v1/logins` route;
+- `POST /api/v1/dashboard/links`;
+- every [update](#update-routes) route.
+
+Everything else of the API works with a device token: threads, settings and usage reads, VMs, the event streams, `GET /api/v1/devices` (only itself) and `DELETE` of itself.
+
+### Pairing offers
+
+Owner only, on the API listener (or the dashboard listener's owner session):
+
+| Route | Answer |
+|---|---|
+| `POST /api/v1/pairing/offers` | Body `{}` (an empty body works too; at most 1 KiB). `201 {id, code, expiresAt, fingerprint, addresses}`: `code` is `ompc1:<offer id>:<secret>:<fingerprint base64url>@<address>[,<address>…]`, an offer lives 5 minutes, the secret is 16 random bytes of which the service keeps the SHA-256, and the code is returned only here. At most 3 live (open, pending or approved, unexpired) offers: a fourth cancels the oldest. `404` `remote access is not configured` without a `remote` section |
+| `GET /api/v1/pairing/offers/{id}` | `200 {id, status, expiresAt, request, device}`: `status` is `open`, `pending`, `approved`, `paired`, `declined`, `cancelled`, `burned` or `expired` (computed when a live offer is past `expiresAt`); `request` is `null` or `{name, platform, address, at}`; `device` is `null` or `{id, name}` once paired. `404` `not found` for an unknown offer |
+| `POST /api/v1/pairing/offers/{id}/approve` | `204` for a pending, unexpired offer (it becomes `approved`); `409` `this pairing is not waiting for approval` otherwise; `404` `not found` unknown |
+| `POST /api/v1/pairing/offers/{id}/decline` | `204` for a pending, unexpired offer (it becomes `declined`); `409` as above; `404` `not found` unknown |
+| `DELETE /api/v1/pairing/offers/{id}` | `204`: cancels a live offer, leaves a finished one as it is, and is idempotent; `404` `not found` unknown |
+
+### Redeem and claim
+
+Public: no token, answered before authentication on the API listener and on the remote listener (after its source check). The body is at most 2048 bytes: a larger `Content-Length` is `413` `request body is too large` before anything is read, and without one at most 2048 bytes are read before the `413`.
+
+| Route | Answer |
+|---|---|
+| `POST /api/v1/pairing/redeem` | Body `{offer, secret, name, platform}`. `name`, trimmed, is 1 to 64 characters of letters, digits, space, `.`, `_` and `-` (`400` `invalid device name`); `platform` is 1 to 32 characters of `[A-Za-z0-9._-]` (`400` `invalid platform`); malformed JSON or a missing or mistyped field is `400` `invalid JSON body`. With an open, unexpired offer and the right secret: `202 {request, requestSecret, expiresAt}`; the offer becomes `pending` and records the name, platform, source address and time. Every other case, an unknown, expired, cancelled, burned or already redeemed offer or a wrong secret, is the same `401` `invalid or expired pairing code`. A wrong secret on an open offer counts as a failure and the fifth burns the offer; wrong secrets on any other offer change nothing |
+| `POST /api/v1/pairing/claim` | Body `{request, requestSecret}`. `202 {"status": "pending"}` while the owner has not decided; `201 {device: {id, name}, token}` exactly once after approval (the token is minted then, and the name gets `-2`, `-3`, … until it is unique among active devices; the offer becomes `paired`); `403` `the owner declined this device` after a decline; `401` `invalid or expired pairing request` for everything else (unknown request, wrong secret, expired, cancelled, already claimed) |
+
+Parallel redeem and claim calls have one winner. Failed attempts are limited per source address, IPv6 by its /64: a source with 10 failures in the last 60 seconds (a `401` from either route; successes and malformed requests never count) gets `429` `too many attempts; try again later` with `Retry-After` until the oldest ages out. At most 4096 sources are tracked, the one whose last failure is oldest going first. Nothing is limited globally, so one source cannot lock pairing out for others.
+
+### Devices
+
+| Route | Answer |
+|---|---|
+| `GET /api/v1/devices` | `200 {devices: [{id, name, platform, createdAt, pairedFrom, lastSeenAt, lastSeenAddress, current}]}`: the active devices, oldest first; a device caller sees only itself; `current` is true for the caller's own device; `lastSeenAt` and `lastSeenAddress` are `null` until the device's first authenticated request |
+| `DELETE /api/v1/devices/{id}` | Revoke: `200 {device: {id, name}, runningThreads: [id]}`. `runningThreads` are the threads whose first turn the device sent that are still starting, working or waiting; they keep running until stopped. The device's in-flight work ends: its open event streams (thread and global), downloads, static relay requests and request bodies still being uploaded are aborted, and every write it could still make (messages, answers, stop, delete, thread creation, revoking itself) is refused with `401` `unauthorized` without writing. `404` for an unknown or already revoked device; a device calling this for another id gets the owner-only `403` |
+
+### SSH pairing (`omp-cloud ssh-pair`)
+
+The service host has a command, `omp-cloud`, on the owner's `PATH`: on a [managed install](#the-managed-install) a link in `~/.local/bin` to `<app>/bin/omp-cloud`, else (a checkout) a wrapper that `omp-cloud setup --checkout` (`mise run infra:up`) writes there. Both run the same `ssh-pair` of [the command](#the-omp-cloud-command). It is not HTTP, but the plugin's `/cloud connect user@host` runs it over ssh and parses its output, so the output is a contract:
+
+```text
+omp-cloud ssh-pair --name <name> --platform <platform> [--config <path>]
+```
+
+Whoever can run it has a login on the service's account, which is the proof of ownership, so it pairs a device at once, with no [offer and approval](#pairing-offers). `--name` and `--platform` are validated like a [redeem](#redeem-and-claim) request's and each flag is given exactly once; `--config` (else `OMP_CLOUD_CONFIG`, else the default path) names `service.json`, which it parses as the service does but uses only `dataDir` and `remote` from, contacting nothing the file names, so it works while vmon or the gateway is down. It refuses when the config has no `remote` section, when the TLS key cannot be read safely, when there is no database in `dataDir`, and when the database's schema is not the one this checkout expects: it opens the database without migrating it and says `the service database is at schema <n>, this omp-cloud expects <m>: restart the omp-cloud service first` (the database is behind) or `…: this omp-cloud checkout is older than the service; update it (git pull) first` (it is ahead). It adds an active device (the name gets `-2`, `-3`, … until it is unique, as in a claim) with `pairedFrom` the client address from `SSH_CONNECTION` or `SSH_CLIENT`, else `ssh`.
+
+The last line of stdout is one JSON object and nothing else goes to stdout (diagnostics go to stderr); the token appears nowhere else:
+
+```json
+{"ompCloudPair": 1, "device": {"id": "…", "name": "…"}, "token": "ompd_…",
+ "server": {"fingerprint": "SHA256:…", "certificate": "<base64 DER>", "port": 8443, "addresses": ["host:8443"]},
+ "service": {"version": "<X.Y.Z>", "api": 3}}
+```
+
+On failure the line is `{"ompCloudPair": 1, "error": "<message>"}` and the exit status is `1`: a bad argument (`unknown argument "<x>"; usage: …`, `<flag> needs a value; usage: …`, `<flag> given twice; usage: …`, `--name and --platform are required; usage: …`), an invalid name or platform, a config without a `remote` section (`<config path> has no "remote" section: the service has no listener for other machines`), a missing database (`no omp-cloud database in <dataDir>: has the service run on this account?`) or a schema mismatch. `fingerprint` is the [identity's](#listeners) fingerprint and `certificate` the certificate's DER in base64, so the client knows what to pin before it sends anything to an address; `addresses` are the `host:port` entries a pairing code would carry. Everything before the last JSON line (a login banner) is ignored by the client.
+
+### Dashboard static relay
+
+`GET|HEAD /api/v1/dashboard/static{path}` serves the dashboard page's files to a device that cannot reach the dashboard listener (the plugin's forwarder calls it). The service fetches them from the dashboard listener at the fixed origin `http://<dashboard.listen host>:<port>`, never from `dashboard.url`. `path` must be empty, `/`, or an asset path of the page's bundle, `/chunk-<hash>.js` or `/chunk-<hash>.css` (`<hash>` lowercase letters and digits); anything else, and any path containing `..`, `%2e`, `%2f`, `%5c`, a backslash, `//`, `@`, `#` or `?` (matched case-insensitively), is `400` `invalid dashboard path`. The upstream status and body are passed through; a `3xx` other than `304 Not Modified` (which answers the forwarded conditional headers) is `502` `the dashboard answered with a redirect`, an unreachable listener `502` `the dashboard is not reachable`. Only `Accept`, `If-None-Match` and `If-Modified-Since` go upstream and only `Content-Type`, `Cache-Control`, `ETag` and `Last-Modified` come back (the page's own `Cache-Control`, not `no-store`); cookies and credentials travel in neither direction, and the body is streamed. `404` `the dashboard is not configured` without a `dashboard` section.
+
+## Dashboard
+
+The dashboard is a web page for the owner (thread list and detail, answering questions, spend, VMs, settings and logins). It is optional: `service.json`'s `dashboard: {listen: "127.0.0.1:8081", url?: "<origin>"}` starts the [dashboard listener](#listeners), and without the section there is none. `url` is the origin browsers use (default `http://<listen>`); other machines reach the page through the [static relay](#dashboard-static-relay).
+
+The dashboard listener serves the page at `/` and the same `/api/v1` routes as the API listener, authenticated by a session cookie instead of the bearer token. The API listener never reads a cookie, so a cookie alone is `401` there, and the dashboard listener never reads a bearer token. A session is the owner's full power.
+
+- **Sign-in.** `POST /api/v1/dashboard/links` (the owner token, on the API listener only; a device token gets `403`, see [Devices and pairing](#devices-and-pairing)) returns `201 {url, expiresAt}`: `url` is `<origin>/#<code>`, a one-time code of 32 random bytes in the fragment (so it never reaches a log or a `Referer`), valid 60 seconds and once. `404` `the dashboard is not configured` without the section. The page reads the fragment, sends `POST /session {"code": "..."}` and clears the fragment. `POST /session {"token": "<owner token>"}` signs in with the owner token instead (the same constant-time comparison); a device token is never a sign-in credential. The body is exactly one of `code` or `token`, a non-empty string, at most 4096 bytes (`400` `send {code} or {token}`); a bad, used or expired credential is `401` `invalid or expired sign-in`. Success is `204` with `Set-Cookie: omp_cloud_session=<id>; Max-Age=604800; Path=/; HttpOnly; SameSite=Strict` (plus `; Secure` when `url` is https) and closes the session the request's previous cookie named. After five failed sign-ins within 60 seconds every `POST /session` answers `429` `too many failed sign-ins` with `Retry-After` until the oldest failure ages out (one counter for the listener). `GET /session` is `200 {"user": "owner"}` or `401` `unauthorized`; `DELETE /session` signs out (`204`, cookie cleared). At most 16 unredeemed links and 32 open sessions are kept, the oldest dropped first.
+- **Sessions.** The cookie holds 32 random bytes; the service keeps only their SHA-256, in memory, so a restart signs every browser out, except the restart of an [update](#dashboard-sessions-and-an-update-restart), which carries them over. A session ends after 12 hours without a request and 7 days after it began.
+- **Guard.** Every `/session` and `/api/*` request on the dashboard listener must: carry a `Host` of loopback (`127.0.0.1`, `localhost` or `[::1]` with the listen port) or of `url` (`421` `unexpected host`); not be cross-site, `Sec-Fetch-Site` being absent, `same-origin` or `none`; carry no `Origin` other than the listener's own (both `403` `cross-site request refused`); and, unless `GET` or `HEAD`, carry `X-Omp-Dashboard: 1` (`403` `x-omp-dashboard header required`). No response carries a CORS header, so a page on another origin cannot pass the preflight. `POST /api/v1/dashboard/links` is `404` on this listener, as is any path other than `/`, `/session` and `/api/*`; a request without a live session is `401` `unauthorized` without `WWW-Authenticate`.
+- **Bodies.** The listener refuses request bodies over 1 MiB; the page never creates threads.
+
+`GET /api/v1/events` is the global event stream, for the dashboard's thread list: `text/event-stream` of `data: {thread, seq, at, kind, turn, text}` for every live event of the owner's threads and `data: {thread, deleted: true}` for each deletion, a `: keepalive` comment every 15 seconds and a `: connected` comment first. It has no `id:` field and no backlog: a client reads the list when it connects and again after a reconnect. A thread's own stream is [Events](#events).
+
+`GET /api/v1/usage?since=<ISO 8601>` (default: 30 days ago) sums the recorded `usage` of the owner's turns completed at or after `since`: `{since, total: {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, cost}, threads: [{thread, title, name, cost, turns}], days: [{day, cost}]}`, `since` normalized to an ISO instant, `threads` by cost descending (ties by thread id; `name` is the thread's [name](#thread-summary-and-detail), `""` when it has none), `days` (`YYYY-MM-DD`, UTC) ascending, `turns` counting the turns that reported usage. `400` `since must be an ISO 8601 time`. The turns of a deleted thread do not count. This is the cloud's own spend; the plugin never reads it, and merged local and cloud spend is `omp stats`.
+
+`GET /api/v1/vms` is `{vmonDashboard, vms: [{thread, sandboxId, state, pid, startedAt, cpuCount, memoryMB, metrics}]}`: the owner's VM records, joined with vmon's live view when the service has a vmon client (the runner is on, or the runner is off and the config has a `dashboard` section; when vmon cannot be opened or its list fails, the list holds the stored records only). `state` is `running` or `paused`, vmon's when it reports the sandbox, else the record's. `vmonDashboard` is vmon's own dashboard (`<vmon.url>/dashboard/`); `startedAt` is `""` and `cpuCount` and `memoryMB` `0` when vmon did not report the sandbox; `pid` is `null` before omp started; `metrics` is `{at, cpuUsedPct, memUsed, memTotal, diskUsed, diskTotal}` (bytes) for a running sandbox with a sample from the last five minutes, else `null` (a paused sandbox, a vmon without metrics, a failed request).

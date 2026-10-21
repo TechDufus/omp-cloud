@@ -1,0 +1,48 @@
+name: release
+
+# A pushed tag v<version> (made by `mise run release -- <version>`) builds both executables and publishes them as a
+# GitHub release. The tag's version is injected into the binaries; the notes are that version's CHANGELOG section.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/install-omp
+      - name: Typecheck
+        run: |
+          bunx tsc --noEmit
+          bunx tsc --noEmit -p src/dashboard/client
+      # Unit tests only: the scenarios and the smoke test need vmon and a model.
+      - name: Test
+        run: bun test
+      - name: Build
+        run: bun run scripts/release.ts build --version "${GITHUB_REF_NAME#v}"
+      - name: Publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # dist/ holds the executables, their .sha256 sidecars, release.json, notes.md and THIRD-PARTY-NOTICES.txt (+ its sidecar):
+          # the licenses of the bundled packages must travel with every copy, so a release without them is refused.
+          test -s dist/THIRD-PARTY-NOTICES.txt
+          test -s dist/THIRD-PARTY-NOTICES.txt.sha256
+          (cd dist && sha256sum -c ./*.sha256)
+          # install.sh is plain text and verifies the binary through its own .sha256 sidecar, so it carries none; it travels with
+          # the release as the copy that matches these binaries (releases/latest/download/install.sh).
+          sh -n install.sh
+          # GitHub's releases/latest, which the updater and install.sh read, skips prereleases and drafts: a tag with a `-` is a prerelease so it is never the latest.
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* install.sh $prerelease \
+            --title "omp-cloud ${GITHUB_REF_NAME#v}" \
+            --notes-file dist/notes.md

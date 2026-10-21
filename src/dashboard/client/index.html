@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="referrer" content="no-referrer" />
+		<meta name="color-scheme" content="dark light" />
+		<title>omp-cloud</title>
+		<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath fill='%23ed4abf' d='M10 14h44v9H43v33h-9V23h-9v22h-9V23H10z'/%3E%3C/svg%3E" />
+		<!-- Applies the saved theme before first paint, so there is no flash. app/theme.ts owns the same storage key. -->
+		<script>
+			(function () {
+				try {
+					var stored = localStorage.getItem("omp-cloud-theme");
+					var system = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+					var theme = stored === "light" || stored === "dark" ? stored : system;
+					document.documentElement.dataset.theme = theme;
+					document.documentElement.style.colorScheme = theme;
+				} catch (e) {}
+			})();
+		</script>
+		<link rel="stylesheet" href="./kit/styles.css" />
+		<script type="module" src="./main.tsx"></script>
+	</head>
+	<body>
+		<div id="app"></div>
+	</body>
+</html>

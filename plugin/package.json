@@ -1,0 +1,18 @@
+{
+  "name": "omp-cloud",
+  "version": "0.5.1",
+  "description": "Hand a task, with this session's context, to a cloud agent in omp-cloud (/cloud)",
+  "keywords": ["omp", "cloud-agents", "self-hosted", "microvm", "kvm", "vibemon"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TechDufus/omp-cloud.git",
+    "directory": "plugin"
+  },
+  "homepage": "https://github.com/TechDufus/omp-cloud",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "omp": {
+    "extensions": ["./src/index.ts"]
+  }
+}

@@ -1,0 +1,168 @@
+/* Shared by every composition. Palette: omp stats (src/dashboard/client/kit/styles.css). Fonts are system fonts,
+   Adwaita Sans (an Inter derivative, the dashboard's sans on Linux) and JetBrains Mono (the dashboard's mono). */
+:root {
+	--sans: "Adwaita Sans", "Inter", "Liberation Sans", sans-serif;
+	--mono: "JetBrainsMono NF", "JetBrains Mono", "Noto Sans Mono", monospace;
+	--cyan: #5ad8e6;
+	--pink: #ed4abf;
+}
+
+* {
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0;
+}
+
+html,
+body {
+	overflow: hidden;
+	-webkit-font-smoothing: antialiased;
+}
+
+body {
+	position: relative;
+	font-family: var(--sans);
+	background: var(--field);
+	color: var(--ink-1);
+}
+
+.theme-dark {
+	--field: #07070a;
+	--grid: rgba(255, 255, 255, 0.035);
+	--ink-1: #ededef;
+	--ink-2: #a0a0a8;
+	--ink-3: #6c6c74;
+	--pill-line: rgba(255, 255, 255, 0.2);
+	--pill-ink: #b9b9c2;
+	--mark-line: rgba(139, 120, 255, 0.55);
+	--win-bg: #000;
+	--bar-bg: #0e0e10;
+	--win-line: rgba(255, 255, 255, 0.1);
+	--addr-bg: rgba(255, 255, 255, 0.06);
+	--dot: rgba(255, 255, 255, 0.16);
+	--shadow: 0 30px 80px rgba(0, 0, 0, 0.55), 0 8px 24px rgba(0, 0, 0, 0.4);
+	--glow-a: rgba(237, 74, 191, 0.26);
+	--glow-b: rgba(120, 90, 255, 0.16);
+	--glow-c: rgba(90, 216, 230, 0.1);
+}
+
+.theme-light {
+	--field: #f6f5f2;
+	--grid: rgba(20, 20, 40, 0.05);
+	--ink-1: #151518;
+	--ink-2: #5a5a63;
+	--ink-3: #8b8b94;
+	--pill-line: rgba(20, 20, 40, 0.26);
+	--pill-ink: #4a4a55;
+	--mark-line: rgba(120, 90, 220, 0.5);
+	--win-bg: #fff;
+	--bar-bg: #f6f6f7;
+	--win-line: rgba(20, 20, 40, 0.12);
+	--addr-bg: rgba(20, 20, 40, 0.06);
+	--dot: rgba(20, 20, 40, 0.16);
+	--shadow: 0 20px 60px rgba(20, 20, 40, 0.18), 0 6px 18px rgba(20, 20, 40, 0.1);
+	--glow-a: rgba(237, 74, 191, 0.2);
+	--glow-b: rgba(120, 90, 255, 0.12);
+	--glow-c: rgba(31, 169, 187, 0.14);
+}
+
+/* Faint 24 px grid, as in omp's hero, plus the soft glows. */
+.field {
+	position: absolute;
+	inset: 0;
+	background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+	background-size: 24px 24px;
+	background-position: -1px -1px;
+}
+
+.glow {
+	position: absolute;
+	border-radius: 50%;
+	filter: blur(6px);
+	pointer-events: none;
+}
+
+/* Corner crop-mark brackets (omp's hero, Langfuse's banner). */
+.corner {
+	position: absolute;
+	width: 18px;
+	height: 18px;
+	border: 0 solid var(--mark-line);
+	z-index: 20;
+	pointer-events: none;
+}
+.corner.tl { top: 18px; left: 18px; border-width: 1.5px 0 0 1.5px; }
+.corner.tr { top: 18px; right: 18px; border-width: 1.5px 1.5px 0 0; }
+.corner.bl { bottom: 18px; left: 18px; border-width: 0 0 1.5px 1.5px; }
+.corner.br { bottom: 18px; right: 18px; border-width: 0 1.5px 1.5px 0; }
+
+/* One window: 12 px radius, hairline border, address-bar pill, no traffic-light colors. */
+.win {
+	position: absolute;
+	overflow: hidden;
+	border-radius: 12px;
+	border: 1px solid var(--win-line);
+	background: var(--win-bg);
+	box-shadow: var(--shadow);
+}
+.win .bar {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	height: 28px;
+	padding: 0 12px;
+	background: var(--bar-bg);
+	border-bottom: 1px solid var(--win-line);
+}
+.win .bar i {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--dot);
+}
+.win .addr {
+	margin-left: 12px;
+	padding: 3px 12px;
+	border-radius: 6px;
+	background: var(--addr-bg);
+	font: 500 10px/1.2 var(--mono);
+	color: var(--ink-3);
+	letter-spacing: 0.01em;
+	white-space: nowrap;
+}
+.win .addr b {
+	font-weight: 500;
+	color: var(--ink-2);
+}
+.win .shot {
+	position: relative;
+	overflow: hidden;
+}
+.win .shot img {
+	position: absolute;
+	display: block;
+	max-width: none;
+}
+
+.pills {
+	display: flex;
+	gap: 8px;
+}
+.pills span {
+	padding: 5px 11px;
+	border: 1px solid var(--pill-line);
+	border-radius: 999px;
+	font: 500 12px/1 var(--mono);
+	letter-spacing: 0.02em;
+	color: var(--pill-ink);
+	white-space: nowrap;
+}
+
+.grad {
+	background: linear-gradient(100deg, var(--g-a), var(--g-b));
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+}
+.theme-dark .grad { --g-a: #5ad8e6; --g-b: #ed4abf; }
+.theme-light .grad { --g-a: #1fa9bb; --g-b: #d42ea3; }

@@ -1,0 +1,48 @@
+<!doctype html>
+<!-- GitHub social preview, 1280x640, dark only. Text stays inside the central 1120x560 (x 80..1200, y 40..600). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="{{COMPOSE}}/common.css">
+<style>
+	body { width: 1280px; height: 640px; --dash-w: 1368; --dash-x: -214; --dash-y: -62; }
+	.copy { position: absolute; left: 80px; top: 88px; width: 560px; z-index: 5; }
+	.lockup { display: block; height: 68px; margin-left: -8px; }
+	h1 { margin-top: 48px; font-size: 54px; line-height: 1.14; font-weight: 700; letter-spacing: -0.03em; color: var(--ink-1); }
+	.sub { margin-top: 26px; width: 560px; font-size: 21px; line-height: 1.45; color: var(--ink-2); }
+	.pills { margin-top: 34px; gap: 10px; }
+	.pills span { padding: 8px 16px; font-size: 16px; }
+	.glow.mark { left: -80px; top: -140px; width: 760px; height: 560px; background: radial-gradient(closest-side, var(--glow-a), var(--glow-b) 55%, transparent); }
+	.glow.right { right: -160px; bottom: -220px; width: 900px; height: 560px; background: radial-gradient(closest-side, var(--glow-c), transparent); }
+
+	.dash { left: 676px; top: 104px; width: 700px; height: 600px; }
+	.dash .bar { height: 36px; padding: 0 16px; gap: 7px; }
+	.dash .bar i { width: 10px; height: 10px; }
+	.dash .addr { margin-left: 16px; font-size: 13px; padding: 4px 14px; }
+	.dash .shot { height: 560px; }
+	.dash img { width: calc(var(--dash-w) * 1px); left: calc(var(--dash-x) * 1px); top: calc(var(--dash-y) * 1px); }
+	.corner { width: 24px; height: 24px; }
+	.corner.tl { top: 24px; left: 24px; } .corner.tr { top: 24px; right: 24px; }
+	.corner.bl { bottom: 24px; left: 24px; } .corner.br { bottom: 24px; right: 24px; }
+</style>
+</head>
+<body class="theme-dark">
+	<div class="field"></div>
+	<div class="glow mark"></div>
+	<div class="glow right"></div>
+
+	<div class="win dash">
+		<div class="bar"><i></i><i></i><i></i><span class="addr">localhost:8081 <b>/ threads</b></span></div>
+		<div class="shot"><img src="{{SRC}}/dashboard-threads-dark.png" alt=""></div>
+	</div>
+
+	<div class="copy">
+		<img class="lockup" src="{{BRAND}}/logo-dark.svg" alt="">
+		<h1>Cloud agents for omp.<br>On your hardware.</h1>
+		<p class="sub">Hand a task from omp to an agent in its own microVM. It asks questions and sleeps when idle.</p>
+		<div class="pills"><span>KVM microVMs</span><span>no Kubernetes</span><span>returns a branch</span></div>
+	</div>
+
+	<i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+</body>
+</html>

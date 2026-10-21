@@ -1,0 +1,6 @@
+# Archive
+
+[README](../README.md) · [Documentation index](../README.md#documentation)
+
+A thread that has been idle for `lifecycle.archiveAfterDays` days (a setting, default 7; `0` never archives, fractions work; set it through `/api/v1/settings` or the dashboard) is archived by a sweep that runs every `runner.lifecycleSweepSeconds` (a `service.json` key, default 3600) and archives at most 5 threads, oldest first. The service commits any uncommitted work as `omp-cloud: archive snapshot` on the thread's branch, stores the result bundle and the conversation, and releases the VM, so no VM sits paused forever. The thread stays in `/cloud list` and the dashboard (an Archived badge and filter), and its branch and conversation stay readable, so `/cloud pull` works. Your next message restores it on a new VM from the saved state, and the turn runs. Nothing is pushed. If saving fails, the VM is kept and the thread is tried again after a day; that wait is kept in memory, so after a service restart the next sweep tries again. The same sweep removes this service's sandboxes and gateway clients that no VM record holds. The thread fields and events (`archivedAt`, the `vm` and `notice` events) are in [API](api.md#archive).
+

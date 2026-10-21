@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext"],
+    "types": ["bun"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true
+  },
+  "include": ["dev/**/*.ts", "src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "plugin/**/*.ts", "infra/**/*.ts"],
+  "exclude": ["src/dashboard/client"]
+}

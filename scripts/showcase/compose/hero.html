@@ -1,0 +1,49 @@
+<!doctype html>
+<!-- Hero composite, 1440x900 CSS px at 2x = 2880x1800: the dashboard Overview behind, an omp TUI window lower right
+     and the Tern "Needs attention" tray lower left, over a violet-to-deep-blue ground. 40 px minimum margin. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="{{COMPOSE}}/common.css">
+<style>
+	body {
+		width: 1440px; height: 900px;
+		background:
+			radial-gradient(900px 620px at 18% 8%, rgba(237, 74, 191, 0.34), transparent 70%),
+			radial-gradient(1000px 700px at 88% 96%, rgba(90, 120, 255, 0.34), transparent 70%),
+			radial-gradient(700px 500px at 60% 40%, rgba(120, 90, 255, 0.22), transparent 70%),
+			linear-gradient(160deg, #1b1038 0%, #110c2e 45%, #0a1030 100%);
+	}
+	.field { opacity: 0.8; }
+
+	/* Image crops: each window shows its whole source, scaled to the window's width. */
+	.win .shot img { width: 100%; left: 0; top: 0; }
+	.win { border-color: rgba(255, 255, 255, 0.15); }
+
+	.dash { left: 300px; top: 56px; width: 1076px; height: 700px; }
+	.dash .shot { height: 672px; }
+
+	.tui { left: 64px; top: 430px; width: 660px; height: 366px; z-index: 3; }
+	.tui .shot { height: 100%; }
+
+	.tern { left: 820px; top: 628px; width: 540px; height: 222px; z-index: 4; }
+	.tern .shot { height: 100%; }
+</style>
+</head>
+<body class="theme-dark">
+	<div class="field"></div>
+
+	<div class="win dash">
+		<div class="bar"><i></i><i></i><i></i><span class="addr">localhost:8081 <b>/ overview</b></span></div>
+		<div class="shot"><img src="{{SRC}}/dashboard-overview-dark.png" alt=""></div>
+	</div>
+
+	<div class="win tui">
+		<div class="shot"><img src="{{SRC}}/tui-cloud-tiles-dark.png" alt=""></div>
+	</div>
+
+	<div class="win tern">
+		<div class="shot"><img src="{{SRC}}/tern-bell-tray-dark.png" alt=""></div>
+	</div>
+</body>
+</html>

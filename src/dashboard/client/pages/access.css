@@ -1,0 +1,88 @@
+/* Settings, Logins and Devices: form controls and the pairing code, on the omp-stats tokens. */
+.access-stack {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.access-fields {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+
+.access-fields .input[type="text"] {
+	flex: 1 1 260px;
+}
+
+.access-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+
+textarea.input {
+	width: 100%;
+	height: auto;
+	padding: 8px 10px;
+	line-height: 1.5;
+	resize: vertical;
+	font-family: var(--font-mono);
+	font-size: 12.5px;
+}
+
+.access-fine {
+	font-size: 12.5px;
+	color: var(--ink-3);
+	overflow-wrap: anywhere;
+}
+
+.access-ok {
+	font-size: 12.5px;
+	color: var(--ok);
+	overflow-wrap: anywhere;
+}
+
+.access-file {
+	font-size: 12.5px;
+	color: var(--ink-2);
+}
+
+.access-title-mono {
+	font-family: var(--font-mono);
+	font-size: 0.93em;
+}
+
+.access-code {
+	margin: 0;
+	padding: 18px 16px;
+	border-radius: var(--r-control);
+	border: 1px solid var(--line-2);
+	background: var(--card);
+	font-family: var(--font-mono);
+	font-size: 26px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	line-height: 1.3;
+	color: var(--ink-1);
+	text-align: center;
+	user-select: all;
+	overflow-wrap: anywhere;
+}
+
+.access-countdown {
+	font-family: var(--font-mono);
+	color: var(--ink-1);
+}
+
+/* The Updates card's component list: wide columns, badges wrap under their value instead of squeezing it. */
+.update-facts .kv {
+	grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+}
+
+.update-facts .row {
+	flex-wrap: wrap;
+	gap: 4px 8px;
+}

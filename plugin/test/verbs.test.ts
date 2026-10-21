@@ -1,0 +1,142 @@
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { run } from "../src/exec";
+import { Cloud } from "../src/verbs";
+import { whoami } from "./builders";
+import { cloudEnv, fakeHost, fakePi } from "./fakes";
+import { cleanup, FAST_RETRY, tmp } from "./helpers";
+
+afterEach(cleanup);
+
+let server: Bun.Server<undefined>;
+let origin = "";
+
+beforeAll(() => {
+	server = Bun.serve({
+		port: 0,
+		fetch: req => {
+			const url = new URL(req.url);
+			if (url.pathname !== "/api/v1/whoami") return Response.json({ error: "not found" }, { status: 404 });
+			if (req.headers.get("authorization") !== "Bearer tok") return Response.json({ error: "unauthorized" }, { status: 401 });
+			return Response.json(whoami({ user: "dev", modelPatterns: ["anthropic/*"], defaultModel: "anthropic/claude-sonnet-5-5" }));
+		},
+	});
+	origin = `http://127.0.0.1:${server.port}`;
+});
+
+afterAll(() => server.stop(true));
+
+interface StatusOptions {
+	/** The personal file's YAML; no file when undefined. */
+	personal?: string;
+	/** The repository file's YAML; the session then runs in a fresh git repository that holds it. */
+	repo?: string;
+	env?: Record<string, string>;
+}
+
+/** Runs `/cloud status` against omp-cloud's files; returns what the user was shown and where the personal file is. */
+async function status(o: StatusOptions = {}): Promise<{ text: string; type: string | undefined; personal: string; repoFile: string }> {
+	const env = await cloudEnv(o.personal, o.env);
+	const repo = await tmp("omp-cloud-repo-");
+	await run("git", ["init", "-q"], { cwd: repo });
+	const repoFile = join(repo, ".omp-cloud.yml");
+	if (o.repo !== undefined) await writeFile(repoFile, o.repo);
+	const host = fakeHost({ cwd: repo });
+	await new Cloud(fakePi().pi, "/own", env, await tmp("omp-cloud-home-"), undefined, undefined, FAST_RETRY).handle("status", { ...host.host, switchSession: async () => ({ cancelled: false }) });
+	expect(host.notes).toHaveLength(1);
+	const [text, type] = host.notes[0] ?? ["", undefined];
+	return { text, type, personal: join(env.XDG_CONFIG_HOME ?? "", "omp-cloud", "config.yml"), repoFile };
+}
+
+describe("/cloud status", () => {
+	test("reports the url and where it came from, the token only by origin, then what the service says", async () => {
+		const { text, type, personal } = await status({ personal: `url: ${origin}/\ntoken: tok\n` });
+		expect(type).toBe("info");
+		expect(text).toBe(
+			[
+				"☁ omp-cloud",
+				`  url: ${origin} (${personal})`,
+				`  token: set (${personal})`,
+				"  deliver: tray (default)",
+				"  user: dev",
+				"  runs: anthropic",
+				"  a handoff from here runs: anthropic/claude-sonnet-5-5 (thinking high), this session's model",
+				"  fallback for requests that name no model: anthropic/claude-sonnet-5-5 · omp 18.12.3",
+			].join("\n"),
+		);
+		expect(text).not.toMatch(/\btok\b/);
+	});
+
+	test("the model a handoff runs is the session's, not the service's fallback", async () => {
+		const env = await cloudEnv(`url: ${origin}\ntoken: tok\n`);
+		const host = fakeHost({ cwd: await tmp("omp-cloud-repo-"), model: { provider: "anthropic", id: "claude-opus-5-5" } });
+		await new Cloud(fakePi({ thinking: "low" }).pi, "/own", env, await tmp("omp-cloud-home-")).handle("status", { ...host.host, switchSession: async () => ({ cancelled: false }) });
+		const [text = ""] = host.notes[0] ?? [];
+		expect(text).toContain("a handoff from here runs: anthropic/claude-opus-5-5 (thinking low), this session's model");
+		expect(text).not.toContain("default model");
+	});
+
+	test("a !command token works and its output never shows", async () => {
+		const { text, personal } = await status({ personal: `url: ${origin}\ntoken: "!printf tok"\n` });
+		expect(text).toContain(`token: set (${personal})`);
+		expect(text).not.toContain("printf");
+		expect(text).toContain("user: dev");
+	});
+
+	test("the environment is the origin when it wins", async () => {
+		const { text } = await status({ personal: "url: http://nowhere.invalid\n", env: { OMP_CLOUD_URL: origin, OMP_CLOUD_TOKEN: "tok" } });
+		expect(text).toContain(`url: ${origin} (env)`);
+		expect(text).toContain("token: set (env)");
+	});
+
+	test("the repository file is shown, its url is ignored for the personal one and the status says so", async () => {
+		const { text, type, repoFile } = await status({ personal: `url: ${origin}\ntoken: tok\n`, repo: "url: http://evil.invalid\nsecretEnv: [A]\n" });
+		expect(type).toBe("info");
+		expect(text).toMatch(new RegExp(`url: ${origin} \\(.*\\) · the repository's value is ignored`));
+		expect(text).toContain(`repository file: ${repoFile}`);
+		expect(text).not.toContain("evil.invalid");
+		expect(text).toContain("user: dev");
+	});
+
+	test("a repository url with no personal one leaves it unconfigured, and the error names the ignored key", async () => {
+		const { text, type, personal, repoFile } = await status({ personal: "token: tok\n", repo: "url: http://evil.invalid\n" });
+		expect(type).toBe("error");
+		expect(text).toContain("url: not set");
+		expect(text).toContain(`token: set (${personal})`);
+		expect(text).toContain(`omp-cloud is not configured: set url and token in ${personal}`);
+		expect(text).toContain(`url in ${repoFile} is ignored`);
+		expect(text).not.toContain("evil.invalid");
+	});
+
+	test("warnings about unknown keys and wrong types show, without values", async () => {
+		const { text, personal } = await status({ personal: `url: ${origin}\ntoken: tok\ncolour: secret-marker\nsecretEnv: secret-marker\n` });
+		expect(text).toContain(`warning: ${personal}: colour is not a known key, ignored`);
+		expect(text).toContain(`warning: ${personal}: secretEnv is not a list, ignored`);
+		expect(text).not.toContain("secret-marker");
+		expect(text).toContain("user: dev");
+	});
+
+	test("an unreachable service still reports the connection, as an error", async () => {
+		const { text, type, personal } = await status({ personal: "url: http://127.0.0.1:9\ntoken: tok\n" });
+		expect(type).toBe("error");
+		expect(text).toContain(`url: http://127.0.0.1:9 (${personal})`);
+		expect(text).toContain(`token: set (${personal})`);
+		expect(text).not.toContain("user:");
+	});
+
+	test("nothing configured says how to configure it, naming the personal file", async () => {
+		const { text, type, personal } = await status();
+		expect(type).toBe("error");
+		expect(text).toContain("url: not set");
+		expect(text).toContain("token: not set");
+		expect(text).toContain(`set url and token in ${personal} (for example token: "!cat ~/.config/omp-cloud/service.token")`);
+		expect(text).toContain("OMP_CLOUD_URL and OMP_CLOUD_TOKEN");
+	});
+
+	test("a personal file that is not valid YAML is an error naming it", async () => {
+		const { text, type, personal } = await status({ personal: "url: [unclosed\n" });
+		expect(type).toBe("error");
+		expect(text).toContain(`${personal} is not valid YAML`);
+	});
+});

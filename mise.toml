@@ -1,0 +1,87 @@
+[tools]
+bun = "1.4.3"
+# install-sh.test.ts runs shellcheck on install.sh and skips without it; pinned so local runs check install.sh with a known version.
+shellcheck = "0.11.0"
+
+# The VM tasks read the vmon key from ~/.config/omp-cloud/vmon.key themselves (dev/env.ts); nothing is echoed.
+# The `dev:*` tasks are the developer's own tools in dev/: not part of the service, not acceptance scenarios.
+
+[tasks."dev:provider"]
+description = "Run the deterministic fake OpenAI provider (HOST/PORT, default 127.0.0.1:4010)"
+run = "bun run test/fake-provider.ts"
+
+[tasks."dev:local"]
+description = "RPC prompt, ask dialog, continuity and resume against a local omp and the fake provider (no VM)"
+run = "bun run dev/local.ts"
+
+[tasks.template]
+description = "Build the omp-agent:<version>-<recipe hash> vmon template by hand (argument, else the owner's omp version: Tern's managed install, else PATH); the service builds missing ones itself"
+run = "bun run scripts/template.ts"
+
+[tasks.scenario]
+description = "Service acceptance: the service API end to end on local vmon with the fake provider"
+run = "bun run test/scenario.ts"
+
+[tasks."dev:play"]
+description = "Talk to a real model through the omp auth gateway in a persistent, pausable VM from the template `mise run template` builds (see dev/play.ts)"
+run = "bun run dev/play.ts"
+
+[tasks."infra:up"]
+description = "Set this checkout up as the service host: `omp-cloud setup --checkout` (idempotent; one sudo prompt): vibemon, the service network and system units, persistent user units for omp's auth broker + gateway, the omp-cloud service and a daily backup timer, linger, the plugin link and config.yml when absent; `-- --no-login`, `--yes`, `--no-plugin`, `--no-linger` pass through"
+run = "bun run src/bin.ts setup --checkout"
+
+[tasks."infra:down"]
+description = "Undo `infra:up`: `omp-cloud uninstall --checkout` stops and removes the user and system units, the plugin link and the sudo rule (linger only if setup enabled it) and keeps data and backups; `-- --purge` also deletes vmon, its data, secrets, config and the broker vault (backups are kept); `-- --yes` skips the prompt"
+run = "bun run src/bin.ts uninstall --checkout"
+
+[tasks.backup]
+description = "One archive of the service's database (a consistent online copy), blobs and git cache in <dataDir>/../backups; `-- --keep N` (default 7), `-- --config path`"
+run = "bun run scripts/backup.ts"
+
+[tasks."release:build"]
+description = "Build the release into dist/: omp-cloud-linux-x86_64 and -arm64 (compiled from src/bin.ts), sha256 sidecars, release.json, notes.md and THIRD-PARTY-NOTICES.txt; `-- --version X` (default package.json's), `-- --out dir`"
+run = "bun run scripts/release.ts build"
+
+[tasks.release]
+description = "Cut a release: `mise run release -- <version>` needs a clean tree, bumps package.json, plugin/package.json and .omp-plugin/marketplace.json, moves CHANGELOG's Unreleased into the version, commits `release: <v>` and tags v<v> locally (pushes nothing; prints the git push line)"
+run = "bun run scripts/release.ts release"
+
+[tasks.serve]
+description = "Run the omp-cloud service in the foreground (stop the omp-cloud user unit first: both bind service.json's listen); config from --config, $OMP_CLOUD_CONFIG or ~/.config/omp-cloud/service.json"
+run = "bun run src/main.ts"
+
+[tasks."dashboard:dev"]
+description = "Run the dashboard on seeded data in a temp directory (threads in every phase, spend, devices, settings, a fake vmon with VMs, runner off) and print a sign-in link; Ctrl+C removes everything"
+run = "bun run scripts/dashboard-dev.ts"
+
+[tasks.test]
+description = "Unit tests"
+run = "bun test"
+
+[tasks.typecheck]
+description = "Typecheck (tsc --noEmit; the dashboard client has its own tsconfig with the DOM lib)"
+run = "bunx tsc --noEmit && bunx tsc --noEmit -p src/dashboard/client"
+
+[tasks.smoke]
+description = "curl smoke test of the API against a freshly started service (no VM)"
+run = "./scripts/smoke.sh"
+
+[tasks."plugin:scenario"]
+description = "Plugin acceptance on the distribution path: installs the plugin from the release's bundle through a local marketplace into isolated omps (never linked; step 0 asserts the real /cloud registers), loads it in real local omps with the fake model and hands off to a fresh service on local vmon (takes the shared run lock, so it refuses to start while another scenario or parity:capture runs)"
+run = "bun run test/plugin-scenario.ts"
+
+[tasks."update:scenario"]
+description = "Updater acceptance: real compiled releases and a throwaway systemd user unit (omp-cloud-e2e-*) against a static feed in a temp dir: install, update to a newer release, rollback of a broken one, checkout = unsupported; never touches the live units (needs the pinned vibemon, an omp and the network; builds three releases, minutes)"
+run = "bun run test/update-scenario.ts"
+
+[tasks.cleanhost]
+description = "Clean Debian 13 VMs on the local vmon (team omp-cloud-test) for install tests: `-- create [--keep]` (prints the id), `exec <id> [--root] -- <cmd>`, `put <id> <local> <remote>`, `get <id> <remote> <local>`, `destroy <id>`, `list`, `template`"
+run = "bun run scripts/cleanhost.ts"
+
+[tasks."install:scenario"]
+description = "Install acceptance: builds the x64 release, serves it with install.sh to a clean Debian 13 VM (nested KVM, team omp-cloud-test), runs `curl | sh`, checks doctor, units, a real turn against the fake model in a nested VM, a second setup, persistence and uninstall --purge; destroys the VM at the end (slow: nested template build, tens of minutes); `-- --no-nested` for a host whose nested KVM kills the VM: proves everything but the nested pieces"
+run = "bun run test/install-scenario.ts"
+
+[tasks."parity:capture"]
+description = "Native-parity harness: one scripted session on a real omp (fake model, throwaway service on local vmon): a native bash job and subagent, a cloud handoff, /jobs, wait, a question, turn cards and the hub. Twice: a Tern-protocol pty (replays the TSP record: every `rows` node and its component, cloud vs native job views per surface by role and node kind) and tmux with the classic renderer (ANSI captures). Writes /tmp/parity/ and prints a summary table (~5 min); `-- --only native|ansi`, `--no-cloud` (no service or VM, no run lock), `--assert` (fail on rows from omp-cloud or an incomplete cloud job view), `--plugin head` (the committed plugin: the baseline), `--out dir`; takes the shared run lock, so it refuses to start while a scenario runs"
+run = "bun run scripts/parity/capture.ts"

@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      # Unit tests run `omp session pack` and friends: they need the pinned omp on PATH.
+      - uses: ./.github/actions/install-omp
+      - name: Typecheck
+        run: |
+          bunx tsc --noEmit
+          bunx tsc --noEmit -p src/dashboard/client
+      # Unit tests only: the scenarios and the smoke test need vmon (KVM) and a model.
+      - name: Test
+        run: bun test

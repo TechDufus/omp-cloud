@@ -1,0 +1,293 @@
+/* Threads and thread detail: only what omp-stats' kit has no class for. */
+
+.threads-subtitle {
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.threads-subtitle-title {
+	max-width: 48ch;
+	min-width: 0;
+}
+
+/* Every repository's table shares one fixed layout: the Thread column takes the rest, long text is cut with an ellipsis. */
+.threads-group .table {
+	table-layout: fixed;
+	min-width: 980px;
+}
+
+.threads-group .table td {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.threads-group .table td[data-wrap="true"] {
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+.threads-group .table .row,
+.threads-group .table .stack {
+	min-width: 0;
+}
+
+.threads-changes {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.threads-turns-cell {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+}
+
+.threads-col {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	min-width: 0;
+}
+
+/* Metrics card */
+.threads-metrics {
+	gap: 16px;
+}
+
+.threads-context {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.threads-context-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.threads-context-meter {
+	height: 8px;
+	border-radius: 4px;
+}
+
+.threads-context-meter .meter-fill {
+	border-radius: 4px;
+}
+
+.threads-chart {
+	min-width: 0;
+}
+
+.threads-chart .threads-label {
+	margin-top: 0;
+}
+
+/* Prompts, replies and questions are plain text; never markup. */
+.threads-text {
+	margin: 0;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	color: var(--ink-1);
+}
+
+.threads-label {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--ink-3);
+	margin: 12px 0 4px;
+}
+
+.threads-facts .kv {
+	grid-template-columns: minmax(0, 1fr);
+}
+
+.threads-facts .kv-value {
+	overflow-wrap: anywhere;
+}
+
+.threads-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+/* Open question */
+.threads-question {
+	border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+}
+
+.threads-question-body {
+	gap: 12px;
+}
+
+.threads-options {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.threads-option {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 2px;
+	width: 100%;
+	padding: 8px 12px;
+	text-align: left;
+	cursor: pointer;
+	color: var(--ink-1);
+	background: var(--raised);
+	border: 1px solid var(--line-2);
+	border-radius: var(--r-control);
+	transition: border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+
+.threads-option:hover {
+	border-color: var(--line-4);
+}
+
+.threads-option[aria-pressed="true"] {
+	border-color: var(--accent-line);
+	background: var(--accent-soft);
+}
+
+.threads-option:focus-visible {
+	outline: 2px solid var(--focus);
+	outline-offset: 2px;
+}
+
+.threads-option-label {
+	font-weight: 600;
+}
+
+.threads-option-description {
+	font-size: 12.5px;
+	color: var(--ink-2);
+}
+
+.threads-answer {
+	flex: 1;
+	min-width: 0;
+}
+
+/* Composer */
+.threads-composer {
+	gap: 10px;
+}
+
+.threads-textarea {
+	height: auto;
+	padding: 8px 10px;
+	line-height: 1.5;
+	resize: vertical;
+	width: 100%;
+}
+
+/* Turns timeline */
+.threads-turns {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.threads-turn {
+	border: 1px solid var(--line-2);
+	border-radius: var(--r-control);
+	background: var(--raised);
+}
+
+.threads-turn > summary {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 10px 14px;
+	cursor: pointer;
+	list-style: none;
+}
+
+.threads-turn > summary::-webkit-details-marker {
+	display: none;
+}
+
+.threads-turn > summary::before {
+	content: "▸";
+	color: var(--ink-3);
+	transition: transform var(--dur-1) var(--ease);
+}
+
+.threads-turn[open] > summary::before {
+	transform: rotate(90deg);
+}
+
+.threads-turn > summary:focus-visible {
+	outline: 2px solid var(--focus);
+	outline-offset: -2px;
+	border-radius: var(--r-control);
+}
+
+.threads-turn-title {
+	flex: 1;
+	min-width: 0;
+	color: var(--ink-2);
+}
+
+.threads-turn-metrics {
+	flex: none;
+	white-space: nowrap;
+}
+
+.threads-turn-body {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 0 14px 12px;
+}
+
+.threads-turn-body .threads-label:first-child {
+	margin-top: 0;
+}
+
+.threads-qa {
+	margin-top: 6px;
+}
+
+/* Live events */
+.threads-feed {
+	list-style: none;
+	margin: 0;
+	padding: 4px 0;
+	max-height: 360px;
+	overflow-y: auto;
+	font-size: 12.5px;
+}
+
+.threads-event {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+	padding: 4px 16px;
+}
+
+.threads-event:hover {
+	background: var(--hover);
+}
+
+.threads-event time {
+	flex: none;
+	font-family: var(--font-mono);
+}
+
+.threads-event-text {
+	flex: 1;
+	min-width: 0;
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
+	color: var(--ink-2);
+}
+
+.threads-event[data-lifecycle="true"] .threads-event-text {
+	color: var(--ink-1);
+}

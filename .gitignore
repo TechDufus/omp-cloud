@@ -1,0 +1,9 @@
+node_modules/
+.env*
+*.log
+/tmp/
+/dist/
+# The owner's host notes; omp loads them through contextFiles.extra.
+/AGENTS.local.md
+# Raw captures: scripts/showcase/optimize.ts turns them into docs/assets/.
+/docs/assets/src/

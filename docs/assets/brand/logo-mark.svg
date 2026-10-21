@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="omp-cloud mark">
+<title>omp-cloud</title>
+<defs>
+<linearGradient id="oc-g" x1="56" y1="150" x2="456" y2="400" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#5ad8e6"/><stop offset=".5" stop-color="#a07bf2"/><stop offset="1" stop-color="#ed4abf"/></linearGradient>
+<mask id="oc-m" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+<g fill="#fff">
+<circle cx="170" cy="276" r="78"/>
+<circle cx="286" cy="234" r="112"/>
+<circle cx="388" cy="296" r="66"/>
+<rect x="58" y="286" width="396" height="104" rx="52"/>
+</g>
+<path d="M196 250 L252 306 L196 362" fill="none" stroke="#000" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="284" y="318" width="46" height="46" rx="9" fill="#000"/>
+</mask>
+</defs>
+<rect width="512" height="512" fill="url(#oc-g)" mask="url(#oc-m)"/>
+</svg>

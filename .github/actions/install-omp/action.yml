@@ -1,0 +1,9 @@
+name: Install the pinned omp
+description: >-
+  Puts the omp this repository pins (@oh-my-pi/pi-coding-agent in package.json) on PATH, downloaded from omp's build
+  service and checked against the SHA-256 it reports. Some unit tests run `omp session pack`.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: ./.github/actions/install-omp/install-omp.sh

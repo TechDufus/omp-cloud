@@ -1,0 +1,47 @@
+# Cloud agents as omp jobs
+
+[README](../README.md) · [Documentation index](../README.md#documentation)
+
+A thread your session launched, messaged or watches is an agent of your omp, and while a turn runs on it, that turn is a background job, both named after the thread (`PaneZoomShortcut`). omp's own tools reach it the way they reach a native subagent.
+
+## What you see
+
+- The job shows in omp's "Subagents · N running" strip, the jobs pill and its hover card, `/jobs`, Tern's Background jobs panel and omp's `wait` view, and as `proc://<job id>`, which shows the job and the tail of its Output. Every surface uses the same name, the job id.
+- Each of those draws the turn like a native subagent: step dots for the thread's turns, bars of per-turn duration, a context meter, a line of cost, tokens, requests and tools, and the stage (the agent's current tool or reply). The progress is live: the current tool with its intent, the last few tools (errors marked), the agent's own lines and an open question, and the cost, tokens and requests of the running turn update with every model request (with a service that reports `events.live`; without it, plain tool lines and the totals at the turn's end). A tool call reads as omp prints it, `bash: <command>`, never as raw JSON. A call still running reads as omp marks its own running tools, `└ bash: <command>`, with its elapsed time once it passes 5 seconds; a finished one carries `✓` or `✕` and its duration, and in a finished turn's card a call whose end never arrived says `no end seen`. The Output tail is 16 lines at most.
+- What the cloud agent starts in its own VM (a background command, a detached subagent) shows as children of its job, the way omp nests a native subagent's own jobs: under the cloud agent's row in Tern's Background jobs panel and `/jobs`, a command as a `bash` or `eval` job labelled by its command and a subagent as a `task` job labelled by its agent id (a child of a child nests under it). A child is live from the cloud's `child_start` and settles at its `child_end` with the status the VM's omp reported (completed, failed or cancelled, with the reason); its view is its label and, for a subagent, the stage, tools, requests, tokens, cost and context the VM reports, and the row's clock is omp's own. A child that outlives the turn stays listed until it ends, and your omp keeps following the thread's stream for it. This needs a service with `events.children`.
+- The job's clock starts when your omp registers it, not when the cloud turn started.
+
+## Drilling in
+
+- `agent://<id>` is the latest finished reply of the thread; `agent://<id>/<field>` reads a field of its structured result (`reply`, `error`, `branch`, `diffstat`, `metrics`, …). `history://<id>` is its conversation. Use the job id omp shows (`PaneZoomShortcut`).
+- `proc://<id>` is the running job (see above); `/jobs` lists it with the native ones.
+
+## How results arrive
+
+- **A thread the model started** (through the `cloud` tool): when the turn ends, omp itself delivers the result as the job's async-result, with a short summary and "full payload at `agent://<id>`" (`read agent://<id>` or `history://<id>` read more). No `[cloud]` card tells the model a second time. A `wait` that is blocked on the job returns the result itself. Its questions arrive as `[cloud]` cards that wake the model, because the model needs them; so does a finished turn when the thread has no job (the host's job manager is missing or full). When a `write agent://<id>` message woke an idle thread, its next reply goes back to the sender as a message instead ([messaging](#messaging-a-cloud-agent)).
+- **A thread you started yourself**: the result goes to your cloud inbox and tray, or to a `[cloud]` card with `deliver: transcript` or the hub's `o` ([commands](commands.md#where-results-go)). It never wakes the model, so its running turn does not hold your session busy; `wait` still returns its result.
+- **Adoption.** If the model `send`s to a thread you started with the default `follow`, it adopts the thread and its results come to the model from then on (`follow: "silent"` leaves it as it is, and an `answer` never changes who follows). Following never downgrades: a thread the model follows stays the model's. If the model adopts a thread while a turn is running, its `wait` result is a pointer (`Turn N done[: title]. The full result arrives as a [cloud] message from this thread, not through this job.`) and the card carries the result, so the model gets it once.
+- **Lost contact.** A thread whose service could not be reached for 10 minutes is `stale`: the model is told once (`lost contact with the cloud; use cloud status`), and the session keeps retrying and delivers a turn that finished meanwhile.
+- **Deleted threads.** A thread deleted by someone else settles its job as failed and the model is told; one the model deletes itself is dropped silently. The model's other threads are not affected.
+
+## Messaging a cloud agent
+
+`write agent://<id>` sends the agent a message with omp's own semantics: it never aborts the agent's work. The answer is omp's receipt:
+
+- `woken`: the agent was idle, and the message started a new turn.
+- `injected`: a turn was running, and the message reached it at its next step boundary, inside the same turn.
+- `revived`: the thread was archived; its VM is restored and the message starts a turn.
+- `failed`: the message did not arrive (the error says why; after retries that could not confirm the outcome it says the message may have been delivered).
+
+A cloud agent writes to you the same way: it writes `agent://Parent` in its VM, and your omp shows an ordinary incoming message from the job id, with a reply link. When your message woke an idle agent, its next reply goes back to you as a message too (the wake relay), so it is the turn's one delivery. This needs a service with the `threads.irc` capability ([API](api.md)); without it the message is a queued turn. `/cloud send` and the `cloud` tool's `send` with `mode: "interrupt"` use the thread's message queue.
+
+A cloud agent can write `agent://Parent` only when omp enables IRC for its top-level session, which omp allows when the session may spawn subagents (`task.maxRecursionDepth` of -1 or above 0). In a cloud agent omp uses its default of 2, unless the global `config.yml` you ship sets a value, which wins. If yours sets `task.maxRecursionDepth: 0`, cloud agents cannot message you back; your messages to them still work. omp-cloud does not override it, because it is your explicit choice.
+
+## Cancelling
+
+- Cancelling a cloud job from omp's own surfaces (the jobs panel, `/jobs`, `proc://<id>/kill`) stops the cloud turn, as killing a native subagent does. The plugin warns `☁ <name> was cancelled in omp: its cloud turn is being stopped (<short id>)`, and tells the model if it started the thread; the turn's job is not registered again.
+- A child of a cloud agent cannot be cancelled from omp, as omp does not let a session cancel a native subagent's own jobs (the panel offers no Cancel for it, `/jobs kill` and `proc://<id>/kill` say they could not cancel it): there is no remote cancel for it. A cancel that reaches the child anyway is declined: the plugin says `☁ <child> runs in the cloud and cannot be cancelled from omp: it keeps running there`, the child gets a row again, and the cloud turn is never stopped because of it. omp's own cleanup ends the rows silently, and the thread's next event lists the running children again.
+- omp's own cleanup (`/clear`, a new session, a switch, a fork, a branch, shutdown) cancels the session's jobs with the same reason, so the plugin tells it apart by state: omp reports that the session is changing (`isSessionTransitioning`, which every one of those paths runs under), plus the manager's shutdown reason and, for an omp without that, a 5-second window around a switch or branch. The cloud turn keeps running, and the job registers again at the thread's next event.
+- `/cloud stop` stops the turn in either case.
+
+omp has no extension API for jobs. The plugin registers each turn through the job manager omp exports (`AsyncJobManager`) and puts a view in front of its widget registry for cloud jobs only (every other job and every `subscribe` goes to omp's own registry). If the manager is missing or full, the thread has no job and nothing else changes.

@@ -1,0 +1,48 @@
+<!doctype html>
+<!-- README banner, 1200x300 CSS px rendered at 2x = 2400x600. {{THEME}} is dark or light.
+     Text stays inside the central 1100x260 (x 50..1150, y 20..280). Crops of the screenshots are the --* vars below. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="{{COMPOSE}}/common.css">
+<style>
+	body { width: 1200px; height: 300px; --dash-w: 1008; --dash-x: -157; --dash-y: -98; --tui-w: 950; --tui-x: -347.5; --tui-y: -104.5; }
+	.copy { position: absolute; left: 64px; top: 40px; width: 400px; z-index: 5; }
+	.lockup { display: block; height: 38px; margin-left: -4px; }
+	h1 { margin-top: 24px; font-size: 31px; line-height: 1.2; font-weight: 700; letter-spacing: -0.025em; color: var(--ink-1); }
+	.pills { margin-top: 26px; }
+	.glow.mark { left: -40px; top: -90px; width: 480px; height: 360px; background: radial-gradient(closest-side, var(--glow-a), var(--glow-b) 55%, transparent); }
+	.glow.right { right: -120px; bottom: -160px; width: 700px; height: 420px; background: radial-gradient(closest-side, var(--glow-c), transparent); }
+
+	.dash { left: 500px; top: 40px; width: 760px; height: 300px; }
+	.dash .shot { height: 272px; }
+	.dash img { width: calc(var(--dash-w) * 1px); left: calc(var(--dash-x) * 1px); top: calc(var(--dash-y) * 1px); }
+
+	/* One whole tile (the second, with the context chart), cropped between the tile dividers of tui-cloud-tiles-*.png: source x 695..1261, y 209..513, at 0.5 scale. */
+	.tui { left: 476px; top: 132px; width: 285px; height: 154px; z-index: 6; }
+	.tui .shot { height: 100%; }
+	.tui img { width: calc(var(--tui-w) * 1px); left: calc(var(--tui-x) * 1px); top: calc(var(--tui-y) * 1px); }
+</style>
+</head>
+<body class="theme-{{THEME}}">
+	<div class="field"></div>
+	<div class="glow mark"></div>
+	<div class="glow right"></div>
+
+	<div class="win dash">
+		<div class="bar"><i></i><i></i><i></i><span class="addr">localhost:8081 <b>/ threads</b></span></div>
+		<div class="shot"><img src="{{SRC}}/dashboard-threads-{{THEME}}.png" alt=""></div>
+	</div>
+	<div class="win tui">
+		<div class="shot"><img src="{{SRC}}/tui-cloud-tiles-{{THEME}}.png" alt=""></div>
+	</div>
+
+	<div class="copy">
+		<img class="lockup" src="{{BRAND}}/logo-{{THEME}}.svg" alt="">
+		<h1>Cloud agents for omp.<br>On your hardware.</h1>
+		<div class="pills"><span>KVM microVMs</span><span>no Kubernetes</span><span>returns a branch</span></div>
+	</div>
+
+	<i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+</body>
+</html>
