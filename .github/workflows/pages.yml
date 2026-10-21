@@ -39,10 +39,14 @@ jobs:
       - run: bun install --frozen-lockfile
       # The canonical, sitemap and 404 URLs use the address Pages serves the site at now:
       # https://techdufus.com/omp-cloud until the custom domain is set, then that domain.
-      # Re-run this workflow after changing the custom domain.
+      # Re-run this workflow after changing the custom domain. Pages reports http:// for a
+      # site under a custom-domain user site, but the site is served over https (an http
+      # <base> would make the 404 page's stylesheet mixed content), hence the upgrade.
       - id: pages
         uses: actions/configure-pages@v6
-      - run: bun run site/build.ts --out site/dist --site-url "${{ steps.pages.outputs.base_url }}"
+      - env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: bun run site/build.ts --out site/dist --site-url "${BASE_URL/#http:\/\//https://}"
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site/dist
