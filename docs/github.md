@@ -78,6 +78,8 @@ The reply is cut to 6000 characters. Every later push updates only that section 
 
 A pull request that fails (the App was uninstalled, GitHub is down) is a `pr` event `pull request failed: <message>`. It never changes `pushed`: the branch is on the remote either way.
 
+**Secrets stay out of the pull request.** omp hides secret values from the model but prints the real value in what it shows you, so a reply can contain one. Before the title or the section is posted, the service replaces every secret value it delivered to that thread (the thread's own `secretEnv` and secret files, and the [Secrets](secrets-and-mcp.md) that match its repository) with `[secret <NAME>]`, or `[secret file <path>]` for a secret file's content, longest value first. The same rule as masking applies: an env value under 4 characters is left alone. Only the pull request is scrubbed: the reply stored on the service, the dashboard and your omp stays as omp printed it. If the values cannot be read (the thread's `secrets.json` is missing, say), nothing is posted and the `pr` event is `pull request not updated: could not read the thread's secrets: <reason>`; like any pull request failure it never changes `pushed`.
+
 ## Where it lives
 
 - `<dataDir>/github/app.json` and `app.pem`: the App's description and private key, in a 0700 directory, files 0600. A key with group or other permission bits stops the service from using it (`the GitHub App key <path> must be mode 0600`).

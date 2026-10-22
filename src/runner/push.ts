@@ -25,6 +25,7 @@ import {
 	type Turn,
 } from "../store/types";
 import { cutBytes } from "./ask";
+import { type MaskEntry, scrubSecrets } from "./mask";
 import { formatDuration } from "./omp-config";
 
 /** The key of the service's own question: the runner tells it from an agent's `ask` by this key and by its missing omp request id. */
@@ -122,6 +123,8 @@ export interface PushDeps {
 	/** The GitHub pull requests of the pushed branch; null when no GitHub App is connected. */
 	pulls: PullRequests | null;
 	github: Pick<GitHubApp, "connected">;
+	/** Every secret value the service delivered to the thread (`threadMaskEntries`): scrubbed from the text a pull request carries. Rejects when they cannot be read. */
+	secrets(thread: Thread): Promise<MaskEntry[]>;
 	/** `runner.questionTimeoutSeconds` */
 	questionTimeoutSeconds: number;
 	/** The turn's clock: it stands still while the question is open. */
@@ -273,29 +276,13 @@ export class PushStep {
 	 * only adds events and the thread's `pr`: a failure here never touches the push's record.
 	 */
 	async #afterPush(input: { remote: string; target: string; head: string; reply: string; defaultBranch: string }): Promise<void> {
-		const { store, settings, pulls, github, event } = this.deps;
-		const { thread } = this;
+		const { settings, pulls, github, event } = this.deps;
 		const repo = githubRepoOf(input.remote);
 		if (repo === null || pulls === null || !github.connected()) return;
 		const mode = settings.get("git.pr");
 		if (mode !== "off") {
 			try {
-				const base = thread.repo.baseRef || input.defaultBranch;
-				if (base === "") throw new Error("the base branch is unknown");
-				const pr = await pulls.open({
-					...repo,
-					head: input.target,
-					base,
-					title: thread.name || thread.title,
-					section: pullRequestSection({ threadId: thread.id, name: thread.name || thread.title, model: thread.model || "default", reply: input.reply }),
-					draft: mode === "draft",
-				});
-				if (pr.action === "closed") event(`pull request #${pr.number} was closed; not opening another`, "pr");
-				else {
-					store.setThreadPullRequest(thread.id, { number: pr.number, url: pr.url });
-					if (pr.action === "opened") event(`opened ${(pr.draft ?? mode === "draft") ? "draft " : ""}pull request #${pr.number} ${pr.url}`, "pr");
-					else if (pr.action === "updated") event(`updated pull request #${pr.number} ${pr.url}`, "pr");
-				}
+				await this.#openPullRequest(pulls, repo, mode === "draft", input);
 			} catch (error) {
 				event(`pull request failed: ${error instanceof Error ? error.message : String(error)}`, "pr");
 			}
@@ -307,6 +294,44 @@ export class PushStep {
 			event(verdict.verified ? `GitHub shows ${short} as Verified` : `GitHub does not verify ${short}: ${verdict.reason}`, "sign");
 		} catch {
 			// GitHub may not have the commit yet or may not answer: nothing to report.
+		}
+	}
+
+	/**
+	 * The omp-cloud section and title are scrubbed of every secret value the service delivered to the thread first: omp
+	 * restores real values in what it prints, so the reply may hold one in clear. When the values cannot be read nothing is posted.
+	 */
+	async #openPullRequest(
+		pulls: PullRequests,
+		repo: { owner: string; repo: string },
+		draft: boolean,
+		input: { target: string; reply: string; defaultBranch: string },
+	): Promise<void> {
+		const { store, event } = this.deps;
+		const { thread } = this;
+		const base = thread.repo.baseRef || input.defaultBranch;
+		if (base === "") throw new Error("the base branch is unknown");
+		let secrets: MaskEntry[];
+		try {
+			secrets = await this.deps.secrets(thread);
+		} catch (error) {
+			event(`pull request not updated: could not read the thread's secrets: ${error instanceof Error ? error.message : String(error)}`, "pr");
+			return;
+		}
+		const name = thread.name || thread.title;
+		const pr = await pulls.open({
+			...repo,
+			head: input.target,
+			base,
+			title: scrubSecrets(name, secrets),
+			section: scrubSecrets(pullRequestSection({ threadId: thread.id, name, model: thread.model || "default", reply: input.reply }), secrets),
+			draft,
+		});
+		if (pr.action === "closed") event(`pull request #${pr.number} was closed; not opening another`, "pr");
+		else {
+			store.setThreadPullRequest(thread.id, { number: pr.number, url: pr.url });
+			if (pr.action === "opened") event(`opened ${(pr.draft ?? draft) ? "draft " : ""}pull request #${pr.number} ${pr.url}`, "pr");
+			else if (pr.action === "updated") event(`updated pull request #${pr.number} ${pr.url}`, "pr");
 		}
 	}
 

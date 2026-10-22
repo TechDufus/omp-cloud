@@ -5,10 +5,12 @@ import type { GitService } from "../git";
 import { isRecord } from "../guards";
 import { parseMcpServers } from "../connectors/mcp-servers";
 import { sha256Hex } from "../pairing/secrets";
+import type { ServiceSecrets } from "../secrets/store";
 import { MAX_SOURCE_BYTES } from "../server/limits";
 import type { Store } from "../store";
 import { type BlobName, RESULT_BRANCH_PREFIX, type Thread, type ThreadSecrets } from "../store/types";
 import { ExecError, sandboxExec, shellQuote } from "./exec";
+import { type MaskEntry, maskEntries } from "./mask";
 import { applyResultBundle, restoreRepo } from "./git";
 import ircPeerSource from "./vm-extension/irc-peer" with { type: "text" };
 import { cloudSystemPrompt, modelsYaml, type OverlayPolicy, overlayConfigYaml } from "./omp-config";
@@ -21,10 +23,7 @@ const SYSTEM_PROMPT_FILE = `${VM_CLOUD_DIR}/system-prompt.md`;
 /** omp's secret obfuscation list, read when the overlay sets `secrets.enabled`. */
 const MASK_FILE = `${VM_AGENT_DIR}/secrets.yml`;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-/** An env value shorter than this is not masked: it would garble ordinary text. */
-const MIN_MASKED_ENV_CHARS = 4;
-/** The largest secret file whose content is masked. */
-const MAX_MASKED_FILE_BYTES = 65536;
+
 
 export interface ProvisionInput {
 	thread: Thread;
@@ -85,15 +84,6 @@ export async function shipIrcExtension(sandbox: Sandbox, thread: Thread): Promis
 	await sandbox.files.write(VM_IRC_CONFIG, ircConfigJson(thread));
 }
 
-/** The content of a secret file as text to mask: the empty list for content that is empty, over 64 KiB or not valid UTF-8. */
-function maskableContent(bytes: Buffer): string[] {
-	if (bytes.length === 0 || bytes.length > MAX_MASKED_FILE_BYTES) return [];
-	try {
-		return [new TextDecoder("utf-8", { fatal: true }).decode(bytes)];
-	} catch {
-		return [];
-	}
-}
 
 /** Uploads a store blob into the sandbox by streaming. */
 export async function uploadBlob(sandbox: Sandbox, file: Bun.BunFile, path: string): Promise<void> {
@@ -128,6 +118,24 @@ function parseSecrets(text: string): ThreadSecrets {
 		env[name] = value;
 	}
 	return { files, env, mcp: parseMcpServers(raw.mcp) };
+}
+
+/** The thread's own secret files, env and MCP servers from its stored `secrets.json`; null when it has none. Throws when the blob is missing or malformed. */
+async function readThreadSecrets(store: Store, thread: Thread): Promise<ThreadSecrets | null> {
+	if (thread.secretFiles.length === 0 && thread.secretEnv.length === 0 && thread.mcpServers.length === 0) return null;
+	const blob = await store.blob(thread.id, "secrets.json");
+	if (blob === null) throw new Error("the thread's secrets.json is missing");
+	return parseSecrets(await blob.text());
+}
+
+/**
+ * Every secret value the service delivered to the thread's VM, as `provisionVm` masks them: its own secret env and
+ * files plus the service Secrets that match it (the thread's own env wins over the service's). Throws when they cannot be read.
+ */
+export async function threadMaskEntries(store: Store, service: Pick<ServiceSecrets, "resolveForThread">, thread: Thread): Promise<MaskEntry[]> {
+	const own = await readThreadSecrets(store, thread);
+	const { env } = await service.resolveForThread(thread);
+	return maskEntries({ ...env, ...own?.env }, own?.files ?? []);
 }
 
 /** Escapes the characters that are special in a gitignore pattern. */
@@ -175,12 +183,7 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 	const restoreHead = thread.restoreHead;
 	// A bundle without a recorded head was stored by a turn that never completed: the thread restores at the handoff commit.
 	const result = resultHead === "" && restoreHead === "" ? null : await store.blob(thread.id, "result.bundle");
-	let secrets: ThreadSecrets | null = null;
-	if (thread.secretFiles.length > 0 || thread.secretEnv.length > 0 || thread.mcpServers.length > 0) {
-		const blob = await store.blob(thread.id, "secrets.json");
-		if (blob === null) throw new Error("the thread's secrets.json is missing");
-		secrets = parseSecrets(await blob.text());
-	}
+	const secrets = await readThreadSecrets(store, thread);
 	// The thread's own values win over the service's.
 	const env = { ...input.serviceEnv, ...secrets?.env };
 	const maskSecrets = Object.keys(env).length > 0 || (secrets?.files.length ?? 0) > 0;
@@ -313,10 +316,7 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 			await exec(`chmod 600 ${q(VM_ENV_FILE)}`);
 		}
 		if (maskSecrets) {
-			const masks = [
-				...Object.values(env).filter(value => value.length >= MIN_MASKED_ENV_CHARS),
-				...(secrets?.files ?? []).flatMap(file => maskableContent(Buffer.from(file.content, "base64"))),
-			];
+			const masks = maskEntries(env, secrets?.files ?? []).map(entry => entry.value);
 			await sandbox.files.write(MASK_FILE, Bun.YAML.stringify(masks.map(content => ({ type: "plain", content, mode: "obfuscate" })), null, 2));
 			await exec(`chmod 600 ${q(MASK_FILE)}`);
 		}

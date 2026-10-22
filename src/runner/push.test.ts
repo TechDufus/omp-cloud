@@ -6,6 +6,8 @@ import type { PushInput as GitPushInput, PushOutcome } from "../git";
 import { Settings } from "../settings";
 import { Store } from "../store";
 import type { NewThread, Question, Thread, Turn, TurnResult } from "../store/types";
+import { type MaskEntry, maskEntries } from "./mask";
+import { threadMaskEntries } from "./provision";
 import {
 	DECLINE_LABEL,
 	NOT_PUSHED,
@@ -159,6 +161,8 @@ describe("PushStep", () => {
 	/** What `PullRequests` the step gets; null: none. */
 	let pulls: PullRequests | null;
 	let appConnected: boolean;
+	/** The secret values the step scrubs; none unless a test sets them. */
+	let secretsFor: (thread: Thread) => Promise<MaskEntry[]> = async () => [];
 	let step: PushStep;
 
 	const newThread = (): NewThread => ({
@@ -227,6 +231,7 @@ describe("PushStep", () => {
 				settings,
 				pulls,
 				github: { connected: () => appConnected },
+				secrets: target => secretsFor(target),
 				questionTimeoutSeconds,
 				clock: {
 					pause: () => {
@@ -351,6 +356,7 @@ describe("PushStep", () => {
 			action = "opened";
 			openError = null;
 			verdict = { verified: true, reason: "valid" };
+			secretsFor = async () => [];
 			pulls = {
 				open: async input => {
 					opened.push(input);
@@ -446,6 +452,87 @@ describe("PushStep", () => {
 			expect(await run()).toEqual({ pushed: true, pushError: "", pushRef: `omp-cloud/${ID}` });
 			expect(prEvents()).toEqual([{ kind: "pr", text: "pull request failed: GitHub answered 502" }]);
 			expect(store.getThread(ID)?.pr).toBeNull();
+		});
+
+		describe("secrets", () => {
+			const entries = (env: Record<string, string>, files: { path: string; content: string }[] = []) =>
+				maskEntries(env, files.map(file => ({ path: file.path, content: Buffer.from(file.content).toString("base64") })));
+
+			test("a thread secret and a service secret in the reply are replaced by their names, in the section only", async () => {
+				secretsFor = async () => entries({ OWN_TOKEN: "own-token-value", SERVICE_KEY: "service-key-value" });
+				step = makeStep(1800);
+				await run({ reply: "DONE=own-token-value and service-key-value, again own-token-value" });
+				const section = opened[0]?.section ?? "";
+				expect(section).toContain("DONE=[secret OWN_TOKEN] and [secret SERVICE_KEY], again [secret OWN_TOKEN]");
+				expect(section).not.toContain("own-token-value");
+				expect(section).not.toContain("service-key-value");
+				expect(section).toStartWith("<!-- omp-cloud:begin -->");
+				expect(prEvents()).toEqual([{ kind: "pr", text: `opened draft pull request #7 ${URL_7}` }]);
+			});
+
+			test("a title with a value in it is scrubbed", async () => {
+				secretsFor = async () => entries({ API_KEY: "key-12345" });
+				thread = { ...thread, name: "Rotate key-12345 today" };
+				step = makeStep(1800);
+				await run();
+				expect(opened[0]?.title).toBe("Rotate [secret API_KEY] today");
+				expect(opened[0]?.section).not.toContain("key-12345");
+			});
+
+			test("a value shorter than 4 characters is left alone, as masking leaves it", async () => {
+				secretsFor = async () => entries({ SHORT: "abc", LONG: "abcd" });
+				step = makeStep(1800);
+				await run({ reply: "abc abcd" });
+				expect(opened[0]?.section).toContain("abc [secret LONG]");
+			});
+
+			test("the longest value goes first, so a value that contains another is replaced whole", async () => {
+				secretsFor = async () => entries({ SHORT: "token-abc", LONG: "token-abc-extended" });
+				step = makeStep(1800);
+				await run({ reply: "got token-abc-extended and token-abc" });
+				expect(opened[0]?.section).toContain("got [secret LONG] and [secret SHORT]");
+				expect(opened[0]?.section).not.toContain("extended");
+			});
+
+			test("the content of a secret file is replaced by the file's path", async () => {
+				secretsFor = async () => entries({}, [{ path: "config/key.pem", content: "-----BEGIN KEY-----\nabc123\n-----END KEY-----\n" }]);
+				step = makeStep(1800);
+				await run({ reply: "it said -----BEGIN KEY-----\nabc123\n-----END KEY-----\n, so" });
+				expect(opened[0]?.section).toContain("it said [secret file config/key.pem], so");
+				expect(opened[0]?.section).not.toContain("abc123");
+			});
+
+			test("values that could not be read: nothing is posted, the event says why, and the push stays pushed", async () => {
+				secretsFor = async () => {
+					throw new Error("the thread's secrets.json is missing");
+				};
+				step = makeStep(1800);
+				expect(await run({ reply: "own-token-value" })).toEqual({ pushed: true, pushError: "", pushRef: `omp-cloud/${ID}` });
+				expect(opened).toEqual([]);
+				expect(prEvents()).toEqual([{ kind: "pr", text: "pull request not updated: could not read the thread's secrets: the thread's secrets.json is missing" }]);
+				expect(store.getThread(ID)?.pr).toBeNull();
+			});
+
+			test("threadMaskEntries reads the thread's own env and files and the service's secrets, the thread's value winning", async () => {
+				await store.putBlob(
+					ID,
+					"secrets.json",
+					new TextEncoder().encode(JSON.stringify({ files: [{ path: "a.txt", content: Buffer.from("file-content").toString("base64") }], env: { SHARED: "thread-value" } })),
+					10_000,
+				);
+				const secretThread: Thread = { ...thread, secretFiles: ["a.txt"], secretEnv: ["SHARED"] };
+				const service = { resolveForThread: async () => ({ env: { SHARED: "service-value", ONLY_SERVICE: "service-only" }, failures: [] }) };
+				const found = await threadMaskEntries(store, service, secretThread);
+				expect(found).toEqual([
+					{ label: "secret SHARED", value: "thread-value" },
+					{ label: "secret ONLY_SERVICE", value: "service-only" },
+					{ label: "secret file a.txt", value: "file-content" },
+				]);
+				expect(await threadMaskEntries(store, service, thread)).toEqual([
+					{ label: "secret SHARED", value: "service-value" },
+					{ label: "secret ONLY_SERVICE", value: "service-only" },
+				]);
+			});
 		});
 
 		test("with git.sign ssh the head is checked and reported, and a failed check says nothing", async () => {

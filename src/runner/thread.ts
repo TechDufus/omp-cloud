@@ -62,7 +62,7 @@ import { dropStaleSockets } from "./stale-sockets";
 import { IRC_COMMAND, ircDelivered, ircInCommand, ircPlainText, parseIrcFrame, turnMessage } from "./irc";
 import { classifyPrompt, type TurnOutcome } from "./outcome";
 import { addUsage, type AssistantEnd, assistantEnd, messageText, progressOf, toolEndEventOf, toolStartEventOf, usageEventOf } from "./progress";
-import { downloadBlob, ompLaunchArgs, provisionVm, shipIrcExtension, uploadBlob } from "./provision";
+import { downloadBlob, ompLaunchArgs, provisionVm, shipIrcExtension, threadMaskEntries, uploadBlob } from "./provision";
 import { NOT_PUSHED, PushStep, pullRequestsOf, type PushRecord } from "./push";
 import { exportSession, exportSessionId } from "./session-export";
 import { checkSpend, type SpendBreach, spendCapError } from "./spend";
@@ -1048,6 +1048,7 @@ export class ThreadRunner {
 				settings: this.env.settings,
 				pulls: github.connected() ? pullRequestsOf(github, githubApi) : null,
 				github,
+				secrets: target => threadMaskEntries(store, this.env.secrets, target),
 				questionTimeoutSeconds: config.runner.questionTimeoutSeconds,
 				clock: rt.clock,
 				event: (text, kind = "push") => this.#event(kind, text, turn.id),
