@@ -5,7 +5,7 @@ import { runConnect, type ConnectDeps, type ConnectInput } from "../src/connect"
 import { readConnectionFile } from "../src/connection";
 import { pairArgv, type SshOutput, type SshRunner } from "../src/ssh";
 import { UserError } from "../src/types";
-import { fakeHost, type FakeHost } from "./fakes";
+import { fakeHost, lastLines, type FakeHost } from "./fakes";
 import { cleanup, tmp } from "./helpers";
 import { fakeTls, makeCert, PAIRING_DEVICE as DEVICE, pairedFile, pairingCode, pairingService, sshPairRecord, stopFakeServers, type PairingService, type TestCert } from "./tls";
 
@@ -73,11 +73,10 @@ describe("/cloud connect", () => {
 		expect(card.lines).toEqual([`server ${cert.fingerprint} at ${svc.address}`, "this device: laptop-2 (dev12345)"]);
 		const shown = JSON.stringify([card, r.host.notes]);
 		for (const secret of [svc.token, "secret1234567890123456", "reqsecret1234567890123", code]) expect(shown).not.toContain(secret);
-		const waiting = r.host.widgets.filter((w): w is string[] => Array.isArray(w)).map(w => w.join("\n"));
-		expect(waiting[0]).toContain("waiting for approval on the server machine");
-		expect(waiting[0]).toMatch(/expires in \d+:\d\d/);
+		const shownWidgets = r.host.widgets.filter((w): w is string[] => Array.isArray(w)).map(w => w.join("\n"));
+		expect(shownWidgets.find(w => w.includes("waiting for approval on the server machine"))).toMatch(/expires in \d+:\d\d/);
 		expect(r.host.widgets.at(-1)).toBeUndefined();
-		expect(JSON.stringify(waiting)).not.toContain(svc.token);
+		expect(JSON.stringify(shownWidgets)).not.toContain(svc.token);
 	});
 
 	test("the default device name is the machine's, made valid", async () => {
@@ -350,9 +349,13 @@ describe("/cloud connect over ssh", () => {
 		return { run, pairs, configs };
 	}
 
-	test("pairs without an approval: no redeem or claim, one whoami with the delivered token, a 0600 file, a card without secrets", async () => {
+	test("pairs without an approval: no redeem or claim, one whoami with the delivered token, a 0600 file, a card without secrets; while ssh runs a line names the host, and it is gone after", async () => {
 		const svc = service();
-		const ssh = sshd(ok(record(svc)));
+		let during: string[] | undefined;
+		const ssh = sshd(() => {
+			during = lastLines(r.host);
+			return ok(record(svc));
+		});
 		const r = await setup("me@nas.local", { name: "laptop" }, { ssh: ssh.run, env: {} });
 		const card = await runConnect(r.input, r.deps);
 
@@ -364,7 +367,8 @@ describe("/cloud connect over ssh", () => {
 		const shown = JSON.stringify([card, r.host.notes, r.host.widgets]);
 		expect(shown).not.toContain(svc.token);
 		expect(shown).not.toContain("ompd_");
-		expect(r.host.widgets.filter(w => Array.isArray(w))).toEqual([]);
+		expect(during?.join("\n")).toContain("me@nas.local");
+		expect(r.host.widgets.at(-1)).toBeUndefined();
 	});
 
 	test("the default device name is this machine's, and a port in an ssh:// target goes to both ssh calls", async () => {
@@ -506,6 +510,7 @@ describe("/cloud connect over ssh", () => {
 			const r = await setup("me@nas", {}, { ssh: sshd(out).run, env: {} });
 			expect(await failure(runConnect(r.input, r.deps))).toContain(hint);
 			expect(await readConnectionFile(r.file)).toBeUndefined();
+			expect(r.host.widgets.at(-1)).toBeUndefined();
 		}
 		expect(svc.seen).toEqual([]);
 	});

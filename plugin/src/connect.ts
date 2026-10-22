@@ -251,6 +251,7 @@ async function verifyServer(addresses: ServerAddress[], s: Session, expected: Ex
 async function pairWithCode(code: PairingCode, s: Session): Promise<Paired> {
 	const { ui } = s.deps;
 	const sleep = s.deps.sleep ?? ((ms: number) => Bun.sleep(ms));
+	ui.setWidget(WIDGET_KEY, ["☁ pairing with a code · checking the server's certificate…"]);
 	const server = await verifyServer(code.addresses, s, { fingerprint: code.fingerprint, source: "the code names", names: "text", notes: [], after: "" });
 	const anonymous = new CloudClient(`https://${server.firstIp}`, "", pinnedFetch(server.wire));
 	const redeemed = await anonymous.redeemPairing({ offer: code.offer, secret: code.secret, name: s.name, platform: process.platform });
@@ -286,20 +287,24 @@ async function pairWithCode(code: PairingCode, s: Session): Promise<Paired> {
  */
 async function pairWithSsh(target: SshTarget, s: Session): Promise<Paired> {
 	const ssh = { target, name: s.name, platform: process.platform, run: s.deps.ssh ?? spawnSsh, signal: s.deps.signal, env: s.deps.env };
+	const via = `☁ pairing over ssh with ${target.destination}`;
+	s.deps.ui.setWidget(WIDGET_KEY, [`${via} · asking the server for a device…`]);
 	const pairing = await pairOverSsh(ssh);
 	const unused = `; the device ${pairing.device.name} was created on the server and is not used: /cloud devices revoke ${pairing.device.name} on the server machine removes it`;
 	const named = await sshHostName(ssh);
 	const { addresses, problem } = pairingAddresses(named.host, pairing);
 	const notes = [named.problem, problem].filter((p): p is string => p !== undefined);
 	if (addresses.length === 0) throw new UserError(`☁ cannot pair: ${notes.join("; ")}; the server listed no usable address${unused}`);
+	s.deps.ui.setWidget(WIDGET_KEY, [`${via} · checking the server's certificate…`]);
 	const server = await verifyServer(addresses, s, { fingerprint: pairing.fingerprint, source: "the one ssh delivered", names: "resolved", notes, after: unused });
 	return { device: pairing.device, token: pairing.token, ...server };
 }
 
 /**
  * Pairs with the service `input.target` names, a pairing code or an ssh target, and writes the connection file. A code
- * waits for the owner's approval on the server machine, showing a countdown. Returns the card to show: it names the
- * server and this device, never a secret.
+ * waits for the owner's approval on the server machine, showing a countdown; until then, and after it, a line above the
+ * editor says what the connect is doing, and every exit clears it. Returns the card to show: it names the server and
+ * this device, never a secret.
  */
 export async function runConnect(input: ConnectInput, deps: ConnectDeps): Promise<NoticeCard> {
 	const { ui } = deps;
@@ -322,18 +327,23 @@ export async function runConnect(input: ConnectInput, deps: ConnectDeps): Promis
 	}
 
 	const session: Session = { input, deps, name, existing, now };
-	const paired = target.kind === "code" ? await pairWithCode(target.code, session) : await pairWithSsh(target.ssh, session);
-
-	const { pin, wire, firstIp, device, token } = paired;
-	const connection: PairedConnection = { server: pin, device, token, pairedAt: new Date(now()).toISOString() };
-	await writeConnectionFile(deps.connectionFile, connection);
-
-	const lines = [`server ${pin.fingerprint} at ${pin.addresses[0] ?? ""}`, `this device: ${device.name} (${device.id.slice(0, 8)})`];
 	try {
-		const who = await new CloudClient(`https://${firstIp}`, connection.token, pinnedFetch(wire), SINGLE_ATTEMPT).whoami();
-		if (who.device?.id !== device.id) lines.push("warning: the service does not name this device in whoami");
-	} catch (e) {
-		lines.push(`warning: connected, but the first request failed: ${errorText(e)}`);
+		const paired = target.kind === "code" ? await pairWithCode(target.code, session) : await pairWithSsh(target.ssh, session);
+
+		const { pin, wire, firstIp, device, token } = paired;
+		const connection: PairedConnection = { server: pin, device, token, pairedAt: new Date(now()).toISOString() };
+		await writeConnectionFile(deps.connectionFile, connection);
+
+		const lines = [`server ${pin.fingerprint} at ${pin.addresses[0] ?? ""}`, `this device: ${device.name} (${device.id.slice(0, 8)})`];
+		ui.setWidget(WIDGET_KEY, [`☁ paired as ${device.name} · checking the service with this device's token…`]);
+		try {
+			const who = await new CloudClient(`https://${firstIp}`, connection.token, pinnedFetch(wire), SINGLE_ATTEMPT).whoami();
+			if (who.device?.id !== device.id) lines.push("warning: the service does not name this device in whoami");
+		} catch (e) {
+			lines.push(`warning: connected, but the first request failed: ${errorText(e)}`);
+		}
+		return noticeCard("", "Connected to omp-cloud", lines);
+	} finally {
+		ui.setWidget(WIDGET_KEY, undefined);
 	}
-	return noticeCard("", "Connected to omp-cloud", lines);
 }
