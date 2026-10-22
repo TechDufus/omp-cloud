@@ -5,7 +5,7 @@
 One command sets up the whole service host, the machine that runs the service: vibemon (the microVM runtime), its network and units, the auth broker and gateway, the omp-cloud service, the omp plugin and the model login. It sets up only the machine it runs on; every other machine you work from needs the plugin and one pairing ([Server and devices](#server-and-devices)).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/TechDufus/omp-cloud/main/install.sh | sh
+curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh
 ```
 
 Prefer to have an agent do it? Give omp (or any coding agent) the prompt in [Agent setup](agent-setup.md).
@@ -16,7 +16,7 @@ The script needs `curl` and `sha256sum` (or `shasum`). It downloads the release 
 
 omp-cloud has two roles, and each is set up once:
 
-- **The server** is the machine that runs vibemon, the auth broker and gateway, the omp-cloud service and the VMs. The other docs call it the service host. `install.sh` runs there, once, and sets up only that machine, including the plugin in that machine's omp. It is often a remote box (a homelab server, or a VM with nested KVM): from the machine you work on, run the installer over ssh, `ssh -t user@host 'curl -fsSL https://raw.githubusercontent.com/TechDufus/omp-cloud/main/install.sh | sh'`.
+- **The server** is the machine that runs vibemon, the auth broker and gateway, the omp-cloud service and the VMs. The other docs call it the service host. `install.sh` runs there, once, and sets up only that machine, including the plugin in that machine's omp. It is often a remote box (a homelab server, or a VM with nested KVM): from the machine you work on, run the installer over ssh, `ssh -t user@host 'curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh'`.
 - **A device** is a machine you run omp on and type `/cloud` in. The server is one: setup installed the plugin there and wrote its `config.yml`, so `/cloud` reaches the service on loopback. Every other device (a laptop, a second workstation) needs the plugin installed on it and one pairing: [Other machines](#other-machines).
 
 `install.sh` runs only on the server. Any other device needs only omp 18.12.3 or newer, the plugin and one pairing; the requirements below are the server's.

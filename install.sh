@@ -1,8 +1,11 @@
 #!/bin/sh
 # omp-cloud installer: downloads the release binary, verifies it and runs `omp-cloud setup`.
 #
-#   curl -fsSL https://raw.githubusercontent.com/TechDufus/omp-cloud/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/TechDufus/omp-cloud/main/install.sh | sh -s -- --yes --no-login
+#   curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh
+#   curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh -s -- --yes --no-login
+#
+# The website serves this file from main, the same as
+# https://raw.githubusercontent.com/TechDufus/omp-cloud/main/install.sh.
 #
 # Everything after `--` goes to `omp-cloud setup`. The script never uses sudo and never edits a shell rc file:
 # the binary installs itself (to ~/.local/share/omp-cloud/app, linked from ~/.local/bin/omp-cloud) and asks for sudo once.
@@ -21,8 +24,8 @@ usage() {
 omp-cloud installer
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/TechDufus/omp-cloud/main/install.sh | sh
-  curl -fsSL https://raw.githubusercontent.com/TechDufus/omp-cloud/main/install.sh | sh -s -- [setup flags]
+  curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh
+  curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh -s -- [setup flags]
   sh install.sh [--help | setup flags]
 
 Downloads the omp-cloud release binary for Linux x86_64, checks its sha256, and runs

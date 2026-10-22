@@ -129,13 +129,13 @@ omp-cloud has two roles, each set up once: the **server**, the Linux machine tha
 You need a Linux x86_64 machine with `/dev/kvm`, systemd and a user with sudo (asked once), and omp 18.12.3 or newer (setup installs omp when it is missing). On that machine, one command sets up everything there: vibemon, the service, the model login and the plugin in that machine's omp.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/TechDufus/omp-cloud/main/install.sh | sh
+curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh
 ```
 
 It prints what it will change and asks first, and it configures only the machine it runs on. For a server you reach over ssh (a homelab box, a VM with nested KVM), run it from where you work; `-t` gives the prompt and sudo a terminal:
 
 ```sh
-ssh -t user@host 'curl -fsSL https://raw.githubusercontent.com/TechDufus/omp-cloud/main/install.sh | sh'
+ssh -t user@host 'curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh'
 ```
 
 Prefer an agent to do it? [`docs/agent-setup.md`](docs/agent-setup.md) has a prompt to paste into omp for this machine, and one for a remote server that also pairs the machine you work on.

@@ -4,7 +4,8 @@ Release notes of omp-cloud, newest first. `mise run release -- <version>` moves 
 
 ## Unreleased
 
-- **Website.** The documentation builds into a website with a landing page, in the dashboard's look with a light and a dark theme and search over every page: `mise run site:build` (into `site/dist/`) and `mise run site:dev` (a local preview). The pages are `docs/*.md`, `CHANGELOG.md` and sections of `README.md` themselves, and the build fails on a link to a page or heading that does not exist. Once the repository is public it is published at https://omp-cloud.techdufus.com on every push to `main`.
+- **Website.** The documentation is published at https://omp-cloud.techdufus.com with a landing page, in the dashboard's look with a light and a dark theme and search over every page. The pages are `docs/*.md`, `CHANGELOG.md` and sections of `README.md` themselves, rebuilt on every push to `main`; `mise run site:build` builds it into `site/dist/` and fails on a link to a page or heading that does not exist, and `mise run site:dev` previews it locally.
+- **Shorter install line.** `curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh` installs the server; the website serves the same `install.sh` from `main` as `raw.githubusercontent.com`, which keeps working.
 
 ## 0.5.1 (2026-10-21)
 
