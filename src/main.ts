@@ -9,7 +9,7 @@ import { Runner } from "./runner";
 import { serviceClientName } from "./runner/thread";
 import { createApp } from "./server/app";
 import { createDashboardServer, dashboardOrigin, dashboardUpstream } from "./dashboard/server";
-import { openRemote } from "./pairing/remote";
+import { type OpenedRemote, openRemote } from "./pairing/remote";
 import { serveRemote } from "./server/remote";
 import { directModelIds } from "./server/model-ids";
 import { serveDashboard } from "./dashboard/serve";
@@ -54,19 +54,53 @@ function listenUrl(scheme: "http" | "https", hostname: string, port: number | un
 	return `${scheme}://${hostname.includes(":") ? `[${hostname}]` : hostname}:${port}`;
 }
 
+/**
+ * Binds the API address before anything else starts, so a second `omp-cloud serve` (the default command, typed on a
+ * running host) fails here without having touched the database, the gateway clients file or the VMs. The listener
+ * answers 503 until `serve` hands it the app (`Server.reload`, which keeps these options).
+ */
+function claimApiListener(listen: { hostname: string; port: number }): Bun.Server<undefined> {
+	try {
+		return Bun.serve({
+			hostname: listen.hostname,
+			port: listen.port,
+			fetch: () => Response.json({ error: "the service is starting" }, { status: 503 }),
+			maxRequestBodySize: MAX_CREATE_BODY_BYTES,
+			idleTimeout: 120,
+		});
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") {
+			throw new Error(
+				`${listenUrl("http", listen.hostname, listen.port)} is already in use: the omp-cloud service is probably already running (systemctl --user status omp-cloud). Nothing was changed.`,
+			);
+		}
+		throw error;
+	}
+}
+
+/** What the service needs before it starts anything: the remote listener's identity, the host's omp version, the opened store (the first thing that writes). */
+async function openHost(config: Config): Promise<{ remote: OpenedRemote | undefined; ompVersion: string; store: Store }> {
+	const remote = config.remote === undefined ? undefined : await openRemote(config.remote, config.gateway.url);
+	const omp = await hostOmp();
+	await logExecutables(config, omp);
+	return { remote, ompVersion: omp.version, store: Store.open({ dataDir: config.dataDir }) };
+}
+
 /** Runs the service until a signal stops it; `args` are the command line after the program name (`--config <path>`). */
 export async function serve(args: readonly string[]): Promise<void> {
 	const config = await loadConfig(configPath(args));
+	const api = claimApiListener(config.listen);
 	// Before anything starts: a key others can read, a bad certificate or an unresolvable gateway stops the service here.
-	const remote = config.remote === undefined ? undefined : await openRemote(config.remote, config.gateway.url);
-	const omp = await hostOmp();
-	const ompVersion = omp.version;
-	await logExecutables(config, omp);
-	const store = Store.open({ dataDir: config.dataDir });
+	const { remote, ompVersion, store } = await openHost(config).catch(async (error: unknown) => {
+		await api.stop(true);
+		throw error;
+	});
 	const settings = Settings.load(store);
 	const dashboardUrl = config.dashboard === undefined ? "" : dashboardOrigin(config.dashboard);
 	/** Every listener that is up, with the line that says so: stopped together on a failed start and on shutdown. */
-	const listeners: { server: Bun.Server<undefined>; log: string }[] = [];
+	const listeners: { server: Bun.Server<undefined>; log: string }[] = [
+		{ server: api, log: `omp-cloud listening on ${listenUrl("http", config.listen.hostname, api.port)}` },
+	];
 	let runner: Runner | undefined;
 	let vmon: Vmon | undefined;
 	let update: UpdateService | undefined;
@@ -143,7 +177,7 @@ export async function serve(args: readonly string[]): Promise<void> {
 			remote: remote?.settings,
 			update,
 		});
-		// The dashboard binds first: when either port is taken, nothing else is left running.
+		// The dashboard binds next: when its port is taken, nothing else is left running.
 		if (config.dashboard !== undefined) {
 			const dashboard = serveDashboard(
 				config.dashboard.listen,
@@ -157,14 +191,6 @@ export async function serve(args: readonly string[]): Promise<void> {
 			);
 			listeners.push({ server: dashboard, log: `omp-cloud dashboard on ${dashboardUrl}` });
 		}
-		const api = Bun.serve({
-			hostname: config.listen.hostname,
-			port: config.listen.port,
-			fetch: app.fetch,
-			maxRequestBodySize: MAX_CREATE_BODY_BYTES,
-			idleTimeout: 120,
-		});
-		listeners.push({ server: api, log: `omp-cloud listening on ${listenUrl("http", config.listen.hostname, api.port)}` });
 		if (remote !== undefined) {
 			const tls = serveRemote(remote.settings.listen, remote.identity, app);
 			listeners.push({
@@ -172,6 +198,7 @@ export async function serve(args: readonly string[]): Promise<void> {
 				log: `omp-cloud remote on ${listenUrl("https", remote.settings.listen.hostname, tls.port)} (${remote.identity.fingerprint})`,
 			});
 		}
+		api.reload({ fetch: app.fetch });
 	} catch (error) {
 		models.stop();
 		logins.stop();

@@ -80,7 +80,8 @@ server_pid=$!
 ready=""
 for _ in $(seq 1 100); do
 	if ! kill -0 "$server_pid" 2>/dev/null; then echo "smoke: service exited during startup" >&2; exit 1; fi
-	if curl -s -o /dev/null "$base/api/v1/whoami"; then ready=1; break; fi
+	# The API answers 503 while the service starts; the app answers an unauthenticated whoami with 401.
+	if [[ $(curl -s -o /dev/null -w '%{http_code}' "$base/api/v1/whoami") == 401 ]]; then ready=1; break; fi
 	sleep 0.1
 done
 [[ -n "$ready" ]] || { echo "smoke: service did not answer within 10 s" >&2; exit 1; }

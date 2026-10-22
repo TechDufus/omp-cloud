@@ -55,7 +55,9 @@ export class GatewayModels {
 	 * Issues the service's own gateway client and loads the list. The client is reissued at every start, because only a
 	 * token's hash is stored, so the list is ready only after the gateway's next re-read of its clients file (up to 10 s):
 	 * a gateway that answers 401 has not read the client yet, so this waits for it; a gateway that does not answer is left
-	 * to the background retries. Never throws.
+	 * to the background retries. Once running, a 401 that outlasts that wait means something else replaced the client's
+	 * entry (another `omp-cloud` process, an edited clients file), so a fresh client is issued and the short retry cadence
+	 * runs until the gateway accepts it. Never throws.
 	 */
 	async start(): Promise<void> {
 		const deadline = Date.now() + this.#startupMs;
@@ -97,7 +99,7 @@ export class GatewayModels {
 				void this.refresh().then(() => {
 					this.#schedule();
 				}),
-			this.#loaded ? this.#refreshMs : this.#retryMs,
+			this.#loaded && !this.#awaitingAcceptance ? this.#refreshMs : this.#retryMs,
 		);
 		this.#timer.unref();
 	}
@@ -116,6 +118,15 @@ export class GatewayModels {
 			this.#awaitingAcceptance = response.status === 401;
 			if (response.status !== 200) {
 				await response.body?.cancel();
+				// A fresh client is unknown to the gateway until its next clients-file read (every 10 s): within the
+				// startup window that 401 is the normal wait. After it the gateway has dropped or replaced the entry, so a
+				// new client replaces whatever entry has this name; the window starts over for it.
+				if (this.#awaitingAcceptance && Date.now() - this.#issuedAt >= this.#startupMs) {
+					this.#token = await this.#clients.issue(this.#clientName);
+					this.#issuedAt = Date.now();
+					this.#report("the gateway no longer accepts the service's client (status 401); issued a new one");
+					return;
+				}
 				throw new Error(`status ${response.status}`);
 			}
 			const served = modelListOf(await response.json());
@@ -124,15 +135,16 @@ export class GatewayModels {
 			this.#loaded = true;
 			this.#lastProblem = "";
 		} catch (error) {
-			// A fresh client is unknown to the gateway until its next clients-file read (every 10 s): within the
-			// startup window that 401 is the normal wait, not a failure. One that outlasts the window is logged.
-			if (this.#awaitingAcceptance && !this.#loaded && Date.now() - this.#issuedAt < this.#startupMs) return;
+			if (this.#awaitingAcceptance && Date.now() - this.#issuedAt < this.#startupMs) return;
 			const problem = error instanceof Error ? error.message : String(error);
-			if (problem !== this.#lastProblem && !this.#stopped) {
-				console.error(`omp-cloud: reading the gateway's models failed: ${problem}${this.#loaded ? "; keeping the last list" : ""}`);
-			}
-			this.#lastProblem = problem;
+			this.#report(`reading the gateway's models failed: ${problem}${this.#loaded ? "; keeping the last list" : ""}`, problem);
 		}
+	}
+
+	/** Logs `message` unless `key` (default the message) is what was logged last; a successful read forgets it. */
+	#report(message: string, key = message): void {
+		if (key !== this.#lastProblem && !this.#stopped) console.error(`omp-cloud: ${message}`);
+		this.#lastProblem = key;
 	}
 }
 

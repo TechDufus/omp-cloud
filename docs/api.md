@@ -251,6 +251,8 @@ The service reads a release feed in the background, downloads and verifies a new
 
 `GET /api/v1/health` needs no token and answers on the API listener and on the remote listener (after its source check): `200 {"status": "ok", "version": "<version>", "build": {"id", "commit", "createdAt"}, "schema": <n>}`. `version` and `build` are the running binary's: a release build's `id` is `<YYYYMMDDHHMMSS>-<7 characters of the commit>`, a checkout's `build` is `{"id": "dev", "commit": "", "createdAt": ""}`. `schema` is the number of database migrations the binary knows. The updater polls it after a restart to see which version answers; a monitor may too. Only `GET` is a route: another method takes the ordinary path (`401` without a token, `404` with one).
 
+While the service starts, the API listener answers `503` `{"error": "the service is starting"}` to every request, this route included: the updater's health wait counts it as not yet healthy and keeps polling until its deadline.
+
 ### Update routes
 
 Owner token only: a device gets `403` `only the owner token can do this; it works on the server machine`, even for the `GET` (it reads `whoami.update`). The dashboard's owner session may call them.
@@ -399,6 +401,7 @@ Config: --config <path>, else $OMP_CLOUD_CONFIG, else ~/.config/omp-cloud/servic
 ```
 
 - `version` prints `omp-cloud <version> (<build id>)`; `--help`, `-h` and `help` print the help on stdout and exit `0`. An unknown command exits `2` with the help on stderr. `omp-cloud --config <path>` serves.
+- `serve` claims the API address (`listen`) before it opens the database, issues the service's gateway client or starts the runner, and answers `503` `{"error": "the service is starting"}` on it until the app is ready. When the address is taken (almost always because the service is already running, for example `omp-cloud` typed with no command on the host) it exits `1` with `http://127.0.0.1:8080 is already in use: the omp-cloud service is probably already running (systemctl --user status omp-cloud). Nothing was changed.` and has touched nothing: no migration, no orphan sweep, no gateway client. Stop the unit before running `serve` by hand.
 - `setup`, `doctor`, `login` and `uninstall` are the host's install lifecycle, described in [Install](install.md). `setup` and `uninstall` run as the owner's user and refuse root; each asks for sudo once for its root part (`sudo -- <binary> setup system …`), and a second `setup` run reports what is already right. `doctor` exits `1` when any check fails; `uninstall` keeps backups.
 - `ssh-pair` is [SSH pairing](#ssh-pairing-omp-cloud-ssh-pair); its output is a contract.
 - `update [--config <path>]` checks the feed, downloads and verifies a newer release and prints `omp-cloud <v> (<build id>)`, `state:`, and the latest, staged, applying, error, checked and last lines that apply; the exit status is `1` when the state is `failed`. On an install that cannot update it prints the `unsupported` message and exits `1`. `update`, `update apply` and `update apply-staged` take only `--config <path>` (`apply-staged` also `--version`): a bad argument prints the usage and exits `2`, and `update --help` prints it and exits `0`.
