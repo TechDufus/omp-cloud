@@ -6,6 +6,8 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 ## Unreleased
 
+## 0.7.0 (2026-10-22)
+
 Cloud agents the model starts now behave like `task` subagents, each omp session picks its cloud, and plan mode delegates read-only agents. This is Service API 5, with no database migration.
 
 ### Upgrade notes

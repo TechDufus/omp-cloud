@@ -7,7 +7,7 @@
     {
       "name": "omp-cloud",
       "description": "Hand a task, with this session's context, to a cloud agent in omp-cloud (/cloud)",
-      "version": "0.6.1",
+      "version": "0.7.0",
       "source": "./plugin",
       "homepage": "https://github.com/TechDufus/omp-cloud",
       "repository": "https://github.com/TechDufus/omp-cloud",
