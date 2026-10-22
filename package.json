@@ -1,7 +1,7 @@
 {
   "name": "omp-cloud",
   "private": true,
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Self-hosted cloud agents for omp: each task runs in its own KVM microVM on your hardware and returns a branch",
   "keywords": ["omp", "cloud-agents", "self-hosted", "microvm", "kvm", "vibemon"],
   "repository": {

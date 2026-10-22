@@ -4,6 +4,8 @@ Release notes of omp-cloud, newest first. `mise run release -- <version>` moves 
 
 ## Unreleased
 
+## 0.5.3 (2026-10-22)
+
 - **A login that never took effect.** Running a second `omp-cloud serve` on the service host (for example `omp-cloud` with no command, which serves by default) replaced the running service's own gateway client before it failed on the taken port. From then on the service could not read which models the gateway serves, so after a successful `omp-cloud login` the cloud still said it could not run the provider until the service was restarted. A second `serve` now claims the API address first and stops at once with `… is already in use: the omp-cloud service is probably already running`, changing nothing. While it starts, the API answers `503 the service is starting`.
 - **The service recovers its gateway client by itself.** When the gateway stops accepting the service's client, the service issues a new one and reads the model list again within seconds, keeping the last list meanwhile. Before, it kept the rejected client until a restart.
 - **Logging in from a paired device.** A paired device can't log the cloud in to a provider (that takes the owner token, which stays on the server), but the plugin still told it to run `/cloud login`, which then failed with `only the owner token can do this`. On a paired device, the handoff refusal, `/cloud login`, the hub, `/cloud status` and the `cloud` tool now name the server and the command that works there: `omp-cloud login <provider>` on the server, for example over `ssh -t`. `/cloud login` on a paired device stops before contacting the service.
