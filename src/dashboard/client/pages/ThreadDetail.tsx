@@ -17,10 +17,11 @@ import {
 	type TurnState,
 	type TurnView,
 } from "../api";
+import { Markdown } from "../app/Markdown";
 import { messageOf, useQuery } from "../app/query";
 import { navigate } from "../app/route";
 import { ago, count, dateTime, diffstat, money, safeHref, short } from "../format";
-import { Badge, Card, Dot, EmptyState, ErrorState, KeyValues, Modal, PageHeader, TableSkeleton, type Tone } from "../kit/ui";
+import { Badge, Card, Dot, EmptyState, ErrorState, KeyValues, Modal, PageHeader, Segmented, type SegmentedOption, TableSkeleton, type Tone } from "../kit/ui";
 import { LIFECYCLE_KINDS } from "../live";
 import { contextLabel, MetricsCard, threadLabel } from "./thread-metrics";
 import "./threads.css";
@@ -32,6 +33,14 @@ const FEED_FLUSH_MS = 60;
 /** Relative times go stale between events. */
 const REDRAW_MS = 30_000;
 const ACTIVE_PHASES: readonly ThreadPhase[] = ["starting", "working", "waiting"];
+
+type TurnTextView = "formatted" | "raw";
+
+const TURN_TEXT_VIEWS: readonly SegmentedOption<TurnTextView>[] = [
+	{ value: "formatted", label: "Formatted" },
+	{ value: "raw", label: "Raw" },
+];
+const TURN_TEXT_KEY = "omp-cloud-turn-text";
 
 const PHASE_TONES: Record<ThreadPhase, Tone> = {
 	starting: "neutral",
@@ -76,6 +85,7 @@ export function ThreadDetail({ id, active }: { id: string; active: boolean }) {
 	const wasLoaded = useRef(false);
 	const [busy, setBusy] = useState<"stop" | "delete" | null>(null);
 	const [actionError, setActionError] = useState<string | null>(null);
+	const [view, setView] = useState<TurnTextView>(() => (localStorage.getItem(TURN_TEXT_KEY) === "raw" ? "raw" : "formatted"));
 	const [confirming, setConfirming] = useState(false);
 
 	useEffect(() => {
@@ -210,13 +220,28 @@ export function ThreadDetail({ id, active }: { id: string; active: boolean }) {
 				<div className="threads-col">
 					<Composer threadId={id} phase={t.phase} onSent={thread.refetch} />
 					<MetricsCard thread={t} />
-					<Card title="Turns" description={`${t.turns.length} ${t.turns.length === 1 ? "turn" : "turns"}, newest first`}>
+					<Card
+						title="Turns"
+						description={`${t.turns.length} ${t.turns.length === 1 ? "turn" : "turns"}, newest first`}
+						actions={
+							<Segmented
+								size="sm"
+								options={TURN_TEXT_VIEWS}
+								value={view}
+								onChange={next => {
+									setView(next);
+									localStorage.setItem(TURN_TEXT_KEY, next);
+								}}
+								aria-label="Turn text"
+							/>
+						}
+					>
 						{ordered.length === 0 ? (
 							<EmptyState title="No turns yet" />
 						) : (
 							<div className="threads-turns">
 								{ordered.map((turn, index) => (
-									<TurnBlock key={turn.id} turn={turn} open={index === 0 || turn.state === "running"} />
+									<TurnBlock key={turn.id} turn={turn} open={index === 0 || turn.state === "running"} view={view} />
 								))}
 							</div>
 						)}
@@ -449,7 +474,7 @@ function Composer({ threadId, phase, onSent }: ComposerProps) {
 	);
 }
 
-function TurnBlock({ turn, open }: { turn: TurnView; open: boolean }) {
+function TurnBlock({ turn, open, view }: { turn: TurnView; open: boolean; view: TurnTextView }) {
 	const usage = turn.usage;
 	const settled = turn.questions.filter(q => !isOpen(turn, q));
 	const work = [
@@ -478,11 +503,15 @@ function TurnBlock({ turn, open }: { turn: TurnView; open: boolean }) {
 				<div className="threads-label">
 					Prompt · {turn.by} · queued {dateTime(turn.queuedAt)}
 				</div>
-				<p className="threads-text">{turn.text}</p>
+				{view === "raw" ? <p className="threads-text">{turn.text}</p> : <Markdown className="threads-md" source={turn.text} />}
 				{turn.reply && (
 					<>
 						<div className="threads-label">Reply</div>
-						<p className="threads-text threads-reply">{turn.reply}</p>
+						{view === "raw" ? (
+							<p className="threads-text threads-reply">{turn.reply}</p>
+						) : (
+							<Markdown className="threads-md threads-reply" source={turn.reply} />
+						)}
 					</>
 				)}
 				{turn.error && <ErrorState error={turn.error} />}

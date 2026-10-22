@@ -75,48 +75,95 @@
 	line-height: 1.55;
 }
 
-.update-notes > :first-child {
+.md > :first-child {
 	margin-top: 0;
 }
 
-.update-notes > :last-child {
+.md > :last-child {
 	margin-bottom: 0;
 }
 
-.update-notes p {
+.md p {
 	margin: 0 0 10px;
 }
 
-.update-notes ul {
-	list-style: disc;
+.md ul,
+.md ol {
 	margin: 0 0 10px;
 	padding-left: 18px;
 }
 
-.update-notes li {
+.md ul {
+	list-style: disc;
+}
+
+.md ol {
+	list-style: decimal;
+}
+
+.md li {
 	margin: 0 0 6px;
 }
 
-.update-notes li::marker {
+.md li::marker {
 	color: var(--ink-3);
 }
 
-.update-notes strong {
+.md li > :last-child {
+	margin-bottom: 0;
+}
+
+.md li > p {
+	margin: 0 0 4px;
+}
+
+.md li > ul,
+.md li > ol {
+	margin: 4px 0 0;
+}
+
+.md li.md-task {
+	list-style: none;
+	margin-left: -18px;
+}
+
+.md li.md-task > input {
+	margin: 0 6px 0 0;
+	vertical-align: -1px;
+}
+
+.md strong {
 	font-weight: 600;
 }
 
-.update-notes .md-heading {
+.md del {
+	color: var(--ink-3);
+}
+
+.md .md-heading {
 	margin: 14px 0 6px;
 	font-size: 13px;
 	font-weight: 600;
 }
 
-.update-notes .md-heading[data-level="1"],
-.update-notes .md-heading[data-level="2"] {
+.md .md-heading[data-level="1"] {
+	font-size: 16px;
+}
+
+.md .md-heading[data-level="2"] {
 	font-size: 14.5px;
 }
 
-.update-notes code {
+.md .md-heading[data-level="3"] {
+	font-size: 13.5px;
+}
+
+.md .md-heading[data-level="5"],
+.md .md-heading[data-level="6"] {
+	color: var(--ink-2);
+}
+
+.md code {
 	padding: 1px 5px;
 	border-radius: 5px;
 	border: 1px solid var(--line-1);
@@ -124,16 +171,72 @@
 	font-size: 0.9em;
 }
 
-.update-notes .code-block code {
+.md .code-block code {
 	padding: 0;
 	border: 0;
 	background: none;
 }
 
-.update-notes a {
+.md a {
 	color: var(--accent);
 	text-decoration: underline;
 	text-underline-offset: 2px;
+}
+
+/* Images never load; the link is marked as one by its dashed underline. */
+.md .md-image {
+	text-decoration-style: dashed;
+}
+
+.md blockquote {
+	margin: 0 0 10px;
+	padding: 0 0 0 12px;
+	border-left: 2px solid var(--line-3);
+	color: var(--ink-2);
+}
+
+.md hr {
+	height: 0;
+	margin: 14px 0;
+	border: 0;
+	border-top: 1px solid var(--line-2);
+}
+
+.md .md-table {
+	max-width: 100%;
+	margin: 0 0 10px;
+	overflow-x: auto;
+}
+
+.md table {
+	border-collapse: collapse;
+}
+
+/* Cells break only between words, so a wide table scrolls in `.md-table` instead of splitting "Accounts" into "Acco unts". */
+.md th,
+.md td {
+	padding: 4px 10px;
+	border: 1px solid var(--line-2);
+	text-align: left;
+	vertical-align: top;
+	overflow-wrap: normal;
+}
+
+.md th {
+	font-weight: 600;
+	background: var(--hover);
+}
+
+.md [data-align="left"] {
+	text-align: left;
+}
+
+.md [data-align="center"] {
+	text-align: center;
+}
+
+.md [data-align="right"] {
+	text-align: right;
 }
 
 @media (max-width: 900px) {

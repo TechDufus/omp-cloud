@@ -85,12 +85,38 @@
 	margin-top: 0;
 }
 
-/* Prompts, replies and questions are plain text; never markup. */
+/* Raw view of prompts, replies and questions: plain text, never markup. */
 .threads-text {
 	margin: 0;
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
 	color: var(--ink-1);
+}
+
+/* Formatted view of a prompt or reply (see `Markdown`). `min-width: 0` lets wide tables and code scroll inside the turn. */
+.threads-md {
+	min-width: 0;
+	overflow-wrap: anywhere;
+	color: var(--ink-1);
+}
+
+.threads-md > :first-child {
+	margin-top: 0;
+}
+
+.threads-md > :last-child {
+	margin-bottom: 0;
+}
+
+/* Code keeps its line breaks and scrolls sideways instead of wrapping. */
+.threads-md .code-block {
+	overflow-x: auto;
+	white-space: pre;
+	overflow-wrap: normal;
+}
+
+.threads-md .code-block:not(:last-child) {
+	margin-bottom: 10px;
 }
 
 .threads-label {

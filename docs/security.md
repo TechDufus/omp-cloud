@@ -12,6 +12,7 @@ What the service, the VMs and your devices can reach, what runs as root, and wha
 - The cloud broker has its own OAuth login (`/cloud login <provider>`); yours is never copied.
 - VM egress: the internet, plus the gateway IP. vibemon runs with `--egress-internal-allow 10.254.254.1/32`, so every other private range is denied. That exemption covers every port of the address, and a VM's traffic reaches the service host from it, so a host listener bound to all addresses is reachable from VMs; the remote listener refuses that source. `policy.egress` narrows the internet to a list for new VMs.
 - `bash.patterns` (and the fixed git guard in the VM) is a guard, not a boundary: its globs see the command text with quotes removed and over-match, and `g=git; $g pus"h"` evades them. The boundaries are the missing credentials, the push policy (a [read-only thread](#read-only-agents-and-plan-mode) is never pushed) and egress.
+- What an agent writes is untrusted, and the dashboard shows it on the origin that holds the owner's session cookie. A turn's prompt and reply (and the release notes) are rendered as a Markdown subset built from React elements: no HTML from the text is ever inserted, so it cannot run script; only absolute `http` and `https` links become anchors (new tab, `rel="noreferrer"`); and an image is shown as a link to its URL and never loaded, so a reply cannot make your browser fetch a tracking or exfiltration URL by being displayed. A link is still a link: check where it goes before you open it.
 
 ## What runs as root
 

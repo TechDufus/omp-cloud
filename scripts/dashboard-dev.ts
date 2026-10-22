@@ -113,6 +113,8 @@ export interface TurnSpec {
 	/** The running turn's latest assistant message, for a turn that has not finished. */
 	note?: string;
 	summary: string;
+	/** The turn's reply when it is not the built one (the summary plus the diffstat). */
+	reply?: string;
 	size: "s" | "m" | "l";
 	/** The result branch's diffstat and what became of the push. */
 	result?: { files: number; insertions: number; deletions: number; push: "yes" | "no" | "rejected" };
@@ -149,6 +151,40 @@ export interface ThreadSpec {
 	turns: TurnSpec[];
 }
 
+/** A reply that uses every Markdown construct the thread page formats, including a wide table row and a long code line. */
+const ACCOUNTS_REPLY = [
+	"## Accounts list",
+	"",
+	"The list is now grouped by **plan** with a `status` filter; ~~the old flat list~~ is gone. See the [design notes](https://example.com/design/accounts) and the screenshot below.",
+	"",
+	"1. Group the rows",
+	"   - by plan name, then by status",
+	"   - collapsed groups remember their state",
+	"2. Add the filter",
+	"   - `all`, `active` and `suspended`",
+	"3. Keep the sort order",
+	"",
+	"- [x] Grouping",
+	"- [x] Status filter",
+	"- [ ] Per-group totals",
+	"",
+	"| Plan | Accounts | Share | Note |",
+	"| :--- | :---: | ---: | --- |",
+	"| Free | 1204 | 71.3% | Most accounts never upgrade |",
+	"| Team | 312 | 18.5% | Billed per seat, invoiced on the first of the month, with a prorated first month and a grace period on failed payments before access is limited |",
+	"| Enterprise | 41 | 2.4% | Custom contract |",
+	"",
+	"```ts",
+	`const grouped = Object.groupBy(accounts, account => account.plan); // a deliberately long line so the code block must scroll sideways instead of wrapping ${"x".repeat(80)}`,
+	"```",
+	"",
+	"> Collapsed groups are stored per browser, not per account.",
+	"",
+	"---",
+	"",
+	"![Grouped Accounts list](https://example.com/screenshots/accounts-grouped.png)",
+].join("\n");
+
 const DEFAULT_THREADS: ThreadSpec[] = [
 	{
 		repo: REPOS.orbit,
@@ -172,8 +208,9 @@ const DEFAULT_THREADS: ThreadSpec[] = [
 				agoH: 30,
 				runMin: 9,
 				size: "m",
-				prompt: "Group the Accounts list by plan and add a status filter",
+				prompt: ["Rework the Accounts list:", "", "- group it by **plan**", "- add a `status` filter", "- keep the current sort order"].join("\n"),
 				summary: "Added plan grouping and a status filter to the Accounts list",
+				reply: ACCOUNTS_REPLY,
 				result: { files: 6, insertions: 188, deletions: 41, push: "no" },
 			},
 			{
@@ -828,9 +865,10 @@ function resultOf(threadId: string, model: string, turn: TurnSpec, metrics: Turn
 	const result = turn.result;
 	const pushed = result?.push === "yes";
 	const reply =
-		result === undefined
+		turn.reply ??
+		(result === undefined
 			? turn.summary
-			: `${turn.summary}\n\n- ${result.files} file${result.files === 1 ? "" : "s"} changed, +${result.insertions} -${result.deletions}\n- bun test and tsc --noEmit pass`;
+			: `${turn.summary}\n\n- ${result.files} file${result.files === 1 ? "" : "s"} changed, +${result.insertions} -${result.deletions}\n- bun test and tsc --noEmit pass`);
 	return {
 		outcome: failed ? "failed" : "completed",
 		error: turn.error ?? "",
