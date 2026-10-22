@@ -71,6 +71,10 @@ export interface Whoami {
 	ompVersion: string;
 	/** The git hosts (`host` or `host:port`) the service can fetch a base from: a handoff from one of their remotes ships only what the remote lacks. */
 	gitHosts: string[];
+	/** Whether the service's MCP proxy listens: http MCP servers ship only when it does. False when the service reports none. */
+	mcpProxy: boolean;
+	/** The MCP server URLs the service holds a login for (`/cloud login mcp:<url>`); `[]` when it reports none. */
+	mcpLogins: string[];
 	vms: { running: number; paused: number };
 	threads: { starting: number; working: number; waiting: number; idle: number; failed: number };
 	/** The paired device this request was made with; null for the owner token. */
@@ -572,6 +576,8 @@ export interface HandoffRequest {
 	ompVersion: string;
 	/** The policy the session asks of the cloud agent, as sent; the service validates it and only ever tightens its own policy with it. Absent asks for none. */
 	policy?: Record<string, unknown>;
+	/** The MCP servers of `~/.omp/agent/mcp.json` the cloud agent gets (the service validates them); sent only to a service with `mcp.proxy`. */
+	mcp?: McpShip[];
 	/** The short human name generated for the task (2-6 words, at most 60 characters). Absent when none could be generated: the service then shows the title. */
 	name?: string;
 	/** Who started the thread. */
@@ -581,6 +587,11 @@ export interface HandoffRequest {
 	/** The omp session id (at most 128 characters). */
 	session?: string;
 }
+
+/** One MCP server of the user's config as the request ships it: an http one is reached through the service's proxy, a stdio one runs in the VM and takes its env from the cloud's Secrets (`${NAME}` references). */
+export type McpShip =
+	| { name: string; type: "http"; url: string; headers: Record<string, string> }
+	| { name: string; type: "stdio"; command: string; args: string[]; env: Record<string, string>; cwd?: string };
 
 /** A handoff without a repository: the service synthesizes an empty one (`threads.scratch`); no `source` part. */
 export interface ScratchHandoffRequest extends Omit<HandoffRequest, "repo"> {

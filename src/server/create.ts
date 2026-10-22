@@ -61,6 +61,8 @@ export interface UploadOptions {
 	beforeCreate?: () => void;
 	/** The create request's `Idempotency-Key`, stored on the thread with the fingerprint of the prompt (`createThreadIdempotent` sets it). */
 	idempotencyKey?: string;
+	/** The service's own addresses (the gateway's and the MCP proxy's): an http MCP server may not point at them. */
+	mcpSelfHosts?: readonly string[];
 }
 
 /** `provider/*` for every provider the cloud can run right now: the gateway's, then the direct ones. */
@@ -174,7 +176,7 @@ export async function createThreadFromUpload(
 	const { reader, raw } = await readRequestPart(req, limits);
 	let request;
 	try {
-		request = parseCreateRequest(raw);
+		request = parseCreateRequest(raw, options.mcpSelfHosts);
 	} catch (error) {
 		throw uploadError(REQUEST_PART, error, req);
 	}

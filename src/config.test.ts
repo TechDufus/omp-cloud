@@ -361,6 +361,22 @@ describe("parseConfig", () => {
 	test.each(["ftp://x/", "not a url", "http://localhost:8081/ui", "http://localhost:8081/?a=1", 7])("a bad dashboard.url %p is rejected", url => {
 		expect(() => parseConfig({ ...validRaw(), dashboard: { listen: "127.0.0.1:8081", url } })).toThrow("dashboard.url");
 	});
+
+	test("the mcp section is optional and takes an IP address and port", () => {
+		expect(parseConfig(validRaw()).mcp).toBeUndefined();
+		expect(parseConfig({ ...validRaw(), mcp: { listen: "10.254.254.1:4100" } }).mcp).toEqual({ listen: { hostname: "10.254.254.1", port: 4100 } });
+		expect(parseConfig({ ...validRaw(), mcp: { listen: "[fd00::1]:4100" } }).mcp?.listen).toEqual({ hostname: "fd00::1", port: 4100 });
+	});
+
+	test.each(["gateway.internal:4100", "localhost:4100", "0.0.0.0:4100", "[::]:4100"])("mcp.listen %p is refused: a host name or a wildcard", listen => {
+		expect(() => parseConfig({ ...validRaw(), mcp: { listen } })).toThrow("mcp.listen must be");
+	});
+
+	test("mcp.listen is required and malformed values name the field", () => {
+		expect(() => parseConfig({ ...validRaw(), mcp: {} })).toThrow("mcp.listen is required");
+		expect(() => parseConfig({ ...validRaw(), mcp: { listen: "10.254.254.1" } })).toThrow("mcp.listen must be host:port");
+		expect(() => parseConfig({ ...validRaw(), mcp: { listen: "10.254.254.1:4100", extra: 1 } })).toThrow("mcp.extra");
+	});
 });
 
 describe("git", () => {

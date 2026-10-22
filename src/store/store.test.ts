@@ -1310,6 +1310,94 @@ describe("migration 12", () => {
 	});
 });
 
+describe("migration 13", () => {
+	test("a version 12 database gains the secret and MCP tables and the thread columns, empty for its threads", async () => {
+		store.close();
+		await rm(dir, { recursive: true, force: true });
+		await mkdir(join(dir, "threads"), { recursive: true });
+		const raw = new Database(join(dir, "omp-cloud.db"));
+		for (const migration of MIGRATIONS.slice(0, 12)) raw.run(migration);
+		raw.run("PRAGMA user_version = 12");
+		raw
+			.query(
+				`INSERT INTO threads (id, owner, phase, title, model, thinking, repo_name, repo_remote_url, repo_base_ref, repo_base_commit,
+					repo_handoff_commit, repo_local_branch, home, workspace, author_name, author_email, secret_files, secret_env, created_at, last_activity_at)
+				VALUES (?, 'owner', 'idle', 'old', 'm', '', 'repo', '', '', '', 'def', '', '', '', '', '', '[]', '[]', ?, ?)`,
+			)
+			.run(ID, iso(0), iso(0));
+		raw.close();
+
+		store = open();
+		expect(store.getThread(ID)?.mcpServers).toEqual([]);
+		expect(store.listSecrets()).toEqual([]);
+		expect(store.mcpCredentialUrls()).toEqual([]);
+		expect(store.threadByMcpToken("")).toBeNull();
+		store.close();
+
+		const check = new Database(join(dir, "omp-cloud.db"), { readonly: true });
+		expect(check.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(MIGRATIONS.length);
+		expect(MIGRATIONS.length).toBeGreaterThanOrEqual(13);
+		const columns = (table: string): string[] => check.query<{ name: string }, []>(`SELECT name FROM pragma_table_info('${table}')`).all().map((row) => row.name);
+		expect(columns("secrets")).toEqual(["name", "value", "repos", "updated_at", "updated_by"]);
+		expect(columns("mcp_credentials")).toEqual(["url", "credential", "updated_at"]);
+		expect(columns("threads")).toEqual(expect.arrayContaining(["mcp_names", "mcp_token_sha256"]));
+		expect(check.query<{ name: string }, []>("SELECT name FROM pragma_index_list('threads')").all().map((row) => row.name)).toContain("threads_mcp_token");
+		check.close();
+		store = open();
+	});
+});
+
+describe("secrets and MCP", () => {
+	test("secrets are listed without values, in name order; a put replaces and stamps the clock and actor", () => {
+		store.putSecret({ name: "B_TOKEN", value: "!op read x", repos: ["*"] }, "owner");
+		store.putSecret({ name: "A_TOKEN", value: "plain", repos: ["github.com/a/*", "local/*"] }, "owner");
+		expect(store.listSecrets()).toEqual([
+			{ name: "A_TOKEN", repos: ["github.com/a/*", "local/*"], kind: "literal", updatedAt: iso(0), updatedBy: "owner" },
+			{ name: "B_TOKEN", repos: ["*"], kind: "command", updatedAt: iso(0), updatedBy: "owner" },
+		]);
+		tick();
+		store.putSecret({ name: "A_TOKEN", value: "changed", repos: ["*"] }, "device:d1");
+		expect(store.secretRows()).toEqual([
+			{ name: "A_TOKEN", value: "changed", repos: ["*"] },
+			{ name: "B_TOKEN", value: "!op read x", repos: ["*"] },
+		]);
+		expect(store.listSecrets()[0]).toEqual({ name: "A_TOKEN", repos: ["*"], kind: "literal", updatedAt: iso(1000), updatedBy: "device:d1" });
+		expect(JSON.stringify(store.listSecrets())).not.toContain("changed");
+	});
+
+	test("deleteSecret says whether a secret was there", () => {
+		store.putSecret({ name: "A_TOKEN", value: "v", repos: ["*"] }, "owner");
+		expect(store.deleteSecret("A_TOKEN")).toBe(true);
+		expect(store.deleteSecret("A_TOKEN")).toBe(false);
+		expect(store.secretRows()).toEqual([]);
+	});
+
+	test("MCP credentials round-trip per URL and replace on a second put", () => {
+		expect(store.mcpCredential("https://mcp.example/mcp")).toBeNull();
+		store.putMcpCredential("https://mcp.example/mcp", '{"access":"a"}', iso(0));
+		store.putMcpCredential("https://a.example/mcp", '{"access":"b"}', iso(0));
+		store.putMcpCredential("https://mcp.example/mcp", '{"access":"c"}', iso(1000));
+		expect(store.mcpCredential("https://mcp.example/mcp")).toBe('{"access":"c"}');
+		expect(store.mcpCredentialUrls()).toEqual(["https://a.example/mcp", "https://mcp.example/mcp"]);
+	});
+
+	test("a thread stores its MCP server names, and its token hash finds it until it is deleted", async () => {
+		expect(store.createThread(ID, newThread({ mcpServers: ["fake", "docs"] })).thread.mcpServers).toEqual(["fake", "docs"]);
+		expect(store.createThread("bbbbbbbbbbbb", newThread()).thread.mcpServers).toEqual([]);
+		store.setMcpToken(ID, "a".repeat(64));
+		expect(store.threadByMcpToken("a".repeat(64))?.id).toBe(ID);
+		expect(store.threadByMcpToken("b".repeat(64))).toBeNull();
+		expect(store.threadByMcpToken("")).toBeNull();
+		store.setMcpToken(ID, "c".repeat(64));
+		expect(store.threadByMcpToken("a".repeat(64))).toBeNull();
+		expect(store.threadByMcpToken("c".repeat(64))?.mcpServers).toEqual(["fake", "docs"]);
+		// An unknown thread is a no-op.
+		store.setMcpToken("zzzzzzzzzzzz", "d".repeat(64));
+		await store.deleteThread(ID);
+		expect(store.threadByMcpToken("c".repeat(64))).toBeNull();
+	});
+});
+
 describe("settings", () => {
 	const set = (key: string, value: string | null): SettingChange => ({ key, value });
 

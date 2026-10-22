@@ -3,6 +3,7 @@ import { DevicesPage } from "../pages/DevicesPage";
 import { GitHubPage } from "../pages/GitHubPage";
 import { LoginsPage } from "../pages/LoginsPage";
 import { OverviewPage } from "../pages/OverviewPage";
+import { SecretsPage } from "../pages/SecretsPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { SpendPage } from "../pages/SpendPage";
 import { ThreadsPage } from "../pages/ThreadsPage";
@@ -40,6 +41,8 @@ export function App() {
 				return <LoginsPage active={active} />;
 			case "github":
 				return <GitHubPage active={active} />;
+			case "secrets":
+				return <SecretsPage active={active} />;
 			case "settings":
 				return <SettingsPage active={active} />;
 		}

@@ -1,7 +1,10 @@
+import { randomBytes } from "node:crypto";
 import type { Sandbox } from "e2b";
 import type { ModelsConfig } from "../config";
 import type { GitService } from "../git";
 import { isRecord } from "../guards";
+import { parseMcpServers } from "../connectors/mcp-servers";
+import { sha256Hex } from "../pairing/secrets";
 import { MAX_SOURCE_BYTES } from "../server/limits";
 import type { Store } from "../store";
 import { type BlobName, RESULT_BRANCH_PREFIX, type Thread, type ThreadSecrets } from "../store/types";
@@ -11,12 +14,17 @@ import ircPeerSource from "./vm-extension/irc-peer" with { type: "text" };
 import { cloudSystemPrompt, modelsYaml, type OverlayPolicy, overlayConfigYaml } from "./omp-config";
 import { ircConfigJson, parentIdentity } from "./irc";
 import { reidentifySession } from "./session-export";
-import { VM_AGENT_DIR, VM_CLOUD_DIR, VM_IRC_CONFIG, VM_IRC_EXTENSION, VM_WORKSPACE } from "./vm-layout";
+import { VM_AGENT_DIR, VM_CLOUD_DIR, VM_ENV_FILE, VM_IRC_CONFIG, VM_IRC_EXTENSION, VM_WORKSPACE } from "./vm-layout";
 
 const OVERLAY_FILE = `${VM_CLOUD_DIR}/config.yml`;
 const SYSTEM_PROMPT_FILE = `${VM_CLOUD_DIR}/system-prompt.md`;
-const ENV_FILE = `${VM_CLOUD_DIR}/env`;
+/** omp's secret obfuscation list, read when the overlay sets `secrets.enabled`. */
+const MASK_FILE = `${VM_AGENT_DIR}/secrets.yml`;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** An env value shorter than this is not masked: it would garble ordinary text. */
+const MIN_MASKED_ENV_CHARS = 4;
+/** The largest secret file whose content is masked. */
+const MAX_MASKED_FILE_BYTES = 65536;
 
 export interface ProvisionInput {
 	thread: Thread;
@@ -32,12 +40,19 @@ export interface ProvisionInput {
 	questionTimeoutSeconds: number;
 	/** The thread's effective policy at provision time (the owner's settings tightened by the thread's own): what the overlay enforces inside the VM. */
 	policy: OverlayPolicy;
+	/** The service's secrets that match the thread's repository (`ServiceSecrets.resolveForThread`); the thread's own `secretEnv` wins over them. */
+	serviceEnv: Record<string, string>;
+	/** `<ip>:<port>` of the listening MCP proxy the VM's http MCP servers go through; null when there is none. */
+	mcpListen: string | null;
 }
 
-/** What `provisionVm` leaves for the runner to start omp with. */
+/** What `provisionVm` leaves for the runner to start omp with: `envNames` are the variables of the env file omp is started under (names only). */
 export interface Provisioned {
 	extraArgs: string[];
-	envFile: string | null;
+	envNames: string[];
+	/** The MCP servers written to the VM's mcp.json, and the http ones left out because the service has no proxy. */
+	mcpNames: string[];
+	mcpSkipped: string[];
 }
 
 /**
@@ -70,9 +85,14 @@ export async function shipIrcExtension(sandbox: Sandbox, thread: Thread): Promis
 	await sandbox.files.write(VM_IRC_CONFIG, ircConfigJson(thread));
 }
 
-/** The secret env file omp sources, or null when the thread ships no secret env. */
-export function envFileFor(thread: Thread): string | null {
-	return thread.secretEnv.length > 0 ? ENV_FILE : null;
+/** The content of a secret file as text to mask: the empty list for content that is empty, over 64 KiB or not valid UTF-8. */
+function maskableContent(bytes: Buffer): string[] {
+	if (bytes.length === 0 || bytes.length > MAX_MASKED_FILE_BYTES) return [];
+	try {
+		return [new TextDecoder("utf-8", { fatal: true }).decode(bytes)];
+	} catch {
+		return [];
+	}
 }
 
 /** Uploads a store blob into the sandbox by streaming. */
@@ -107,7 +127,7 @@ function parseSecrets(text: string): ThreadSecrets {
 		if (typeof value !== "string" || !ENV_NAME.test(name)) throw bad();
 		env[name] = value;
 	}
-	return { files, env };
+	return { files, env, mcp: parseMcpServers(raw.mcp) };
 }
 
 /** Escapes the characters that are special in a gitignore pattern. */
@@ -156,11 +176,16 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 	// A bundle without a recorded head was stored by a turn that never completed: the thread restores at the handoff commit.
 	const result = resultHead === "" && restoreHead === "" ? null : await store.blob(thread.id, "result.bundle");
 	let secrets: ThreadSecrets | null = null;
-	if (thread.secretFiles.length > 0 || thread.secretEnv.length > 0) {
+	if (thread.secretFiles.length > 0 || thread.secretEnv.length > 0 || thread.mcpServers.length > 0) {
 		const blob = await store.blob(thread.id, "secrets.json");
 		if (blob === null) throw new Error("the thread's secrets.json is missing");
 		secrets = parseSecrets(await blob.text());
 	}
+	// The thread's own values win over the service's.
+	const env = { ...input.serviceEnv, ...secrets?.env };
+	const maskSecrets = Object.keys(env).length > 0 || (secrets?.files.length ?? 0) > 0;
+	const mcpNames: string[] = [];
+	const mcpSkipped: string[] = [];
 
 	const exec = sandboxExec(sandbox);
 	const q = shellQuote;
@@ -189,6 +214,29 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 			modelsYaml({ gatewayUrl: input.gatewayUrl, token: input.token, gateway: input.served, direct: models.direct }),
 		);
 		await exec(`chmod 600 ${q(modelsFile)}`);
+		// The MCP servers the thread ships: http ones through the service's proxy under a per-provisioning token (the upstream headers stay on the service), stdio ones as they are.
+		if (thread.mcpServers.length > 0) {
+			const servers: Record<string, unknown> = {};
+			let mcpToken = "";
+			for (const server of secrets?.mcp ?? []) {
+				if (server.type === "stdio") {
+					servers[server.name] = { command: server.command, args: server.args, env: server.env, ...(server.cwd === undefined ? {} : { cwd: server.cwd }) };
+				} else if (input.mcpListen === null) {
+					mcpSkipped.push(server.name);
+					continue;
+				} else {
+					mcpToken ||= randomBytes(32).toString("base64url");
+					servers[server.name] = { type: "http", url: `http://${input.mcpListen}/mcp/${server.name}`, headers: { Authorization: `Bearer ${mcpToken}` } };
+				}
+				mcpNames.push(server.name);
+			}
+			if (mcpToken !== "") store.setMcpToken(thread.id, sha256Hex(mcpToken));
+			if (mcpNames.length > 0) {
+				const mcpFile = `${VM_AGENT_DIR}/mcp.json`;
+				await sandbox.files.write(mcpFile, JSON.stringify({ mcpServers: servers }, null, 2));
+				await exec(`chmod 600 ${q(mcpFile)}`);
+			}
+		}
 		await shipIrcExtension(sandbox, thread);
 
 		const configFiles = [`${VM_AGENT_DIR}/config.yml`, ...thread.configOverlays.map(overlay => `${VM_AGENT_DIR}/${overlay}`)];
@@ -196,7 +244,7 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 		for (const file of configFiles) configYamls.push((await sandbox.files.exists(file)) ? await sandbox.files.read(file) : null);
 		await sandbox.files.write(
 			OVERLAY_FILE,
-			overlayConfigYaml({ model, thinking: thread.thinking, configYamls, routable, policy: input.policy }),
+			overlayConfigYaml({ model, thinking: thread.thinking, configYamls, routable, policy: input.policy, maskSecrets }),
 		);
 		await sandbox.files.write(
 			SYSTEM_PROMPT_FILE,
@@ -206,6 +254,7 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 				localBranch: thread.repo.localBranch,
 				questionTimeoutSeconds: input.questionTimeoutSeconds,
 				secretFiles: thread.secretFiles,
+				mcpServers: mcpNames,
 				parentId: parentIdentity(thread).id,
 			}),
 		);
@@ -256,11 +305,20 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 				const lines = exclude.map(q).join(" ");
 				await exec(`mkdir -p .git/info && printf '%s\\n' ${lines} >> .git/info/exclude`, { cwd: VM_WORKSPACE });
 			}
-			if (thread.secretEnv.length > 0) {
-				const lines = Object.entries(secrets.env).map(([name, value]) => `${name}=${q(value)}\n`);
-				await sandbox.files.write(ENV_FILE, lines.join(""));
-				await exec(`chmod 600 ${q(ENV_FILE)}`);
-			}
+		}
+
+		if (Object.keys(env).length > 0) {
+			const lines = Object.entries(env).map(([name, value]) => `${name}=${q(value)}\n`);
+			await sandbox.files.write(VM_ENV_FILE, lines.join(""));
+			await exec(`chmod 600 ${q(VM_ENV_FILE)}`);
+		}
+		if (maskSecrets) {
+			const masks = [
+				...Object.values(env).filter(value => value.length >= MIN_MASKED_ENV_CHARS),
+				...(secrets?.files ?? []).flatMap(file => maskableContent(Buffer.from(file.content, "base64"))),
+			];
+			await sandbox.files.write(MASK_FILE, Bun.YAML.stringify(masks.map(content => ({ type: "plain", content, mode: "obfuscate" })), null, 2));
+			await exec(`chmod 600 ${q(MASK_FILE)}`);
 		}
 
 		const conversation = exported ?? session;
@@ -288,5 +346,5 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 		await exec(`rm -rf ${q(transfer)}`).catch(() => undefined);
 	}
 
-	return { extraArgs: ompLaunchArgs(thread, models, resumeFile), envFile: envFileFor(thread) };
+	return { extraArgs: ompLaunchArgs(thread, models, resumeFile), envNames: Object.keys(env).sort(), mcpNames, mcpSkipped };
 }

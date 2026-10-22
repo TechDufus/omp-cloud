@@ -20,6 +20,8 @@ export function whoami(over: Partial<Whoami> = {}): Whoami {
 		modelPatterns: ["anthropic/*"],
 		ompVersion: "18.12.3",
 		gitHosts: [],
+		mcpProxy: false,
+		mcpLogins: [],
 		vms: { running: 0, paused: 0 },
 		threads: { starting: 0, working: 0, waiting: 0, idle: 0, failed: 0 },
 		device: null,

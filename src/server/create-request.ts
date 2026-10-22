@@ -1,9 +1,10 @@
+import { isRefusedHost } from "../connectors/refused";
 import { isRecord } from "../guards";
 import { SettingError } from "../settings/registry";
 import type { ThreadPolicy } from "../settings/policy";
 import { parseThreadPolicy } from "../settings/tighten";
 import { MAX_TEXT_BYTES, THINKING_LEVELS } from "../store/types";
-import type { Author, NewThread, Paths, Repo, ThreadOrigin, ThreadSecrets } from "../store/types";
+import type { Author, NewThread, Paths, Repo, ThreadMcpServer, ThreadOrigin, ThreadSecrets } from "../store/types";
 import { ApiError } from "./errors";
 
 /** A validated create request. */
@@ -33,6 +34,16 @@ const RESERVED_ENV_PREFIXES = ["OMP_", "MISE_"];
 const BASE64_BODY = /^[A-Za-z0-9+/]*={0,2}$/;
 const PROVIDER_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const OMP_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
+const MAX_MCP_SERVERS = 32;
+const MAX_MCP_HEADERS = 32;
+const MAX_MCP_ENV = 64;
+const MAX_MCP_ARGS = 256;
+/** The JSON of every shipped MCP server together. */
+const MAX_MCP_BYTES = 262144;
+const MCP_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+/** An stdio server's env value: a reference (`${NAME}` or `${NAME:-default}`) to the VM's own environment, so no literal secret travels in a request. */
+const MCP_ENV_REFERENCE = /^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}$/;
 const MAX_CONFIG_OVERLAYS = 8;
 const OVERLAY_SEGMENT = /^[A-Za-z0-9._-]+$/;
 const REF_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
@@ -135,7 +146,7 @@ export function modelProvider(model: string): string {
 }
 
 /** Why `name` cannot be a secret variable, completing "secretEnv <name> ..."; `""` when it can. */
-function checkEnvName(name: string): string {
+export function checkEnvName(name: string): string {
 	if (!ENV_NAME_PATTERN.test(name)) return "is not a valid variable name";
 	if (RESERVED_ENV.includes(name)) return "is reserved";
 	const prefix = RESERVED_ENV_PREFIXES.find(p => name.startsWith(p));
@@ -195,6 +206,86 @@ function parseSecrets(body: Record<string, unknown>): { secrets: ThreadSecrets |
 		files: files.map(f => f.path),
 		envNames: names,
 	};
+}
+
+/** The string at `entry[key]`, or the 400 for a server named `name`. */
+function mcpString(entry: Record<string, unknown>, key: string, name: string): string {
+	const value = entry[key];
+	if (typeof value !== "string") throw bad(`mcp server ${name}: ${key} must be a string`);
+	return value;
+}
+
+/** The `name: string` pairs of `entry[key]` (absent is empty), at most `limit` of them, each pair checked by `check`. */
+function mcpStringMap(entry: Record<string, unknown>, key: string, name: string, limit: number, check: (k: string, v: string) => void): Record<string, string> {
+	const value = entry[key] ?? {};
+	if (!isRecord(value)) throw bad(`mcp server ${name}: ${key} must be an object`);
+	const pairs = Object.entries(value);
+	if (pairs.length > limit) throw bad(`mcp server ${name}: ${key} has ${pairs.length} entries; at most ${limit}`);
+	const out: Record<string, string> = {};
+	for (const [k, v] of pairs) {
+		if (typeof v !== "string") throw bad(`mcp server ${name}: ${key} ${cut(k, MAX_QUOTED_CHARS)} must be a string`);
+		check(k, v);
+		out[k] = v;
+	}
+	return out;
+}
+
+/**
+ * Validates `mcp`: at most 32 uniquely named servers. An http server (a public or LAN URL the service proxies; its
+ * headers never reach a VM) may not point at the service host. A stdio server runs in the VM and may reference
+ * the VM's env only as `${NAME}`.
+ */
+function parseMcp(body: Record<string, unknown>, selfHosts: readonly string[]): ThreadMcpServer[] {
+	const raw = body.mcp ?? [];
+	if (!Array.isArray(raw)) throw bad("mcp must be an array");
+	if (raw.length > MAX_MCP_SERVERS) throw bad(`mcp has ${raw.length} entries; at most ${MAX_MCP_SERVERS}`);
+	const servers: ThreadMcpServer[] = [];
+	for (const [i, entry] of raw.entries()) {
+		if (!isRecord(entry)) throw bad(`mcp[${i}] must be an object`);
+		const name = entry.name;
+		if (typeof name !== "string" || !MCP_NAME_PATTERN.test(name)) throw bad(`mcp[${i}].name must be 1 to 64 characters of letters, digits, . _ or -`);
+		if (servers.some(server => server.name === name)) throw bad(`mcp server ${name} is listed twice`);
+		if (entry.type === "http") {
+			const url = mcpString(entry, "url", name);
+			let parsed: URL;
+			try {
+				parsed = new URL(url);
+			} catch {
+				throw bad(`mcp server ${name}: url is not a URL`);
+			}
+			if (!plainText(url, MAX_URL_BYTES) || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
+				throw bad(`mcp server ${name}: url must be an http or https URL of at most ${MAX_URL_BYTES} bytes`);
+			}
+			if (isRefusedHost(parsed.hostname, selfHosts)) throw bad(`mcp server ${name} may not point at the service host`);
+			const headers = mcpStringMap(entry, "headers", name, MAX_MCP_HEADERS, (key, value) => {
+				if (!HEADER_NAME_PATTERN.test(key)) throw bad(`mcp server ${name}: header ${cut(key, MAX_QUOTED_CHARS)} is not a valid header name`);
+				if (!plainText(value, 8192)) throw bad(`mcp server ${name}: header ${key} must be at most 8192 bytes without control characters`);
+			});
+			servers.push({ name, type: "http", url, headers });
+		} else if (entry.type === "stdio") {
+			const command = mcpString(entry, "command", name);
+			if (command === "" || !plainText(command, MAX_FIELD_BYTES)) throw bad(`mcp server ${name}: command must be 1 to ${MAX_FIELD_BYTES} bytes without control characters`);
+			const rawArgs = entry.args ?? [];
+			if (!Array.isArray(rawArgs)) throw bad(`mcp server ${name}: args must be an array of strings`);
+			if (rawArgs.length > MAX_MCP_ARGS) throw bad(`mcp server ${name}: args has ${rawArgs.length} entries; at most ${MAX_MCP_ARGS}`);
+			const args = rawArgs.map((arg: unknown) => {
+				if (typeof arg !== "string") throw bad(`mcp server ${name}: args must be an array of strings`);
+				return arg;
+			});
+			const env = mcpStringMap(entry, "env", name, MAX_MCP_ENV, (key, value) => {
+				if (!ENV_NAME_PATTERN.test(key)) throw bad(`mcp server ${name}: env ${cut(key, MAX_QUOTED_CHARS)} is not a valid variable name`);
+				if (!MCP_ENV_REFERENCE.test(value)) throw bad(`mcp server ${name}: env ${key} must be a \${NAME} reference to the cloud's secrets, not a literal value`);
+			});
+			const cwd = entry.cwd;
+			if (cwd !== undefined && (typeof cwd !== "string" || !validSecretPath(cwd))) throw bad(`mcp server ${name}: cwd must be a relative, clean path`);
+			servers.push({ name, type: "stdio", command, args, env, ...(cwd === undefined ? {} : { cwd }) });
+		} else {
+			throw bad(`mcp server ${name}: type must be "http" or "stdio"`);
+		}
+	}
+	const size = Buffer.byteLength(JSON.stringify(servers));
+	if (size > MAX_MCP_BYTES) throw bad(`mcp is ${size} bytes; at most ${MAX_MCP_BYTES}`);
+	return servers;
 }
 
 /** Validates `configOverlays`: at most 8 clean relative paths of safe segments, in load order. */
@@ -269,7 +360,7 @@ function parseScratch(repoBody: Record<string, unknown>): boolean {
 }
 
 /** Validates the parsed JSON of the create request's `request` part. `thread.ompVersion` is `""` when the request names none. Throws ApiError(400, message). */
-export function parseCreateRequest(raw: unknown): CreateRequest {
+export function parseCreateRequest(raw: unknown, selfHosts: readonly string[] = []): CreateRequest {
 	if (!isRecord(raw)) throw bad("the request must be a JSON object");
 	const prompt = textField(raw, "prompt", "prompt");
 	const model = textField(raw, "model", "model");
@@ -355,7 +446,10 @@ export function parseCreateRequest(raw: unknown): CreateRequest {
 		throw bad(`thinking must be one of ${THINKING_LEVELS.join(", ")}`);
 	}
 	if (ompVersion !== "" && !OMP_VERSION_PATTERN.test(ompVersion)) throw bad("ompVersion must be empty or <major>.<minor>.<patch>");
-	const { secrets, files, envNames } = parseSecrets(raw);
+	const parsedSecrets = parseSecrets(raw);
+	const { files, envNames } = parsedSecrets;
+	const mcp = parseMcp(raw, selfHosts);
+	const secrets: ThreadSecrets | null = mcp.length === 0 ? parsedSecrets.secrets : { ...(parsedSecrets.secrets ?? { files: [], env: {} }), mcp };
 	const configOverlays = parseConfigOverlays(raw);
 	const policy = parsePolicy(raw);
 	const origin = parseOrigin(raw);
@@ -382,6 +476,7 @@ export function parseCreateRequest(raw: unknown): CreateRequest {
 			ref,
 			session,
 			scratch,
+			mcpServers: mcp.map(server => server.name),
 		},
 		secrets,
 	};

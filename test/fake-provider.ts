@@ -328,6 +328,10 @@ export interface FakeProvider {
 	readonly recentTurns: unknown[];
 	/** The tail (last 3 messages, 4000 characters each) of the last 500 chat requests that were not title requests, oldest first: what a model saw last. */
 	readonly history: string[];
+	/** Starts counting the chat requests whose body contains `needle` (from now on); read the count with {@link seen}. */
+	watch(needle: string): void;
+	/** How many chat requests received since `watch(needle)` contained `needle`; 0 for a needle nobody watches. */
+	seen(needle: string): number;
 	stop(): Promise<void>;
 }
 
@@ -336,6 +340,7 @@ export function startFakeProvider(options: { hostname?: string; port?: number } 
 	let count = 0;
 	let last: unknown = null;
 	const recentTurns: unknown[] = [];
+	const watched = new Map<string, number>();
 	const history: string[] = [];
 	const server = Bun.serve({
 		hostname,
@@ -348,6 +353,10 @@ export function startFakeProvider(options: { hostname?: string; port?: number } 
 			if (req.method === "POST" && pathname.endsWith("/chat/completions")) {
 				const body: unknown = await req.json();
 				count++;
+				if (watched.size > 0) {
+					const raw = JSON.stringify(body);
+					for (const [needle, seen] of watched) if (raw.includes(needle)) watched.set(needle, seen + 1);
+				}
 				last = body;
 				const messages: ChatMessage[] =
 					isRecord(body) && Array.isArray(body.messages) ? (body.messages as ChatMessage[]) : [];
@@ -381,6 +390,8 @@ export function startFakeProvider(options: { hostname?: string; port?: number } 
 		get history() {
 			return history;
 		},
+		watch: (needle: string) => void watched.set(needle, 0),
+		seen: (needle: string) => watched.get(needle) ?? 0,
 		stop: () => server.stop(true),
 	};
 }

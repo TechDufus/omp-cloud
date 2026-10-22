@@ -994,6 +994,19 @@ describe("plain cards", () => {
 		expect(lines).toContain("policy    egress, fetch, spend.turnUSD");
 	});
 
+	test("a launch card names each shipped MCP server and how the agent reaches it, in the plain lines and the model text; no row without any", () => {
+		const mcp: LaunchCard["mcp"] = [
+			{ name: "wiki", via: "service" },
+			{ name: "fs", via: "vm" },
+		];
+		expect(cardPlain(launch({ mcp }))).toContain("mcp       wiki (via the service), fs (in the VM)");
+		expect(cardContent(launch({ mcp }))).toContain("MCP servers: wiki (via the service), fs (in the VM).");
+		for (const none of [[], undefined]) {
+			expect(cardPlain(launch({ mcp: none })).some(l => l.startsWith("mcp"))).toBe(false);
+			expect(cardContent(launch({ mcp: none }))).not.toContain("MCP servers");
+		}
+	});
+
 	test("a launch card leaves out empty rows and says when the conversation did not ship", () => {
 		const lines = cardPlain(launch({ overlays: [], policy: [], model: "", thinking: "", ompVersion: "", conversation: "too-large", untracked: [], untrackedTotal: 0, withheld: [], warnings: [] }));
 		expect(lines.some(l => l.startsWith("overlays"))).toBe(false);

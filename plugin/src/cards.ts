@@ -111,6 +111,8 @@ export interface LaunchCard extends ThreadCardBase {
 	setupBytes: number;
 	/** The session's `--config` overlays, as shipped. */
 	overlays: string[];
+	/** The MCP servers shipped and how the cloud agent reaches them. Absent on cards of older plugins. */
+	mcp?: { name: string; via: "service" | "vm" }[];
 	/** The keys of the `policy` the handoff asked for (`egress`, `fetch`, `spend.turnUSD`, ...). */
 	policy: string[];
 	warnings: string[];
@@ -587,6 +589,7 @@ export function cardContent(d: CardDetails): string {
 				d.scratch ? "Scratch workspace: nothing of this machine was shipped; the thread works in an empty repository." : `Shipped ${plural(d.commits, "commit")} and ${plural(d.wip.files, "uncommitted file")} of ${d.repo.name} (${d.base === "" ? "full history" : `changes since ${d.base}`}); the result is branch ${d.repo.branch}.`,
 			];
 			if (d.withheld.length > 0) lines.push(`Left on this machine: ${d.withheld.join(", ")}.`);
+			if (d.mcp !== undefined && d.mcp.length > 0) lines.push(`MCP servers: ${mcpText(d.mcp)}.`);
 			if (d.warnings.length > 0) lines.push(`Warnings: ${d.warnings.join("; ")}.`);
 			lines.push("Results arrive later as [cloud] messages; do not poll.");
 			return lines.join("\n");
@@ -659,6 +662,11 @@ function untrackedLines(d: LaunchCard): string[] {
 	return more > 0 ? [...d.untracked, `and ${more} more`] : d.untracked;
 }
 
+/** `name (via the service)` or `name (in the VM)`, comma separated. */
+function mcpText(servers: readonly { name: string; via: "service" | "vm" }[]): string {
+	return servers.map(s => `${s.name} (${s.via === "service" ? "via the service" : "in the VM"})`).join(", ");
+}
+
 /** The label/value rows of a launch card; an empty value is left out. */
 function launchRows(d: LaunchCard): [string, string][] {
 	const conversation = d.conversation === "included" ? "conversation" : d.conversation === "too-large" ? "no conversation (too large)" : "no conversation";
@@ -668,6 +676,7 @@ function launchRows(d: LaunchCard): [string, string][] {
 		["shipped", d.scratch ? "nothing: scratch workspace" : `${plural(d.commits, "commit")} · ${plural(d.wip.files, "changed file")} (+${d.wip.insertions} −${d.wip.deletions}) · ${d.base === "" ? "full history" : `delta since ${d.base}`}`],
 		["setup", `${conversation} · ${(d.setupBytes / 1024).toFixed(0)} KiB omp setup · ${plural(d.secrets.files, "secret file")} · ${plural(d.secrets.env, "secret variable")}`],
 		["overlays", d.overlays.join(", ")],
+		["mcp", mcpText(d.mcp ?? [])],
 		["policy", d.policy.join(", ")],
 	];
 }

@@ -13,6 +13,7 @@ import { GitHubAppNotInstalled, type GitHubApp } from "../github/app";
 import { githubRepoOf } from "../github/repo";
 import { shellQuote } from "../runner/exec";
 import { scrub, writeCredentialHelper } from "./credential";
+import { globMatch } from "./glob";
 import { InspectError, Inspection } from "./inspect";
 import { normalizeRemote, remoteHostOf } from "./remote";
 import { SecretError, SecretRefs } from "./secret";
@@ -169,10 +170,7 @@ function reasonOf(stderr: string): string {
 
 /** Whether `name` matches one of the globs (`*` is any run of characters, including `/`; the whole name must match). */
 function isProtected(name: string, patterns: readonly string[]): boolean {
-	return patterns.some(pattern => {
-		const parts = pattern.split("*").map(part => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
-		return new RegExp(`^${parts.join(".*")}$`).test(name);
-	});
+	return patterns.some(pattern => globMatch(pattern, name));
 }
 
 /** What a failed `git push` (or the `ls-remote` before it) means for the owner: friendly text for the refusals git reports, else its last line. */

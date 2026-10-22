@@ -8,6 +8,7 @@ import { SigningKey } from "../git/signing-key";
 import { GitHubApi } from "../github/api";
 import { GitHubApp } from "../github/app";
 import { isRecord } from "../guards";
+import { ServiceSecrets } from "../secrets/store";
 import { Settings } from "../settings";
 import { Store } from "../store";
 import type { NewThread } from "../store/types";
@@ -60,6 +61,7 @@ export async function openEnv(dir: string): Promise<{ store: Store; settings: Se
 		signingKey: SigningKey.open(dir),
 		github: await GitHubApp.open(dir, githubApi),
 		githubApi,
+		secrets: new ServiceSecrets(store),
 		ompVersion: "18.12.3",
 	};
 	return { store, settings, gateway, env };

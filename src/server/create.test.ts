@@ -287,6 +287,23 @@ describe("success", () => {
 		});
 	});
 
+	test("MCP servers are stored in secrets.json (never served) with their names on the thread; one at the service host refuses the upload", async () => {
+		const servers = [
+			{ name: "docs", type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer upstream" } },
+			{ name: "local", type: "stdio", command: "npx", args: [], env: { KEY: "${KEY}" } },
+		];
+		const thread = await createThreadFromUpload(store, withRequest(full({ mcp: servers }), [["source", bytes("src")]]), OWNER, options());
+		expect(thread.mcpServers).toEqual(["docs", "local"]);
+		expect(JSON.parse((await readBlob(thread.id, "secrets.json"))!)).toEqual({ files: [], env: {}, mcp: servers });
+		expect(JSON.stringify(thread)).not.toContain("Bearer upstream");
+
+		const own = { name: "self", type: "http", url: "http://10.254.254.1:4000/mcp", headers: {} };
+		const error = await createThreadFromUpload(store, withRequest(full({ mcp: [own] }), [["source", bytes("src")]]), OWNER, options({ mcpSelfHosts: ["10.254.254.1"] })).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(ApiError);
+		expect((error as ApiError).status).toBe(400);
+		expect((error as ApiError).message).toBe("mcp server self may not point at the service host");
+	});
+
 	test("paths are stored as given", async () => {
 		const req = withRequest(full({ paths: { home: "/home/ada", workspace: "/usr/src" } }), [["source", bytes("src")]]);
 		const thread = await createThreadFromUpload(store, req, OWNER, options());

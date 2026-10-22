@@ -49,7 +49,7 @@ defaultThinkingLevel: high
 theme: dark
 `;
 	const OPEN: OverlayPolicy = { bashPatterns: [], toolApproval: {}, fetch: true, webSearch: true, browser: true };
-	const base = { model: "anthropic/claude-x", thinking: "", configYamls: [user], routable: ["anthropic", "openai", "fake"], policy: OPEN };
+	const base = { model: "anthropic/claude-x", thinking: "", configYamls: [user], routable: ["anthropic", "openai", "fake"], policy: OPEN, maskSecrets: false };
 
 	test("keeps roles whose provider is routable and replaces every other role with the thread's model", () => {
 		expect(roles(overlayConfigYaml(base))).toEqual({
@@ -122,6 +122,12 @@ modelRoles:
 			retry: { enabled: true },
 		});
 		expect(overlay).not.toHaveProperty("theme");
+		expect(overlay).not.toHaveProperty("secrets");
+	});
+
+	test("turns omp's secret masking on only when the VM holds secrets", () => {
+		expect(parse(overlayConfigYaml({ ...base, maskSecrets: true })).secrets).toEqual({ enabled: true });
+		expect(parse(overlayConfigYaml(base))).not.toHaveProperty("secrets");
 	});
 
 	describe("policy", () => {
@@ -226,7 +232,7 @@ tools:
 });
 
 describe("cloudSystemPrompt", () => {
-	const base = { repoName: "app", branch: "omp-cloud/aaaaaaaaaaaa", localBranch: "", questionTimeoutSeconds: 1800, secretFiles: [], parentId: "Parent" };
+	const base = { repoName: "app", branch: "omp-cloud/aaaaaaaaaaaa", localBranch: "", questionTimeoutSeconds: 1800, secretFiles: [], mcpServers: [], parentId: "Parent" };
 
 	test("names the repository, workspace, branch and question timeout", () => {
 		const prompt = cloudSystemPrompt(base);
@@ -251,6 +257,11 @@ describe("cloudSystemPrompt", () => {
 			"committed: .env, config/key.pem.",
 		);
 		expect(cloudSystemPrompt(base)).toContain("committed: none.");
+	});
+
+	test("names the MCP servers only when the thread ships some", () => {
+		expect(cloudSystemPrompt({ ...base, mcpServers: ["fake", "docs"] })).toContain("- MCP servers: fake, docs; the http ones are reached through the service, never print their tokens.");
+		expect(cloudSystemPrompt(base)).not.toContain("MCP servers");
 	});
 
 	test("names the parent as the IRC peer the agent writes to, and how", () => {

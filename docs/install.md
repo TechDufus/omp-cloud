@@ -116,6 +116,8 @@ omp-cloud login anthropic    # or name one
 
 It prints the login URL in full first, then the device code. Open the URL in a browser on any machine, approve, and (for a provider that redirects to a page that does not load) paste the redirect URL or code back into the terminal. The command waits up to 6 minutes; the service itself ends a login after 5 ([Logins](api.md#logins)). Setup's login step skips itself when the cloud already runs a provider; `omp-cloud login` always logs in to the provider you pick, again if need be. With no provider and no terminal (an agent, a script) it prints the providers the service offers and exits 2: pick one and run `omp-cloud login <provider>`. The credentials live in the broker's vault (`~/.local/share/omp-cloud/auth-home`); sandboxes never see them. See [Security](security.md).
 
+`omp-cloud login mcp:<https url>` logs the service in to an MCP server's OAuth the same way, for an http MCP server that wants a login ([Secrets and MCP servers](secrets-and-mcp.md#logging-the-service-in-to-an-mcp-server)); the login is kept in the service's database, not the broker's vault.
+
 ## Doctor
 
 ```sh

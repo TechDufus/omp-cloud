@@ -71,6 +71,7 @@ describe("summaryView", () => {
 		session: "",
 		scratch: false,
 		pr: null,
+		mcpServers: [],
 	};
 
 	function turn(overrides: Partial<Turn>): Turn {

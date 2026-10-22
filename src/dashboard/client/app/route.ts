@@ -1,7 +1,7 @@
-/** The hash router: `#/`, `#/threads`, `#/threads/<id>`, `#/spend`, `#/vms`, `#/devices`, `#/logins`, `#/github`, `#/settings`. */
+/** The hash router: `#/`, `#/threads`, `#/threads/<id>`, `#/spend`, `#/vms`, `#/devices`, `#/logins`, `#/github`, `#/secrets`, `#/settings`. */
 import { useMemo, useSyncExternalStore } from "react";
 
-export type PageId = "overview" | "threads" | "spend" | "vms" | "devices" | "logins" | "github" | "settings";
+export type PageId = "overview" | "threads" | "spend" | "vms" | "devices" | "logins" | "github" | "secrets" | "settings";
 
 export interface Route {
 	page: PageId;
@@ -15,6 +15,7 @@ const PAGES: Readonly<Record<string, PageId>> = {
 	devices: "devices",
 	logins: "logins",
 	github: "github",
+	secrets: "secrets",
 	settings: "settings",
 };
 

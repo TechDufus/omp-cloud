@@ -84,6 +84,7 @@ export function launchCard(args: { origin: ThreadOrigin; thread: string; name: s
 		conversation: s.conversation,
 		setupBytes: s.setupBytes,
 		overlays: s.overlays,
+		mcp: s.mcp,
 		policy: s.policy,
 		warnings: args.warnings,
 	};

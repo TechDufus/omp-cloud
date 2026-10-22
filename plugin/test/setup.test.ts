@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { chmod, lstat, mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { run } from "../src/exec";
-import { buildSetup, MEMORY_WARNING, type SetupOptions } from "../src/setup";
+import { buildSetup, MEMORY_WARNING, sanitizeSettings, type SetupOptions } from "../src/setup";
 import { UserError } from "../src/types";
 import { cleanup, tmp } from "./helpers";
 
@@ -221,6 +221,68 @@ describe("buildSetup", () => {
 		expect(await readFile(join(dir, "extensions/out.ts"), "utf8")).toBe("// out\n");
 	});
 
+	test("a config.yml keeps credentials, host paths, commands and local endpoints at home, and each is a warning that reaches the caller", async () => {
+		const agentDir = await tmp("omp-cloud-cfg-");
+		await put(
+			join(agentDir, "config.yml"),
+			[
+				"theme: dark",
+				"auth:",
+				"  broker:",
+				"    url: http://127.0.0.1:4000",
+				"    token: broker-secret",
+				"hindsight:",
+				"  apiUrl: http://localhost:8888",
+				"  apiToken: hs-secret",
+				"searxng:",
+				"  endpoint: https://search.example.test",
+				"mnemopi:",
+				"  llmApiKey: '!op read op://v/i/key'",
+				"  embeddingApiUrl: http://[::1]:11434",
+				"  scoping: per-project",
+				'"browser.cdpUrl": http://127.0.0.1:9222',
+				"modelRoles:",
+				"  default: a/b",
+				"  smol: '!echo hi'",
+				"cloud:",
+				"  token: t",
+				"",
+			].join("\n"),
+		);
+		const r = await buildSetup({ agentDir, extensions: [], overlays: [], tmpDir: await tmp("omp-cloud-out-") });
+		const config = Bun.YAML.parse(await readFile(join(await extract(r.path), "config.yml"), "utf8"));
+		expect(config).toEqual({ theme: "dark", searxng: { endpoint: "https://search.example.test" }, mnemopi: { scoping: "per-project" }, modelRoles: { default: "a/b" } });
+		expect(r.warnings.sort()).toEqual(
+			[
+				"config.yml: auth.broker stays on this machine",
+				"config.yml: hindsight.apiUrl stays on this machine",
+				"config.yml: hindsight.apiToken stays on this machine",
+				"config.yml: mnemopi.llmApiKey stays on this machine",
+				"config.yml: mnemopi.embeddingApiUrl stays on this machine",
+				"config.yml: browser.cdpUrl stays on this machine",
+				"config.yml: modelRoles.smol stays on this machine",
+			].sort(),
+		);
+	});
+
+	test("a settings file with nothing to keep home ships byte for byte, with no warning", async () => {
+		const agentDir = await tmp("omp-cloud-cfg-");
+		const text = "# comment\nhindsight:\n  apiUrl: https://hindsight.example.test\ntheme: dark\n";
+		await put(join(agentDir, "config.yml"), text);
+		const r = await buildSetup({ agentDir, extensions: [], overlays: [], tmpDir: await tmp("omp-cloud-out-") });
+		expect(await readFile(join(await extract(r.path), "config.yml"), "utf8")).toBe(text);
+		expect(r.warnings).toEqual([]);
+	});
+
+	test("an overlay's warnings name the overlay file, and an overlay that is also config.yml warns once", async () => {
+		const agentDir = await tmp("omp-cloud-cfg-");
+		await put(join(agentDir, "config.yml"), "shellPath: /bin/zsh\n");
+		const overlay = join(await tmp("omp-cloud-else-"), "team.yml");
+		await put(overlay, "auth:\n  broker:\n    url: x\n");
+		const r = await buildSetup({ agentDir, extensions: [], overlays: [join(agentDir, "config.yml"), overlay], tmpDir: await tmp("omp-cloud-out-") });
+		expect(r.warnings).toEqual(["config.yml: shellPath stays on this machine", "team.yml: auth.broker stays on this machine"]);
+	});
+
 	test("a config.yml that is not YAML is a UserError naming the file", async () => {
 		const agentDir = await tmp("omp-cloud-cfg-");
 		await put(join(agentDir, "config.yml"), "a: [unclosed\n");
@@ -283,4 +345,39 @@ describe("buildSetup", () => {
 		await Bun.write(join(l.agentDir, "skills", "huge.bin"), big);
 		await expect(buildSetup(l.opts)).rejects.toThrow(/omp setup is [\d.]+ MB, over the 64 MB limit.*excludeExtensions of your omp-cloud config/);
 	}, 60_000);
+});
+
+describe("sanitizeSettings", () => {
+	test("cloud and extensions go silently; the rest of the document is untouched, the input too", () => {
+		const input = { theme: "dark", cloud: { token: "t" }, extensions: ["/x.ts"], nested: { keep: 1 } };
+		const out = sanitizeSettings(input);
+		expect(out).toEqual({ doc: { theme: "dark", nested: { keep: 1 } }, dropped: [], changed: true });
+		expect(Object.keys(input)).toEqual(["theme", "cloud", "extensions", "nested"]);
+	});
+
+	test("dotted top-level keys match like nested ones", () => {
+		const out = sanitizeSettings({ "auth.broker.url": "http://x", "hindsight.apiUrl": "http://127.1.2.3/x", "searxng.endpoint": "http://0.0.0.0:8080", other: 1 });
+		expect(out.doc).toEqual({ other: 1 });
+		expect(out.dropped).toEqual(["auth.broker.url", "hindsight.apiUrl", "searxng.endpoint"]);
+	});
+
+	test("a command is dropped at any depth, in a list too; a mapping the removal empties goes with it", () => {
+		const out = sanitizeSettings({ a: { b: { c: "!pass show x" } }, keep: { empty: {} }, list: ["fine", "!cmd", { deep: "!cmd2", ok: 1 }] });
+		expect(out.doc).toEqual({ keep: { empty: {} }, list: ["fine", { ok: 1 }] });
+		expect(out.dropped).toEqual(["a.b.c", "list[1]", "list[2].deep"]);
+	});
+
+	test("endpoints are kept when they are not this machine", () => {
+		const doc = { hindsight: { apiUrl: "https://h.example.test" }, compaction: { remoteEndpoint: "http://10.0.0.5:9000" }, mnemopi: { llmBaseUrl: "not a url" } };
+		expect(sanitizeSettings(doc)).toEqual({ doc, dropped: [], changed: false });
+	});
+
+	test("every listed credential and host path is dropped", () => {
+		const keys = ["images.urls.credentials", "dev.autoqaPush.token", "mnemopi.embeddingApiKey", "mnemopi.dbPath", "shellMinimizer.settingsPath", "plan.autosaveDir", "browser.screenshotDir", "browser.relayUrl", "skills.customDirectories", "workspace.additionalDirectories", "ida.installDir", "images.urls.command", "images.urls.sshTarget", "images.urls.bindHost", "images.urls.publicBaseUrl", "searxng.token", "searxng.basicPassword", "compaction.remoteEndpoint"];
+		const doc: Record<string, unknown> = {};
+		for (const k of keys) doc[k] = k === "compaction.remoteEndpoint" ? "http://localhost:1" : ["x"];
+		const out = sanitizeSettings(doc);
+		expect(out.doc).toEqual({});
+		expect(out.dropped).toEqual(keys);
+	});
 });

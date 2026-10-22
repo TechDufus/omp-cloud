@@ -11,6 +11,7 @@ import { loginHint } from "./login";
 import { generateName, type TitleGenerator } from "./naming";
 import { sessionOverlays } from "./overlays";
 import { refusePairingCode } from "./pairing";
+import { type McpPlan, type McpSummary, planMcp } from "./mcp";
 import { buildSetup, type SetupResult } from "./setup";
 import { gitRaw, readAuthor, readSecretEnv, type Snapshot, takeSnapshot } from "./snapshot";
 import { UserError, type Host, type HandoffRequest, type PiHost, type CreatedThread, type ScratchHandoffRequest, type ThreadOrigin, type ThreadSummary, type Whoami } from "./types";
@@ -88,6 +89,8 @@ export interface HandoffSummary {
 	ompVersion: string;
 	/** The session's `--config` overlays as shipped, relative to the agent dir. */
 	overlays: string[];
+	/** The MCP servers the handoff shipped and how the cloud agent reaches them. */
+	mcp: McpSummary[];
 	/** The keys of `policy` the handoff asked for. */
 	policy: string[];
 }
@@ -392,6 +395,13 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 			return made;
 		};
 
+		// The same MCP servers go to every task: planned once, and its warnings are every task's.
+		let mcpPlan: Promise<McpPlan> | undefined;
+		const mcp = (): Promise<McpPlan> => {
+			mcpPlan ??= planMcp(input.agentDir, input.env, who);
+			return mcpPlan;
+		};
+
 		const ompVersion = ompReleaseVersion(input.pi.pi.VERSION);
 
 		const create = async (plan: Plan): Promise<LaunchOutcome> => {
@@ -406,6 +416,8 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 				let snap: Snapshot | undefined = plan.workspace === "repo" ? await snapshot(wip, false) : undefined;
 				const made = await setupFor(plan.workspace, snap?.root ?? tmp);
 				local.push(...made.warnings);
+				const shippedMcp = await mcp();
+				local.push(...shippedMcp.warnings);
 				if (!snap && cfg.secretFiles.length > 0) local.push("secretFiles are files of a repository: none shipped to a scratch thread");
 				const scratchEnv = snap ? {} : readSecretEnv(cfg.secretEnv, input.env);
 				const author = snap ? snap.author : await readAuthor(host.cwd);
@@ -418,6 +430,7 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 					ompVersion,
 					...(name ? { name } : {}),
 					...(Object.keys(plan.policy).length > 0 ? { policy: plan.policy } : {}),
+					...(shippedMcp.servers.length > 0 ? { mcp: shippedMcp.servers } : {}),
 					...(meta ? { origin: input.origin, ...(input.sessionId !== "" ? { session: input.sessionId } : {}), ...(task.ref !== undefined ? { ref: task.ref } : {}) } : {}),
 				};
 				const build = (s: Snapshot | undefined): HandoffParts => {
@@ -464,6 +477,7 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 					thinking: plan.thinking,
 					ompVersion,
 					overlays: made.configOverlays,
+					mcp: shippedMcp.summary,
 					policy: Object.keys(plan.policy),
 				};
 				return { ok: true, index, response: created.summary, replayed: created.replayed, workspace: plan.workspace, key: plan.key, warnings: [...local, ...(snap?.warnings ?? []), ...created.summary.warnings], summary };

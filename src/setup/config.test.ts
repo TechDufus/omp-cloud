@@ -19,9 +19,9 @@ async function mode(path: string): Promise<number> {
 	return (await stat(path)).mode & 0o777;
 }
 
-/** A current service.json without the broker, dashboard and remote sections. */
+/** A current service.json without the broker, dashboard, remote and mcp sections. */
 function withoutSections(): Record<string, unknown> {
-	const { broker: _broker, dashboard: _dashboard, remote: _remote, ...rest } = defaultServiceConfig(paths, "a".repeat(64), "omp-cloud");
+	const { broker: _broker, dashboard: _dashboard, remote: _remote, mcp: _mcp, ...rest } = defaultServiceConfig(paths, "a".repeat(64), "omp-cloud");
 	return rest;
 }
 
@@ -41,17 +41,19 @@ describe("defaultServiceConfig", () => {
 		const config = defaultServiceConfig(paths, "d".repeat(64), "omp-cloud");
 		expect(() => parseConfig(config)).not.toThrow();
 		expect(parseConfig(config).vmon.team).toBe("omp-cloud");
-		expect(Object.keys(config)).toEqual(["listen", "apiTokenSha256", "dataDir", "vmon", "gateway", "broker", "dashboard", "remote", "models"]);
+		expect(Object.keys(config)).toEqual(["listen", "apiTokenSha256", "dataDir", "vmon", "gateway", "broker", "dashboard", "remote", "mcp", "models"]);
+		expect(parseConfig(config).mcp).toEqual({ listen: { hostname: "10.254.254.1", port: 4100 } });
 	});
 });
 
 describe("migrateServiceConfig", () => {
-	test("adds the broker, dashboard and remote sections a document lacks", () => {
+	test("adds the broker, dashboard, remote and mcp sections a document lacks", () => {
 		const { config, notes } = migrateServiceConfig(withoutSections(), paths);
 		expect(config.broker).toEqual({ url: "http://127.0.0.1:8765", tokenFile: join(paths.authHome, ".omp", "auth-broker.token") });
 		expect(config.dashboard).toEqual({ listen: "127.0.0.1:8081" });
 		expect(config.remote).toEqual({ listen: "0.0.0.0:8443", certFile: join(paths.tlsDir, "cert.pem"), keyFile: join(paths.tlsDir, "key.pem") });
-		expect(notes).toHaveLength(3);
+		expect(config.mcp).toEqual({ listen: "10.254.254.1:4100" });
+		expect(notes).toHaveLength(4);
 	});
 
 	test("a current document is returned as it is, and the input is not modified", () => {
@@ -61,12 +63,13 @@ describe("migrateServiceConfig", () => {
 		expect(complete).toEqual(copy);
 	});
 
-	test("existing broker, dashboard and remote sections are never overwritten", () => {
-		const custom = { ...withoutSections(), broker: { url: "http://127.0.0.1:1", tokenFile: "/x" }, dashboard: { listen: "127.0.0.1:1" }, remote: { listen: "0.0.0.0:1", certFile: "/c", keyFile: "/k" } };
+	test("existing broker, dashboard, remote and mcp sections are never overwritten", () => {
+		const custom = { ...withoutSections(), broker: { url: "http://127.0.0.1:1", tokenFile: "/x" }, dashboard: { listen: "127.0.0.1:1" }, remote: { listen: "0.0.0.0:1", certFile: "/c", keyFile: "/k" }, mcp: { listen: "10.254.254.1:4999" } };
 		const { config } = migrateServiceConfig(custom, paths);
 		expect(config.broker).toEqual(custom.broker);
 		expect(config.dashboard).toEqual(custom.dashboard);
 		expect(config.remote).toEqual(custom.remote);
+		expect(config.mcp).toEqual(custom.mcp);
 	});
 });
 
@@ -95,6 +98,21 @@ describe("ensureServiceConfig", () => {
 		expect(again.steps.map((step) => step.status)).toEqual(["ok"]);
 		expect(again.createdToken).toBeNull();
 		expect(await readFile(paths.serviceJson, "utf8")).toBe(before);
+	});
+
+	test("a rerun adds the mcp section to an existing service.json and keeps it on the next rerun", async () => {
+		await ensureDirs(paths);
+		await ensureServiceConfig(paths, "omp-cloud");
+		const { mcp: _mcp, ...older } = JSON.parse(await readFile(paths.serviceJson, "utf8")) as Record<string, unknown>;
+		await writeFile(paths.serviceJson, `${JSON.stringify(older, null, "\t")}\n`);
+		const added = await ensureServiceConfig(paths, "omp-cloud");
+		expect(added.steps.map((step) => step.status)).toEqual(["changed"]);
+		expect(added.steps[0]?.detail).toContain("mcp section added");
+		expect(JSON.parse(await readFile(paths.serviceJson, "utf8")).mcp).toEqual({ listen: "10.254.254.1:4100" });
+		const kept = await readFile(paths.serviceJson, "utf8");
+		const again = await ensureServiceConfig(paths, "omp-cloud");
+		expect(again.steps.map((step) => step.status)).toEqual(["ok"]);
+		expect(await readFile(paths.serviceJson, "utf8")).toBe(kept);
 	});
 
 	test("a team that differs is rewritten (setup decides which team a host has)", async () => {

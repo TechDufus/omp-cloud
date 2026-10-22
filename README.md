@@ -192,6 +192,7 @@ More in [`docs/security.md`](docs/security.md).
 | [Cloud agents as omp jobs](docs/jobs.md) | Job tiles, `wait`, `agent://` and messaging, how results arrive, cancelling |
 | [Configuration](docs/configuration.md) | The client config files and `service.json` |
 | [GitHub](docs/github.md) | The GitHub App, one-hour tokens, Verified commits, pull requests |
+| [Secrets and MCP servers](docs/secrets-and-mcp.md) | Secrets scoped to repositories, MCP servers through the service, and what stays on your machine |
 | [Pairing](docs/pairing.md) | Other machines, over a code or ssh |
 | [Archive](docs/archive.md) | Idle threads, and the sweep of sandboxes no thread holds |
 | [Updating](docs/updating.md) | One-click updates, `auto`, the pinned vibemon, a checkout |

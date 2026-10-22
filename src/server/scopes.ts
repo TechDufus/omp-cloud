@@ -1,7 +1,7 @@
 import type { Caller } from "./auth";
 import { DASHBOARD_LINKS_PATH } from "./dashboard-routes";
 import { ApiError } from "./errors";
-import { DEVICES_PATH, GITHUB_PATH, LOGINS_PATH, OFFERS_PATH, SETTINGS_PATH, SIGNING_PATH } from "./paths";
+import { DEVICES_PATH, GITHUB_PATH, LOGINS_PATH, OFFERS_PATH, SECRETS_PATH, SETTINGS_PATH, SIGNING_PATH } from "./paths";
 
 /** The 403 a device gets on a route only the owner token may use. */
 export const OWNER_ONLY_MESSAGE = "only the owner token can do this; it works on the server machine";
@@ -14,7 +14,7 @@ function under(pathname: string, base: string): boolean {
 /**
  * Throws ApiError 403 when `caller` is a device and the request is one only the owner token may make: every pairing
  * offer route, revoking a device other than itself, writing or importing settings, every provider login route, every
- * GitHub App and signing key route and minting a dashboard link.
+ * GitHub App and signing key route, every secret route and minting a dashboard link.
  */
 export function requireScope(caller: Caller, method: string, pathname: string): void {
 	if (caller.device === null) return;
@@ -24,6 +24,7 @@ export function requireScope(caller: Caller, method: string, pathname: string): 
 		under(pathname, LOGINS_PATH) ||
 		under(pathname, GITHUB_PATH) ||
 		under(pathname, SIGNING_PATH) ||
+		under(pathname, SECRETS_PATH) ||
 		pathname === DASHBOARD_LINKS_PATH ||
 		(method === "PUT" && under(pathname, SETTINGS_PATH)) ||
 		(method === "DELETE" && pathname.startsWith(devicePrefix) && pathname.slice(devicePrefix.length) !== caller.device.id);

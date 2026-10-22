@@ -7,6 +7,7 @@ import { canonicalAddress } from "../pairing/cidr";
 import { SourceLimiter } from "../pairing/limiter";
 import type { RemoteSettings } from "../pairing/remote";
 import { utcDay } from "../runner/spend";
+import { ServiceSecrets } from "../secrets/store";
 import type { Settings } from "../settings";
 import type { Store } from "../store";
 import {
@@ -36,9 +37,10 @@ import { MAX_SOURCE_BYTES } from "./limits";
 import { MAX_LIST_LIMIT, threadListBody } from "./list";
 import { handleGithub } from "./github-routes";
 import { handleLogins } from "./logins";
-import { GITHUB_PATH, LOGINS_PATH, SETTINGS_PATH, SIGNING_PATH } from "./paths";
+import { GITHUB_PATH, LOGINS_PATH, SECRETS_PATH, SETTINGS_PATH, SIGNING_PATH } from "./paths";
 import { PairingRoutes } from "./pairing-routes";
 import { requireScope } from "./scopes";
+import { handleSecrets } from "./secrets-routes";
 import { handleSettings } from "./settings-routes";
 import { handleSigning } from "./signing-routes";
 import { turnTextPage } from "./turn-text";
@@ -80,6 +82,10 @@ export interface AppOptions {
 	update?: UpdateApi;
 	/** The GitHub App, its REST client and the SSH signing key behind `/api/v1/github`, `/api/v1/signing` and `whoami.github`; absent in a service without them (most test apps): those routes do not exist. */
 	github?: GithubWiring;
+	/** The service's secret store behind `/api/v1/secrets`. Absent: a store of its own over `store` (the runner's one is shared, so its resolved `!command` values are cached once). */
+	secrets?: ServiceSecrets;
+	/** The MCP proxy: whether it is listening (`whoami.mcpProxy`), and the service's own addresses an http MCP server may not point at. Absent: no proxy. */
+	mcp?: { proxy: boolean; selfHosts: readonly string[] };
 }
 
 /** What the GitHub and signing routes work with. */
@@ -119,6 +125,8 @@ const CAPABILITIES: readonly string[] = [
 	"github.app",
 	"commits.signed",
 	"threads.pr",
+	"secrets.store",
+	"mcp.proxy",
 ];
 
 /** A message body: its text plus JSON framing. */
@@ -250,6 +258,7 @@ function stringListField(body: Record<string, unknown>, key: string): string[] {
 /** Builds the API over `options.store`. */
 export function createApp(options: AppOptions): App {
 	const { store, apiTokenSha256, dataDir, models, ompVersion, logins, settings, git, remote, modelIds, update, github } = options;
+	const secrets = options.secrets ?? new ServiceSecrets(store);
 	const questionTimeoutSeconds = options.questionTimeoutSeconds ?? 0;
 	const inspectGate = options.inspectGate ?? INSPECTION_GATE;
 	const dashboardRoutes = new DashboardRoutes({
@@ -373,6 +382,9 @@ export function createApp(options: AppOptions): App {
 				settings,
 			});
 		}
+		if (pathname === SECRETS_PATH || pathname.startsWith(`${SECRETS_PATH}/`)) {
+			return handleSecrets(req, pathname.slice(SECRETS_PATH.length).split("/").slice(1), secrets, principal);
+		}
 		const pairingResponse = await pairing.handle(caller, req, pathname);
 		if (pairingResponse !== null) return pairingResponse;
 		const dashboardResponse = await dashboardRoutes.handle(caller, req, pathname, server);
@@ -407,6 +419,8 @@ export function createApp(options: AppOptions): App {
 					ompVersion,
 					gitHosts: git.hosts(),
 					github: { app: github?.app.info()?.slug ?? null, signing: github !== undefined && github.signingKey.exists() && settings.get("git.sign") === "ssh" },
+					mcpProxy: options.mcp?.proxy ?? false,
+					mcpLogins: store.mcpCredentialUrls(),
 					vms: store.countVms(principal),
 					threads: store.countThreads(principal),
 					device: caller.device,
@@ -427,6 +441,7 @@ export function createApp(options: AppOptions): App {
 					settings,
 					sentBy: actorOf(caller),
 					beforeCreate: () => requireActive(store, caller, req.signal),
+					mcpSelfHosts: options.mcp?.selfHosts,
 				});
 				const summary = summaryView(thread, store.threadStats(thread.id), questionTimeoutSeconds);
 				return replayed ? json(200, { ...summary, replayed: true }) : json(201, { ...summary, warnings: [] });

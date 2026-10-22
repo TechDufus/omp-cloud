@@ -3,7 +3,7 @@ import { copyFile, mkdir, readdir, readFile, realpath, rm, stat, writeFile } fro
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 import { run } from "./exec";
 import type { ShippedExtension } from "./extensions";
-import { isRecord } from "./guards";
+import { isLocalHost, isRecord } from "./guards";
 import { mb } from "./snapshot";
 import { UserError } from "./types";
 
@@ -71,15 +71,121 @@ async function stageTree(src: string, dest: string, ancestors: readonly string[]
 	return true;
 }
 
+/** Top-level keys that stay home without a word: `cloud` held the service token in earlier versions, `extensions` lists paths on this machine (every shipped extension already sits in the setup's `extensions/` directory). */
+const SILENT_KEYS = new Set(["cloud", "extensions"]);
+/** Subtrees that stay home: the broker login. */
+const HOME_SUBTREES = ["auth.broker"];
+/** Credentials, host paths and settings of this machine. */
+const HOME_KEYS = new Set([
+	"images.urls.credentials",
+	"hindsight.apiToken",
+	"mnemopi.embeddingApiKey",
+	"mnemopi.llmApiKey",
+	"dev.autoqaPush.token",
+	"searxng.token",
+	"searxng.basicPassword",
+	"mnemopi.dbPath",
+	"shellPath",
+	"shellMinimizer.settingsPath",
+	"plan.autosaveDir",
+	"browser.screenshotDir",
+	"browser.cdpUrl",
+	"browser.relayUrl",
+	"skills.customDirectories",
+	"workspace.additionalDirectories",
+	"ida.installDir",
+	"images.urls.command",
+	"images.urls.sshTarget",
+	"images.urls.bindHost",
+	"images.urls.publicBaseUrl",
+]);
+/** Endpoints that stay home when they point at this machine. */
+const LOCAL_URL_KEYS = new Set(["hindsight.apiUrl", "searxng.endpoint", "mnemopi.embeddingApiUrl", "mnemopi.llmBaseUrl", "compaction.remoteEndpoint"]);
+
+function pointsAtThisMachine(value: unknown): boolean {
+	if (typeof value !== "string") return false;
+	try {
+		return isLocalHost(new URL(value).hostname);
+	} catch {
+		return false;
+	}
+}
+
+/** Whether `value`, set at the dotted `path`, stays on this machine (a `!command` anywhere, a credential, a host path, a local endpoint). */
+function staysHome(path: string, value: unknown): boolean {
+	if (typeof value === "string" && value.startsWith("!")) return true;
+	if (HOME_KEYS.has(path) || HOME_SUBTREES.some(s => path === s || path.startsWith(`${s}.`))) return true;
+	return LOCAL_URL_KEYS.has(path) && pointsAtThisMachine(value);
+}
+
+/** What {@link sanitizeSettings} took out of a settings document. */
+export interface Sanitized {
+	doc: Record<string, unknown>;
+	/** The dotted keys removed with a warning: they stay on this machine. */
+	dropped: string[];
+	/** Whether anything was removed, `cloud` and `extensions` included. */
+	changed: boolean;
+}
+
 /**
- * Stages a settings file (`config.yml` or a `--config` overlay) like {@link stageTree}, except for two top-level
- * keys that stay home. `cloud` is dropped though omp-cloud never reads it any more: earlier versions kept the
- * service token there, and the VM has no use for any of it. `extensions` lists
- * paths on this machine; every shipped extension already sits in the setup's `extensions/` directory, which the
- * VM's omp discovers by itself, while a configured path that does not exist there would only fail to load. A file
- * with neither key ships untouched; one with either ships as a rewritten copy.
+ * A settings document (`config.yml` or a `--config` overlay) as the cloud may have it. `cloud` and `extensions` (top level)
+ * go silently. Everything else that must stay on this machine goes with its dotted path in `dropped`: the `auth.broker`
+ * subtree, credentials, host paths and settings of this machine, any string value that starts with `!` (a command), and
+ * the endpoints that point at this machine. Keys match nested (`auth: {broker: …}`) and dotted (`"auth.broker.url"`),
+ * at any depth; a mapping the removal empties goes too. The input is not modified.
  */
-async function stageSettings(src: string, dest: string): Promise<boolean> {
+export function sanitizeSettings(doc: Record<string, unknown>): Sanitized {
+	const dropped: string[] = [];
+	let removed = 0;
+
+	const walkValue = (value: unknown, path: string[]): { keep: boolean; value: unknown } => {
+		const dotted = path.join(".");
+		if (staysHome(dotted, value)) {
+			dropped.push(dotted);
+			removed++;
+			return { keep: false, value };
+		}
+		if (Array.isArray(value)) {
+			const kept: unknown[] = [];
+			for (const [i, item] of value.entries()) {
+				const r = walkValue(item, [...path.slice(0, -1), `${path.at(-1)}[${i}]`]);
+				if (r.keep) kept.push(r.value);
+			}
+			return { keep: true, value: kept.length === value.length ? value : kept };
+		}
+		if (isRecord(value)) {
+			const before = removed;
+			const out = walkMapping(value, path);
+			// A mapping the removal emptied goes too; one that was empty already stays.
+			return { keep: removed === before || Object.keys(out).length > 0, value: out };
+		}
+		return { keep: true, value };
+	};
+
+	const walkMapping = (mapping: Record<string, unknown>, parent: string[]): Record<string, unknown> => {
+		const out: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(mapping)) {
+			const path = [...parent, ...key.split(".")];
+			if (parent.length === 0 && SILENT_KEYS.has(path[0] ?? "")) {
+				removed++;
+				continue;
+			}
+			const r = walkValue(value, path);
+			if (r.keep) out[key] = r.value;
+		}
+		return out;
+	};
+
+	const clean = walkMapping(doc, []);
+	return { doc: clean, dropped, changed: removed > 0 };
+}
+
+/**
+ * Stages a settings file (`config.yml` or a `--config` overlay) like {@link stageTree}, except that what
+ * {@link sanitizeSettings} takes out stays home: the file ships as a rewritten copy then, else untouched. Each key that
+ * stays home with a reason is a warning.
+ */
+async function stageSettings(src: string, dest: string, warnings: string[]): Promise<boolean> {
 	if (!(await exists(src))) return false;
 	// A tree copy may already have put a (possibly read-only) copy of the file there.
 	await rm(dest, { force: true });
@@ -89,10 +195,15 @@ async function stageSettings(src: string, dest: string): Promise<boolean> {
 	} catch (e) {
 		throw new UserError(`☁ ${src} is not valid YAML: ${e instanceof Error ? e.message : String(e)}`);
 	}
-	if (!isRecord(doc) || !("cloud" in doc || "extensions" in doc)) return stageTree(src, dest);
-	const { cloud: _cloud, extensions: _extensions, ...rest } = doc;
+	if (!isRecord(doc)) return stageTree(src, dest);
+	const clean = sanitizeSettings(doc);
+	if (!clean.changed) return stageTree(src, dest);
+	for (const key of clean.dropped) {
+		const warning = `${basename(src)}: ${key} stays on this machine`;
+		if (!warnings.includes(warning)) warnings.push(warning);
+	}
 	await mkdir(dirname(dest), { recursive: true });
-	await writeFile(dest, Bun.YAML.stringify(rest, null, 2));
+	await writeFile(dest, Bun.YAML.stringify(clean.doc, null, 2));
 	return true;
 }
 
@@ -174,7 +285,7 @@ async function insideAgentDir(agentDir: string, overlay: string): Promise<string
  * overlay inside the agent dir ships at its relative path; one outside it, or whose path the API
  * would not accept, ships as `overlays/<n>-<basename>`.
  */
-async function stageOverlays(agentDir: string, stage: string, overlays: readonly string[]): Promise<string[]> {
+async function stageOverlays(agentDir: string, stage: string, overlays: readonly string[], warnings: string[]): Promise<string[]> {
 	if (overlays.length > MAX_OVERLAYS) {
 		throw new UserError(`☁ this session loads ${overlays.length} --config overlays; the cloud takes at most ${MAX_OVERLAYS}`);
 	}
@@ -184,12 +295,12 @@ async function stageOverlays(agentDir: string, stage: string, overlays: readonly
 		const inside = await insideAgentDir(agentDir, overlay);
 		if (inside && cleanSegments(inside)) {
 			// Even when a shipped tree already copied this file: its `cloud` and `extensions` keys must go.
-			await stageSettings(overlay, join(stage, inside));
+			await stageSettings(overlay, join(stage, inside), warnings);
 			out.push(inside);
 			continue;
 		}
 		const name = `overlays/${i + 1}-${basename(overlay).replace(/[^A-Za-z0-9._-]/g, "_")}`;
-		await stageSettings(overlay, join(stage, name));
+		await stageSettings(overlay, join(stage, name), warnings);
 		out.push(name);
 	}
 	return out;
@@ -207,7 +318,8 @@ export async function buildSetup(opts: SetupOptions): Promise<SetupResult> {
 	const dir = opts.agentDir;
 
 	for (const name of [...SETUP_FILES, ...SETUP_DIRS]) {
-		await (name === "config.yml" ? stageSettings : stageTree)(join(dir, name), join(stage, name));
+		if (name === "config.yml") await stageSettings(join(dir, name), join(stage, name), warnings);
+		else await stageTree(join(dir, name), join(stage, name));
 	}
 
 	for (const ext of opts.extensions) await stageTree(ext.source, join(stage, ext.dest));
@@ -215,7 +327,7 @@ export async function buildSetup(opts: SetupOptions): Promise<SetupResult> {
 	const mem = join(dir, "memories", "mnemopi");
 	if (await exists(mem)) await stageMemory(mem, join(stage, "memories", "mnemopi"), await loadDatabase(), warnings);
 
-	const configOverlays = await stageOverlays(dir, stage, opts.overlays);
+	const configOverlays = await stageOverlays(dir, stage, opts.overlays, warnings);
 
 	// `tar`, not `Bun.Archive`: Bun 1.4.3's writes every member as 0644, so an executable skill script would lose its bit. On Windows the
 	// system bsdtar, because a Git or MSYS GNU tar on PATH reads `C:\…` as a remote host.

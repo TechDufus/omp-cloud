@@ -4,8 +4,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isRecord } from "../guards";
+import { sha256Hex } from "../pairing/secrets";
 import { Store } from "../store";
-import type { NewThread, Thread } from "../store/types";
+import type { NewThread, Thread, ThreadMcpServer } from "../store/types";
 import { type ProvisionInput, ompLaunchArgs, provisionVm } from "./provision";
 import { VM_AGENT_DIR, VM_CLOUD_DIR } from "./vm-layout";
 
@@ -143,6 +144,83 @@ describe("provisionVm", () => {
 		served,
 		questionTimeoutSeconds: 60,
 		policy: { bashPatterns: [], toolApproval: {}, fetch: true, webSearch: true, browser: true },
+		serviceEnv: {},
+		mcpListen: null,
+	});
+
+	describe("MCP servers", () => {
+		const DOCS: ThreadMcpServer = { name: "docs", type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer upstream-secret" } };
+		const LOCAL: ThreadMcpServer = { name: "local", type: "stdio", command: "npx", args: ["-y", "srv"], env: { KEY: "${KEY}" }, cwd: "tools" };
+		const MCP_FILE = `${VM_AGENT_DIR}/mcp.json`;
+
+		/** A thread shipping `servers`, with the `secrets.json` the create request would have stored. */
+		async function shipping(servers: ThreadMcpServer[]): Promise<Thread> {
+			await createThread({ mcpServers: servers.map(server => server.name) });
+			await store.putBlob(ID, "secrets.json", new TextEncoder().encode(JSON.stringify({ files: [], env: {}, mcp: servers })), 1024 * 1024);
+			const thread = store.getThread(ID);
+			if (thread === null) throw new Error("the thread was not created");
+			return thread;
+		}
+
+		test("http servers go through the proxy under a token the store knows by hash; stdio servers run as they are", async () => {
+			const thread = await shipping([DOCS, LOCAL]);
+			const { sandbox, written, commands } = fakeSandbox({});
+			const provisioned = await provisionVm(sandbox, { ...input(thread, []), mcpListen: "10.254.254.1:4100" });
+
+			const file = written.get(MCP_FILE) ?? "";
+			const config = JSON.parse(file) as { mcpServers: Record<string, { type?: string; url?: string; headers?: { Authorization: string }; command?: string; args?: string[]; env?: Record<string, string>; cwd?: string }> };
+			const token = config.mcpServers.docs?.headers?.Authorization.replace("Bearer ", "") ?? "";
+			expect(token.length).toBeGreaterThanOrEqual(43);
+			expect(config.mcpServers.docs).toEqual({ type: "http", url: "http://10.254.254.1:4100/mcp/docs", headers: { Authorization: `Bearer ${token}` } });
+			expect(config.mcpServers.local).toEqual({ command: "npx", args: ["-y", "srv"], env: { KEY: "${KEY}" }, cwd: "tools" });
+			expect(file).not.toContain("upstream-secret");
+			expect(commands).toContain(`chmod 600 '${MCP_FILE}'`);
+			expect(store.threadByMcpToken(sha256Hex(token))?.id).toBe(ID);
+			expect(provisioned.mcpNames).toEqual(["docs", "local"]);
+			expect(provisioned.mcpSkipped).toEqual([]);
+			expect(written.get(`${VM_CLOUD_DIR}/system-prompt.md`)).toContain("- MCP servers: docs, local; the http ones are reached through the service, never print their tokens.");
+		});
+
+		test("each provisioning mints a new token: a restored VM's replaces the lost one's", async () => {
+			const thread = await shipping([DOCS]);
+			const tokens: string[] = [];
+			for (let i = 0; i < 2; i++) {
+				const { sandbox, written } = fakeSandbox({});
+				await provisionVm(sandbox, { ...input(thread, []), mcpListen: "10.254.254.1:4100" });
+				tokens.push((JSON.parse(written.get(MCP_FILE) ?? "") as { mcpServers: { docs: { headers: { Authorization: string } } } }).mcpServers.docs.headers.Authorization.replace("Bearer ", ""));
+			}
+			expect(tokens[0]).not.toBe(tokens[1]);
+			expect(store.threadByMcpToken(sha256Hex(tokens[0] ?? ""))).toBeNull();
+			expect(store.threadByMcpToken(sha256Hex(tokens[1] ?? ""))?.id).toBe(ID);
+		});
+
+		test("without a proxy the http servers are left out and named; the stdio ones still ship", async () => {
+			const thread = await shipping([DOCS, LOCAL]);
+			const { sandbox, written } = fakeSandbox({});
+			const provisioned = await provisionVm(sandbox, input(thread, []));
+			const config = JSON.parse(written.get(MCP_FILE) ?? "") as { mcpServers: Record<string, unknown> };
+			expect(Object.keys(config.mcpServers)).toEqual(["local"]);
+			expect(provisioned.mcpNames).toEqual(["local"]);
+			expect(provisioned.mcpSkipped).toEqual(["docs"]);
+			expect(written.get(`${VM_CLOUD_DIR}/system-prompt.md`)).toContain("- MCP servers: local;");
+		});
+
+		test("a thread whose servers are all http, without a proxy, gets no mcp.json and no token", async () => {
+			const thread = await shipping([DOCS]);
+			const { sandbox, written } = fakeSandbox({});
+			const provisioned = await provisionVm(sandbox, input(thread, []));
+			expect(written.has(MCP_FILE)).toBe(false);
+			expect(provisioned).toMatchObject({ mcpNames: [], mcpSkipped: ["docs"] });
+		});
+
+		test("a thread that ships none writes no mcp.json", async () => {
+			const thread = await createThread();
+			const { sandbox, written } = fakeSandbox({});
+			const provisioned = await provisionVm(sandbox, { ...input(thread, []), mcpListen: "10.254.254.1:4100" });
+			expect(written.has(MCP_FILE)).toBe(false);
+			expect(provisioned).toMatchObject({ mcpNames: [], mcpSkipped: [] });
+			expect(written.get(`${VM_CLOUD_DIR}/system-prompt.md`)).not.toContain("MCP servers");
+		});
 	});
 
 	test("an overlay the setup did not ship fails with its path", async () => {
@@ -184,6 +262,85 @@ describe("provisionVm", () => {
 		expect(at).toBeGreaterThan(-1);
 		expect(provisioned.extraArgs[at + 1]).toBe(`${VM_CLOUD_DIR}/irc-peer.ts`);
 		expect(written.get(`${VM_CLOUD_DIR}/system-prompt.md`)).toContain("agent://Parent");
+	});
+
+	describe("secret env", () => {
+		const ENV_FILE = `${VM_CLOUD_DIR}/env`;
+		const MASK_FILE = `${VM_AGENT_DIR}/secrets.yml`;
+		const withSecrets = async (secrets: { files?: { path: string; content: string }[]; env?: Record<string, string> }): Promise<Thread> => {
+			const files = secrets.files ?? [];
+			const env = secrets.env ?? {};
+			const thread = await createThread({ secretFiles: files.map(file => file.path), secretEnv: Object.keys(env) });
+			await store.putBlob(ID, "secrets.json", new TextEncoder().encode(JSON.stringify({ files, env })), 1024 * 1024);
+			return thread;
+		};
+		/** The workspace-relative path a `realpath -m -- '<path>'` asks about, answered as itself. */
+		const realpath = (command: string): string | undefined => {
+			const match = /^realpath -m -- '(.*)'$/.exec(command);
+			return match === null ? undefined : `${match[1]}\n`;
+		};
+		const masks = (written: Map<string, string>): unknown[] => {
+			const parsed: unknown = Bun.YAML.parse(written.get(MASK_FILE) ?? "[]");
+			return Array.isArray(parsed) ? parsed : [];
+		};
+
+		test("a thread without secrets and a service without matches gets no env file, no mask list and no masking", async () => {
+			const thread = await createThread();
+			const { sandbox, written } = fakeSandbox({});
+			const provisioned = await provisionVm(sandbox, input(thread, []));
+			expect(written.has(ENV_FILE)).toBe(false);
+			expect(written.has(MASK_FILE)).toBe(false);
+			expect(parse(written.get(OVERLAY_FILE))).not.toHaveProperty("secrets");
+			expect(provisioned.envNames).toEqual([]);
+		});
+
+		test("the service's env is written for a thread that ships none, masking the values of 4+ characters", async () => {
+			const thread = await createThread();
+			const { sandbox, written, commands } = fakeSandbox({});
+			const provisioned = await provisionVm(sandbox, { ...input(thread, []), serviceEnv: { ZED: "zzzz-1234", ABC: "abc", QUOTE: "it's" } });
+
+			expect(written.get(ENV_FILE)).toBe("ZED='zzzz-1234'\nABC='abc'\nQUOTE='it'\\''s'\n");
+			expect(commands).toContain(`chmod 600 '${ENV_FILE}'`);
+			expect(commands).toContain(`chmod 600 '${MASK_FILE}'`);
+			expect(provisioned.envNames).toEqual(["ABC", "QUOTE", "ZED"]);
+			expect(masks(written)).toEqual([
+				{ type: "plain", content: "zzzz-1234", mode: "obfuscate" },
+				{ type: "plain", content: "it's", mode: "obfuscate" },
+			]);
+			expect(parse(written.get(OVERLAY_FILE)).secrets).toEqual({ enabled: true });
+		});
+
+		test("the thread's own value wins over the service's for the same name", async () => {
+			const thread = await withSecrets({ env: { TOKEN: "from-the-thread" } });
+			const { sandbox, written } = fakeSandbox({});
+			await provisionVm(sandbox, { ...input(thread, []), serviceEnv: { TOKEN: "from-the-service", OTHER: "other-value" } });
+
+			const lines = (written.get(ENV_FILE) ?? "").split("\n").filter(line => line !== "");
+			expect(lines.sort()).toEqual(["OTHER='other-value'", "TOKEN='from-the-thread'"]);
+			expect(masks(written)).toEqual(expect.arrayContaining([{ type: "plain", content: "from-the-thread", mode: "obfuscate" }]));
+			expect(written.get(MASK_FILE)).not.toContain("from-the-service");
+		});
+
+		test("secret files are masked when they are UTF-8 and at most 64 KiB, and enable masking on their own", async () => {
+			const text = (value: string): string => Buffer.from(value).toString("base64");
+			const thread = await withSecrets({
+				files: [
+					{ path: "a.txt", content: text("file secret\n") },
+					{ path: "b.bin", content: Buffer.from([0xff, 0xfe, 0xfd]).toString("base64") },
+					{ path: "big.txt", content: text("x".repeat(65537)) },
+					{ path: "edge.txt", content: text("e".repeat(65536)) },
+				],
+			});
+			const { sandbox, written } = fakeSandbox({}, realpath);
+			await provisionVm(sandbox, input(thread, []));
+
+			expect(written.has(ENV_FILE)).toBe(false);
+			expect(masks(written)).toEqual([
+				{ type: "plain", content: "file secret\n", mode: "obfuscate" },
+				{ type: "plain", content: "e".repeat(65536), mode: "obfuscate" },
+			]);
+			expect(parse(written.get(OVERLAY_FILE)).secrets).toEqual({ enabled: true });
+		});
 	});
 
 	test("a role whose provider is not served runs on the thread's model", async () => {

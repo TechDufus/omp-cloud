@@ -164,6 +164,8 @@ export function parseWhoami(json: unknown): Whoami {
 		modelPatterns: strings(o, "modelPatterns"),
 		ompVersion: str(o, "ompVersion"),
 		gitHosts: strings(o, "gitHosts"),
+		mcpProxy: bool(o, "mcpProxy"),
+		mcpLogins: strings(o, "mcpLogins"),
 		vms: { running: num(vms, "running"), paused: num(vms, "paused") },
 		threads: {
 			starting: num(threads, "starting"),

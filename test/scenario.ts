@@ -47,6 +47,11 @@
  *  AB interrupting send: the running turn is stopped (`stopped by owner`), every queued turn is cancelled and listed in `cancelled`,
  *     the new turn runs next; on an idle thread `interrupted` is false and `cancelled` empty; a bad mode is 400
  *  AC list: meta fields, filters, `total`, paging by cursor, bad parameters, deleted threads never listed, a replayed repo create
+ *  AC2 secret env: `PUT /secrets/DEMO_TOKEN` (repos `*`; values are never served, `repos` is required) reaches a new thread's env (`printf %s ${#DEMO_TOKEN}`
+ *     is 16, a `secret env:` vm event names it) and omp's masking keeps the value out of every model request after `echo $DEMO_TOKEN`
+ *  AC3 MCP proxy: a thread with an http MCP server (a fake upstream on the host's primary non-loopback address, credential in `headers`)
+ *     reaches it from the VM only through the service's proxy with the VM's own token; the upstream sees its own credential and never the
+ *     VM's; an MCP server at the gateway host is refused (400)
  *  AD whoami fields (service, capabilities, limits, spend, models), then the scratch thread is deleted and its inspections are 404
  */
 import { createHash, randomBytes } from "node:crypto";
@@ -555,6 +560,7 @@ async function run(): Promise<void> {
 			vmon: { url: VMON_URL, keyFile: VMON_KEY_FILE, template: "omp-agent" },
 			gateway: { url: GATEWAY_URL, clientsFile: CLIENTS_FILE },
 			broker: { url: BROKER_URL, tokenFile: BROKER_TOKEN_FILE },
+			mcp: { listen: `${PROVIDER_HOST}:4101` },
 			models: { default: "fake/fake-model", direct: { fake: providers.fake } },
 			runner: { idleTimeoutSeconds: 4, turnTimeoutSeconds: 300, questionTimeoutSeconds: 120, lifecycleSweepSeconds: 5 },
 			git: { hosts: { [remoteHost]: { credential: `!printf %s ${gitPassword}` } } },
@@ -1656,6 +1662,91 @@ async function run(): Promise<void> {
 		return `${total} threads`;
 	}, shown => shown);
 
+	await report.step("AC2 secret env: a service secret reaches the VM's env and never reaches the model", async () => {
+		const value = "s3cr3t-value-123";
+		await expectRefused("PUT", "/secrets/DEMO_TOKEN", 400, "repos is required", { value });
+		const listed = await apiJson("PUT", "/secrets/DEMO_TOKEN", 200, { value, repos: ["*"] });
+		if (JSON.stringify(listed).includes(value)) throw new Error(`PUT /secrets answered with the value: ${JSON.stringify(listed)}`);
+		const previous = threadId;
+		try {
+			const shown = await apiJson("GET", "/secrets", 200);
+			if (JSON.stringify(shown).includes(value)) throw new Error(`GET /secrets served the value: ${JSON.stringify(shown)}`);
+			expectContains("GET /secrets names the secret", JSON.stringify(shown), "DEMO_TOKEN");
+
+			const secretId = await createThread(handoff, bundle, null);
+			await waitTurnIdle(1, 240_000);
+			const turn = await sendMessage("BASH: printf %s ${#DEMO_TOKEN} > len.txt");
+			await waitTurnIdle(turn, 180_000);
+			expectEqual("len.txt", (await apiJson("GET", `/threads/${secretId}/files/len.txt`, 200)).text, String(value.length));
+			const events = await readEvents(2000);
+			if (!events.some(e => e.kind === "vm" && e.text.startsWith("secret env:") && e.text.includes("DEMO_TOKEN"))) {
+				throw new Error(`no "secret env: ..." vm event naming DEMO_TOKEN: ${JSON.stringify(events.filter(e => e.kind === "vm").map(e => e.text))}`);
+			}
+			if (events.some(e => e.text.includes(value))) throw new Error("an event of the thread contains the secret value");
+
+			// The command prints the value; omp's masking (secrets.yml) must replace it before the model sees the tool result.
+			provider?.watch(value);
+			const before = provider?.count ?? 0;
+			const echo = await sendMessage("BASH: echo $DEMO_TOKEN");
+			await waitTurnIdle(echo, 180_000);
+			const requests = (provider?.count ?? 0) - before;
+			if (requests < 2) throw new Error(`the echo turn made ${requests} model request(s); expected the tool call and the one that carries its result`);
+			const leaked = provider?.seen(value) ?? 0;
+			if (leaked > 0) {
+				const last = (provider?.recentTurns ?? []).map(describeRequest).join("\n  --\n");
+				throw new Error(`${leaked} model request(s) after the echo contained the secret value\nthe fake model's last turn requests (oldest first):\n${last}`);
+			}
+			// The reply is not checked: it is the model's `DONE=<tool result>` and omp restores the value in what it shows, so the value is
+			// there although the model only ever saw its placeholder.
+			await waitGone(secretId);
+		} finally {
+			await api("DELETE", "/secrets/DEMO_TOKEN");
+			threadId = previous;
+		}
+		await expectRefused("DELETE", "/secrets/DEMO_TOKEN", 404, "no secret DEMO_TOKEN");
+	});
+
+	await report.step("AC3 MCP proxy: the VM reaches an http MCP server only through the service, which adds the upstream credential", async () => {
+		const who = await apiJson("GET", "/whoami", 200);
+		expectEqual("whoami.mcpProxy", who.mcpProxy, true);
+		// The proxy refuses loopback upstreams, so the fake one binds the host's primary non-loopback address.
+		const route = await Bun.$`ip -4 route get 1.1.1.1`.text();
+		const address = /\bsrc (\d+\.\d+\.\d+\.\d+)/.exec(route)?.[1];
+		if (address === undefined) throw new Error(`no source address in \`ip -4 route get 1.1.1.1\`: ${route.trim()}`);
+		const received: string[] = [];
+		const upstream = Bun.serve({
+			hostname: address,
+			port: 0,
+			fetch: req => {
+				const auth = req.headers.get("authorization") ?? "";
+				received.push(auth);
+				return new Response(auth);
+			},
+		});
+		const previous = threadId;
+		try {
+			const url = `http://${address}:${upstream.port}/mcp`;
+			const refused = await postThread(handoff, bundle, null, { request: { mcp: [{ name: "self", type: "http", url: `http://${PROVIDER_HOST}:4000/mcp` }] } });
+			expectEqual("an mcp server at the gateway host: status", refused.status, 400);
+			expectContains("an mcp server at the gateway host: error", text(obj(await refused.json(), "refusal").error), "may not point at the service host");
+
+			const mcpId = await createThread(handoff, bundle, null, {
+				request: { mcp: [{ name: "fake", type: "http", url, headers: { Authorization: "Bearer upstream-secret" } }] },
+			});
+			await waitTurnIdle(1, 240_000);
+			const command = `curl -s -X POST -H "Authorization: $(jq -r .mcpServers.fake.headers.Authorization ~/.omp/agent/mcp.json)" http://${PROVIDER_HOST}:4101/mcp/fake -d '{}' > mcp.txt`;
+			const turn = await sendMessage(`BASH: ${command}`);
+			await waitTurnIdle(turn, 180_000);
+			expectEqual("mcp.txt", (await apiJson("GET", `/threads/${mcpId}/files/mcp.txt`, 200)).text, "Bearer upstream-secret");
+			// omp in the VM also talks to the server on its own (through the same proxy): every call the upstream got carries its credential.
+			if (received.length === 0 || received.some(auth => auth !== "Bearer upstream-secret")) throw new Error(`the upstream received ${JSON.stringify(received)}; expected only Bearer upstream-secret`);
+			await waitGone(mcpId);
+		} finally {
+			await upstream.stop(true);
+			threadId = previous;
+		}
+	});
+
 	await report.step("AD whoami fields; deleting the scratch thread ends its inspections", async () => {
 		const pkg = obj(JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8")), "package.json");
 		const who = await apiJson("GET", "/whoami", 200);
@@ -1663,7 +1754,7 @@ async function run(): Promise<void> {
 		expectEqual("service.version", service.version, pkg.version);
 		expectContains("service.version", text(service.version), ".");
 		expectEqual("service.api", service.api, API_VERSION);
-		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr"];
+		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy"];
 		expectEqual("capabilities", JSON.stringify((Array.isArray(who.capabilities) ? who.capabilities.map(text) : []).sort()), JSON.stringify([...expected].sort()));
 		const limits = obj(who.limits, "whoami.limits");
 		expectEqual("limits", JSON.stringify([limits.maxMessageBytes, limits.maxAnswerBytes, limits.listMax, limits.maxTurns]), JSON.stringify([32768, 4000, 200, 200]));

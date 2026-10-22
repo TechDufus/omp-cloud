@@ -9,3 +9,5 @@ export const VM_CLOUD_DIR = "/home/user/.omp-cloud";
 /** The IRC extension omp starts with (`-e`) and the per-thread file it reads, both under `VM_CLOUD_DIR`. */
 export const VM_IRC_EXTENSION = `${VM_CLOUD_DIR}/irc-peer.ts`;
 export const VM_IRC_CONFIG = `${VM_CLOUD_DIR}/irc.json`;
+/** The 0600 file of `KEY='value'` lines (the thread's secret env and the service's secrets) that omp is started under, when it exists. */
+export const VM_ENV_FILE = `${VM_CLOUD_DIR}/env`;

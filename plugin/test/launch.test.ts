@@ -11,7 +11,7 @@ import { CloudError } from "../src/errors";
 import { launchBatch, type LaunchBatchInput, type LaunchedThread, type LaunchOutcome } from "../src/launch";
 import type { TitleGenerator } from "../src/naming";
 import { git } from "../src/snapshot";
-import type { HandoffRequest } from "../src/types";
+import type { HandoffRequest, Whoami } from "../src/types";
 import { summary, whoami } from "./builders";
 import { fakeHost, fakePi, fakeSettings, type FakeHost, type FakePiOptions } from "./fakes";
 import { cleanup, commitFile, configureRepo, isolateOmp, ompHome, syncInto, tmp } from "./helpers";
@@ -393,6 +393,46 @@ describe("the handoff request", () => {
 		const built = input(s, { settings, withSession: false }, realClient());
 		await launchHandoff(built.input);
 		expect(only().request.configOverlays).toEqual(["team.yml", "overlays/2-outside.yml"]);
+	});
+
+	describe("mcp", () => {
+		const real = realClient();
+		const mcpClient = (who: Partial<Whoami>): LaunchClient => ({ createThread: (parts, options) => real.createThread(parts, options), whoami: async () => whoami({ modelPatterns: ["anthropic/*"], ...who }) });
+
+		async function withMcp(): Promise<Setup> {
+			const s = await setup();
+			const servers = {
+				wiki: { type: "http", url: "https://mcp.example.test/mcp", headers: { Authorization: "Bearer ${WIKI_TOKEN}" } },
+				fs: { command: "npx", args: ["-y", "server-fs"], env: { TOKEN: "${FS_TOKEN}" } },
+				local: { type: "http", url: "http://127.0.0.1:9/mcp" },
+			};
+			await writeFile(join(s.agentDir, "mcp.json"), JSON.stringify({ mcpServers: servers }));
+			return s;
+		}
+
+		test("with mcp.proxy the shippable servers go in the request, the summary names how each is reached, and the rest warn", async () => {
+			const s = await withMcp();
+			const built = input(s, { withSession: false }, mcpClient({ capabilities: ["mcp.proxy"], mcpProxy: true }));
+			built.env.WIKI_TOKEN = "wiki-secret";
+			const result = await launchHandoff(built.input);
+			expect(only().request.mcp).toEqual([
+				{ name: "wiki", type: "http", url: "https://mcp.example.test/mcp", headers: { Authorization: "Bearer wiki-secret" } },
+				{ name: "fs", type: "stdio", command: "npx", args: ["-y", "server-fs"], env: { TOKEN: "${FS_TOKEN}" } },
+			]);
+			expect(result.summary.mcp).toEqual([
+				{ name: "wiki", via: "service" },
+				{ name: "fs", via: "vm" },
+			]);
+			expect(result.warnings).toEqual(["local points at this machine and is not shipped"]);
+		});
+
+		test("without mcp.proxy the request has no mcp field and the launch says so", async () => {
+			const s = await withMcp();
+			const result = await launchHandoff(input(s, { withSession: false }, mcpClient({ capabilities: [] })).input);
+			expect(only().request).not.toHaveProperty("mcp");
+			expect(result.summary.mcp).toEqual([]);
+			expect(result.warnings).toEqual(["the cloud service cannot take MCP servers; none are shipped"]);
+		});
 	});
 
 	test("secretFiles of the repository's .omp-cloud.yml ship in the request, base64", async () => {

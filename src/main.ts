@@ -1,4 +1,7 @@
-import { LoginManager } from "./auth/login";
+import { mcpLoginFlow } from "./auth/mcp-login";
+import { McpCredentials } from "./connectors/mcp-credentials";
+import { tryServeMcpProxy } from "./connectors/mcp-proxy";
+import { LoginManager, ompLoginFlow } from "./auth/login";
 import { type Config, loadConfig, resolveConfigPath } from "./config";
 import { GatewayClients } from "./gateway/clients";
 import { GatewayModels } from "./gateway/models";
@@ -12,13 +15,14 @@ import { Runner } from "./runner";
 import { serviceClientName } from "./runner/thread";
 import { createApp } from "./server/app";
 import { createDashboardServer, dashboardOrigin, dashboardUpstream } from "./dashboard/server";
-import { type OpenedRemote, openRemote } from "./pairing/remote";
+import { hostPort, type OpenedRemote, openRemote } from "./pairing/remote";
 import { serveRemote } from "./server/remote";
 import { directModelIds } from "./server/model-ids";
 import { serveDashboard } from "./dashboard/serve";
 import { handOffSessions, HANDOFF_FILE, importSessionHandoff } from "./dashboard/handoff";
 import { DashboardSessions } from "./dashboard/session";
 import { MAX_CREATE_BODY_BYTES } from "./server/limits";
+import { ServiceSecrets } from "./secrets/store";
 import { Settings } from "./settings";
 import { join } from "node:path";
 import { Store } from "./store";
@@ -109,7 +113,15 @@ export async function serve(args: readonly string[]): Promise<void> {
 	let update: UpdateService | undefined;
 	const gateway = new GatewayClients({ file: config.gateway.clientsFile, url: config.gateway.url });
 	const models = new GatewayModels({ clients: gateway, url: config.gateway.url, clientName: serviceClientName(store.serviceId()) });
-	const logins = new LoginManager({ brokerUrl: config.broker.url, brokerTokenFile: config.broker.tokenFile });
+	const mcpLogin = mcpLoginFlow(store);
+	const logins = new LoginManager({
+		brokerUrl: config.broker.url,
+		brokerTokenFile: config.broker.tokenFile,
+		flow: {
+			has: provider => ompLoginFlow.has(provider) || mcpLogin.has(provider),
+			run: (provider, controller) => (mcpLogin.has(provider) ? mcpLogin.run(provider, controller) : ompLoginFlow.run(provider, controller)),
+		},
+	});
 	const dashboardSessions = new DashboardSessions({ secure: config.dashboard?.url?.startsWith("https:") ?? false });
 	const handoffPath = join(config.dataDir, HANDOFF_FILE);
 	try {
@@ -118,6 +130,21 @@ export async function serve(args: readonly string[]): Promise<void> {
 		const githubApi = new GitHubApi();
 		const githubApp = await GitHubApp.open(config.dataDir, githubApi);
 		const signingKey = SigningKey.open(config.dataDir);
+		const secrets = new ServiceSecrets(store);
+		// The MCP proxy binds before the runner starts: VMs are provisioned with its address. A failed bind leaves the service up, without a proxy.
+		let mcpListen: string | undefined;
+		if (config.mcp !== undefined) {
+			const proxy = tryServeMcpProxy({
+				listen: config.mcp.listen,
+				store,
+				credentials: new McpCredentials({ store }),
+				own: [new URL(config.gateway.url).hostname, config.mcp.listen.hostname],
+			});
+			if (proxy !== null) {
+				mcpListen = hostPort(config.mcp.listen.hostname, config.mcp.listen.port);
+				listeners.push({ server: proxy, log: `omp-cloud MCP proxy on ${listenUrl("http", config.mcp.listen.hostname, proxy.port)}` });
+			}
+		}
 		const git = await GitService.open({
 			dataDir: config.dataDir,
 			hosts: config.git.hosts,
@@ -137,7 +164,7 @@ export async function serve(args: readonly string[]): Promise<void> {
 		await models.start();
 		if (config.runner.enabled) {
 			vmon = await Vmon.open(config.vmon);
-			runner = await Runner.start({ store, vmon, gateway, models, config, settings, git, signingKey, github: githubApp, githubApi, ompVersion });
+			runner = await Runner.start({ store, vmon, gateway, models, config, settings, git, signingKey, github: githubApp, githubApi, secrets, mcpListen, ompVersion });
 		} else if (config.dashboard) {
 			// The dashboard's VMs page only reads vmon (the sandbox list and metrics), so it gets a client without the runner.
 			try {
@@ -176,6 +203,8 @@ export async function serve(args: readonly string[]): Promise<void> {
 			settings,
 			git,
 			github: { app: githubApp, api: githubApi, signingKey },
+			secrets,
+			mcp: { proxy: mcpListen !== undefined, selfHosts: [new URL(config.gateway.url).hostname, ...(config.mcp === undefined ? [] : [config.mcp.listen.hostname])] },
 			dashboard:
 				config.dashboard === undefined
 					? undefined

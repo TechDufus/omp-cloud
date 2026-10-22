@@ -578,6 +578,30 @@ export async function deleteSigningKey(): Promise<void> {
 	await send("DELETE", "/api/v1/signing/key");
 }
 
+// Secrets
+
+/** A secret as the service lists it: never its value. `kind` is "command" for a `!command` value that the service resolves at delivery. */
+export interface Secret {
+	name: string;
+	repos: string[];
+	kind: "command" | "literal";
+	updatedAt: string;
+	updatedBy: string;
+}
+
+export async function getSecrets(): Promise<Secret[]> {
+	return (await call<{ secrets: Secret[] }>("GET", "/api/v1/secrets")).secrets;
+}
+
+/** Creates or replaces a secret (a literal, or `!command`) delivered to threads whose repository matches one of the `repos` globs. */
+export async function putSecret(name: string, value: string, repos: string[]): Promise<Secret> {
+	return (await call<{ secret: Secret }>("PUT", `/api/v1/secrets/${encodeURIComponent(name)}`, { json: { value, repos } })).secret;
+}
+
+export async function deleteSecret(name: string): Promise<void> {
+	await send("DELETE", `/api/v1/secrets/${encodeURIComponent(name)}`);
+}
+
 // Devices and pairing
 
 export async function listDevices(): Promise<Device[]> {

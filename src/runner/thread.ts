@@ -17,6 +17,7 @@ import type { SigningKey } from "../git/signing-key";
 import type { GitHubApi } from "../github/api";
 import type { GitHubApp } from "../github/app";
 import { isRecord } from "../guards";
+import type { ServiceSecrets } from "../secrets/store";
 import type { Settings } from "../settings";
 import { effectivePolicy } from "../settings/tighten";
 import { MAX_SOURCE_BYTES } from "../server/limits";
@@ -56,7 +57,7 @@ import { dropStaleSockets } from "./stale-sockets";
 import { IRC_COMMAND, ircDelivered, ircInCommand, ircPlainText, parseIrcFrame, turnMessage } from "./irc";
 import { classifyPrompt, type TurnOutcome } from "./outcome";
 import { addUsage, type AssistantEnd, assistantEnd, messageText, progressOf, toolEndEventOf, toolStartEventOf, usageEventOf } from "./progress";
-import { downloadBlob, envFileFor, ompLaunchArgs, provisionVm, shipIrcExtension, uploadBlob } from "./provision";
+import { downloadBlob, ompLaunchArgs, provisionVm, shipIrcExtension, uploadBlob } from "./provision";
 import { NOT_PUSHED, PushStep, pullRequestsOf, type PushRecord } from "./push";
 import { exportSession, exportSessionId } from "./session-export";
 import { checkSpend, type SpendBreach, spendCapError } from "./spend";
@@ -82,6 +83,10 @@ export interface ThreadEnv {
 	github: GitHubApp;
 	/** The client of GitHub's REST API that pull requests go through. */
 	githubApi: GitHubApi;
+	/** The service's secret store: the secrets that match a thread's repository go into its VM's env file. */
+	secrets: ServiceSecrets;
+	/** `<ip>:<port>` of the listening MCP proxy that VMs reach their http MCP servers at; absent when there is none. */
+	mcpListen?: string;
 	/** The service host's omp version: what a thread stored without one runs. */
 	ompVersion: string;
 }
@@ -1299,6 +1304,8 @@ export class ThreadRunner {
 		if (thread.archivedAt !== null) this.#event("vm", "restoring from the archive", turnId);
 		const token = await gateway.issue(clientName(serviceId, this.id));
 		const served = models.providers();
+		const { env: serviceEnv, failures } = await this.env.secrets.resolveForThread(thread);
+		for (const failure of failures) this.#event("notice", failure, turnId);
 		const provisioned = await provisionVm(sandbox, {
 			thread,
 			store,
@@ -1309,7 +1316,12 @@ export class ThreadRunner {
 			served,
 			questionTimeoutSeconds: config.runner.questionTimeoutSeconds,
 			policy,
+			serviceEnv,
+			mcpListen: this.env.mcpListen ?? null,
 		});
+		if (provisioned.envNames.length > 0) this.#event("vm", `secret env: ${provisioned.envNames.join(", ")}`, turnId);
+		for (const name of provisioned.mcpSkipped) this.#event("notice", `MCP server ${name} was not delivered: the service has no MCP proxy`, turnId);
+		if (provisioned.mcpNames.length > 0) this.#event("vm", `MCP servers: ${provisioned.mcpNames.join(", ")}`, turnId);
 		if (served.length > 0) await gateway.waitAccepted(token, 30_000);
 		// A conversation unpacked into the VM is the session omp resumes, also when omp has to restart before it reports its own.
 		const resume = provisioned.extraArgs.indexOf("--resume");
@@ -1350,11 +1362,10 @@ export class ThreadRunner {
 		// A VM provisioned before the IRC extension existed has no file for `-e` to load.
 		if (!(await sandbox.files.exists(VM_IRC_EXTENSION))) await shipIrcExtension(sandbox, thread);
 		const extraArgs = ompLaunchArgs(thread, config.models, record.sessionFile);
-		const envFile = envFileFor(thread);
 		const started: { proc?: OmpProcess } = {};
 		const client = new RpcClient({
 			spawn: async agentArgs => {
-				started.proc = await OmpProcess.start(sandbox, agentArgs, { cwd: VM_WORKSPACE, extraArgs, envFile }, frame => this.#onFrame(frame));
+				started.proc = await OmpProcess.start(sandbox, agentArgs, { cwd: VM_WORKSPACE, extraArgs }, frame => this.#onFrame(frame));
 				return started.proc;
 			},
 			args: [],

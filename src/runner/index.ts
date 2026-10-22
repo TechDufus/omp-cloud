@@ -10,6 +10,7 @@ import type { GitService } from "../git";
 import type { SigningKey } from "../git/signing-key";
 import type { GitHubApi } from "../github/api";
 import type { GitHubApp } from "../github/app";
+import type { ServiceSecrets } from "../secrets/store";
 import type { Settings } from "../settings";
 import type { Store } from "../store";
 import type { Vmon } from "../vmon";
@@ -38,6 +39,10 @@ export interface RunnerOptions {
 	github: GitHubApp;
 	/** GitHub's REST client, for pull requests. */
 	githubApi: GitHubApi;
+	/** The service's secret store, which each thread's VM env is drawn from. */
+	secrets: ServiceSecrets;
+	/** `<ip>:<port>` of the listening MCP proxy that VMs reach their http MCP servers at; absent when there is none. */
+	mcpListen?: string;
 	/** The service host's omp version. */
 	ompVersion: string;
 }

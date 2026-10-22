@@ -205,6 +205,7 @@ function thread(overrides: Partial<Thread>): Thread {
 		session: "",
 		scratch: false,
 		pr: null,
+		mcpServers: [],
 		...overrides,
 	};
 }

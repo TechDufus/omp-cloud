@@ -1,5 +1,10 @@
-import { expect, test } from "bun:test";
-import { ompArgs, OmpStdout } from "./omp-process";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { Sandbox } from "e2b";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ompArgs, OmpProcess, OmpStdout } from "./omp-process";
+import { VM_ENV_FILE } from "./vm-layout";
 
 function open(): { out: OmpStdout; requests: Record<string, unknown>[]; read: () => Promise<string> } {
 	const requests: Record<string, unknown>[] = [];
@@ -107,4 +112,44 @@ test("an approval select frame reaches the UI handler like an ask", async () => 
 	out.push(line);
 	expect(requests).toEqual([approval]);
 	expect(await read()).toBe(line);
+});
+
+describe("OmpProcess.start", () => {
+	let dir: string;
+	beforeEach(async () => {
+		dir = await mkdtemp(join(tmpdir(), "omp-cloud-"));
+		const bin = join(dir, "bin");
+		await mkdir(bin);
+		await writeFile(join(bin, "omp"), '#!/bin/sh\nprintf "[%s]" "$DEMO_SECRET"\n', { mode: 0o755 });
+	});
+	afterEach(() => rm(dir, { recursive: true, force: true }));
+
+	/** The shell command `start` runs in the VM, with the VM's env file moved to `envFile`, run against a fake `omp` that prints $DEMO_SECRET. */
+	async function started(envFile: string): Promise<string> {
+		let command = "";
+		const sandbox = {
+			commands: {
+				run: async (text: string) => {
+					command = text;
+					return { pid: 7, wait: () => new Promise(() => {}), disconnect: async () => {} };
+				},
+			},
+		} as unknown as Sandbox;
+		await OmpProcess.start(sandbox, ["--mode", "rpc"], { cwd: dir, extraArgs: [] }, () => {});
+		const proc = Bun.spawn(["bash", "-c", command.replaceAll(VM_ENV_FILE, envFile)], {
+			env: { PATH: `${join(dir, "bin")}:/usr/bin:/bin` },
+			stdout: "pipe",
+		});
+		return await new Response(proc.stdout).text();
+	}
+
+	test("omp is started under the env file when it exists, so its variables reach omp", async () => {
+		const envFile = join(dir, "env");
+		await writeFile(envFile, "DEMO_SECRET='it'\\''s here'\n");
+		expect(await started(envFile)).toBe("[it's here]");
+	});
+
+	test("a VM without an env file starts omp all the same", async () => {
+		expect(await started(join(dir, "no-such-env"))).toBe("[]");
+	});
 });

@@ -30,9 +30,9 @@ function delta(repo: Body = {}): Body {
 }
 
 /** The request is rejected with status 400. */
-function rejected(raw: unknown): ApiError {
+function rejected(raw: unknown, selfHosts: readonly string[] = []): ApiError {
 	try {
-		parseCreateRequest(raw);
+		parseCreateRequest(raw, selfHosts);
 	} catch (error) {
 		expect(error).toBeInstanceOf(ApiError);
 		expect((error as ApiError).status).toBe(400);
@@ -636,6 +636,7 @@ describe("a full request", () => {
 				secretFiles: [".env", "config/key.pem"],
 				secretEnv: ["API_URL", "NPM_TOKEN"],
 				configOverlays: [],
+				mcpServers: [],
 				ompVersion: "",
 				policy: {},
 				origin: "",
@@ -667,6 +668,7 @@ describe("a full request", () => {
 			secretFiles: [],
 			secretEnv: [],
 			configOverlays: [],
+			mcpServers: [],
 			ompVersion: "",
 			policy: {},
 			origin: "",
@@ -752,5 +754,126 @@ describe("repo.scratch", () => {
 		rejected(scratch({}, { prompt: "" }));
 		rejected(scratch({ name: "n\nm" }));
 		rejected(scratch({}, { model: "no-provider" }));
+	});
+});
+
+describe("mcp", () => {
+	const http = (name: string, url: string, headers: Body = {}): Body => ({ name, type: "http", url, headers });
+	const stdio = (name: string, over: Body = {}): Body => ({ name, type: "stdio", command: "npx", args: ["-y", "server"], env: {}, ...over });
+	const GATEWAY = "10.254.254.1";
+
+	test("absent, null and empty ship nothing", () => {
+		for (const over of [{}, { mcp: null }, { mcp: [] }]) {
+			const parsed = parseCreateRequest(request(over));
+			expect(parsed.thread.mcpServers).toEqual([]);
+			expect(parsed.secrets).toBeNull();
+		}
+	});
+
+	test("the servers go into the secrets, their names onto the thread, in request order", () => {
+		const parsed = parseCreateRequest(
+			request({ mcp: [http("docs", "https://mcp.example.com/mcp", { Authorization: "Bearer upstream" }), stdio("local", { env: { TOKEN: "${MCP_TOKEN}", REGION: "${REGION:-eu}" }, cwd: "tools" })] }),
+		);
+		expect(parsed.thread.mcpServers).toEqual(["docs", "local"]);
+		expect(parsed.secrets).toEqual({
+			files: [],
+			env: {},
+			mcp: [
+				{ name: "docs", type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer upstream" } },
+				{ name: "local", type: "stdio", command: "npx", args: ["-y", "server"], env: { TOKEN: "${MCP_TOKEN}", REGION: "${REGION:-eu}" }, cwd: "tools" },
+			],
+		});
+	});
+
+	test("they are added to the secret files and variables the request ships", () => {
+		const parsed = parseCreateRequest(request({ secretEnv: { KEY: "v" }, mcp: [http("docs", "https://mcp.example.com/mcp")] }));
+		expect(parsed.secrets).toMatchObject({ files: [], env: { KEY: "v" }, mcp: [{ name: "docs" }] });
+	});
+
+	test("at most 32 servers", () => {
+		const servers = (count: number) => Array.from({ length: count }, (_, i) => http(`s${i}`, "https://mcp.example.com/mcp"));
+		expect(parseCreateRequest(request({ mcp: servers(32) })).thread.mcpServers).toHaveLength(32);
+		expect(rejected(request({ mcp: servers(33) })).message).toBe("mcp has 33 entries; at most 32");
+		expect(rejected(request({ mcp: "x" })).message).toBe("mcp must be an array");
+		expect(rejected(request({ mcp: ["x"] })).message).toBe("mcp[0] must be an object");
+	});
+
+	test("names are unique and 1 to 64 characters of letters, digits, . _ -", () => {
+		expect(parseCreateRequest(request({ mcp: [stdio("A_b-1.x"), stdio("a".repeat(64))] })).thread.mcpServers).toHaveLength(2);
+		for (const name of ["", "a".repeat(65), "has space", "slash/x", 7, undefined]) rejected(request({ mcp: [stdio(name as string)] }));
+		expect(rejected(request({ mcp: [stdio("dup"), http("dup", "https://mcp.example.com/mcp")] })).message).toBe("mcp server dup is listed twice");
+	});
+
+	test("the type must be http or stdio", () => {
+		expect(rejected(request({ mcp: [{ name: "x", url: "https://mcp.example.com/mcp" }] })).message).toBe('mcp server x: type must be "http" or "stdio"');
+		rejected(request({ mcp: [{ name: "x", type: "sse", url: "https://mcp.example.com/mcp" }] }));
+	});
+
+	test("an http server needs an http or https URL and at most 32 string headers", () => {
+		parseCreateRequest(request({ mcp: [http("a", "http://192.168.1.20:8080/mcp"), http("b", "https://mcp.example.com/mcp")] }));
+		for (const url of ["", "not a url", "ftp://mcp.example.com/mcp", "file:///etc/passwd", "https://mcp.example.com/\u0001"]) rejected(request({ mcp: [http("x", url)] }));
+		expect(rejected(request({ mcp: [{ name: "x", type: "http" }] })).message).toBe("mcp server x: url must be a string");
+		const headers = (count: number) => Object.fromEntries(Array.from({ length: count }, (_, i) => [`X-H${i}`, "v"]));
+		parseCreateRequest(request({ mcp: [http("x", "https://mcp.example.com/mcp", headers(32))] }));
+		expect(rejected(request({ mcp: [http("x", "https://mcp.example.com/mcp", headers(33))] })).message).toBe("mcp server x: headers has 33 entries; at most 32");
+		rejected(request({ mcp: [http("x", "https://mcp.example.com/mcp", { "Bad Name": "v" })] }));
+		rejected(request({ mcp: [http("x", "https://mcp.example.com/mcp", { "X-Ok": 1 })] }));
+		rejected(request({ mcp: [http("x", "https://mcp.example.com/mcp", { "X-Ok": "a\nb" })] }));
+	});
+
+	test.each([
+		"http://localhost:8080/mcp",
+		"http://api.localhost/mcp",
+		"http://127.0.0.1/mcp",
+		"http://127.9.9.9:1/mcp",
+		"http://2130706433/mcp",
+		"http://[::1]:8080/mcp",
+		"http://[::ffff:127.0.0.1]/mcp",
+		"http://169.254.169.254/latest/meta-data",
+		"http://[fe80::1]/mcp",
+		"http://0.0.0.0:4100/mcp",
+		`http://${GATEWAY}:4000/mcp`,
+	])("an http server may not point at the service host: %s", url => {
+		expect(rejected(request({ mcp: [http("x", url)] }), [GATEWAY]).message).toBe("mcp server x may not point at the service host");
+	});
+
+	test("a LAN address is allowed, and the gateway address only matters when the service says so", () => {
+		for (const url of ["http://10.0.0.5:8080/mcp", "http://192.168.1.20/mcp", "https://[fd00::1]/mcp"]) parseCreateRequest(request({ mcp: [http("x", url)] }), [GATEWAY]);
+		parseCreateRequest(request({ mcp: [http("x", `http://${GATEWAY}:4000/mcp`)] }));
+	});
+
+	test("a stdio server needs a command, string args and env values that only reference the VM's env", () => {
+		expect(rejected(request({ mcp: [stdio("x", { command: "" })] })).message).toContain("command must be");
+		expect(rejected(request({ mcp: [{ name: "x", type: "stdio" }] })).message).toBe("mcp server x: command must be a string");
+		expect(rejected(request({ mcp: [stdio("x", { args: "-y" })] })).message).toBe("mcp server x: args must be an array of strings");
+		rejected(request({ mcp: [stdio("x", { args: ["-y", 1] })] }));
+		expect(parseCreateRequest(request({ mcp: [stdio("x", { args: undefined, env: undefined })] })).secrets?.mcp).toEqual([{ name: "x", type: "stdio", command: "npx", args: [], env: {} }]);
+		for (const value of ["literal-secret", "${}", "${1BAD}", "prefix-${TOKEN}", "${TOKEN}-suffix", "$TOKEN", ""]) {
+			expect(rejected(request({ mcp: [stdio("x", { env: { TOKEN: value } })] })).message).toBe("mcp server x: env TOKEN must be a ${NAME} reference to the cloud's secrets, not a literal value");
+		}
+		rejected(request({ mcp: [stdio("x", { env: { "BAD-NAME": "${X}" } })] }));
+		rejected(request({ mcp: [stdio("x", { env: { TOKEN: 5 } })] }));
+	});
+
+	test("a stdio cwd must be relative and clean", () => {
+		for (const cwd of ["/abs", "../up", "a/../../b", 5]) rejected(request({ mcp: [stdio("x", { cwd })] }));
+		expect(parseCreateRequest(request({ mcp: [stdio("x", { cwd: "tools/mcp" })] })).secrets?.mcp?.[0]).toMatchObject({ cwd: "tools/mcp" });
+	});
+
+	test("the servers are at most 262144 bytes of JSON in all", () => {
+		const fits = (headerBytes: number) => request({ mcp: [http("x", "https://mcp.example.com/mcp", { "X-Big": "a".repeat(headerBytes) })] });
+		const overhead = Buffer.byteLength(JSON.stringify([{ name: "x", type: "http", url: "https://mcp.example.com/mcp", headers: { "X-Big": "" } }]));
+		// A header value is capped at 8192 bytes, so fill the budget with several servers.
+		const many = (perServer: number) => request({ mcp: Array.from({ length: 32 }, (_, i) => http(`s${i}`, "https://mcp.example.com/mcp", { "X-Big": "a".repeat(perServer) })) });
+		expect(overhead).toBeLessThan(262144);
+		parseCreateRequest(fits(8192));
+		expect(rejected(request({ mcp: [http("x", "https://mcp.example.com/mcp", { "X-Big": "a".repeat(8193) })] })).message).toContain("at most 8192 bytes");
+		parseCreateRequest(many(100));
+		const tooBig = rejected(
+			request({
+				mcp: Array.from({ length: 32 }, (_, i) => http(`s${i}`, "https://mcp.example.com/mcp", Object.fromEntries(Array.from({ length: 32 }, (_, h) => [`X-H${h}`, "a".repeat(300)])))),
+			}),
+		);
+		expect(tooBig.message).toMatch(/^mcp is \d+ bytes; at most 262144$/);
 	});
 });

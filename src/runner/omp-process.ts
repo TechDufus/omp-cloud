@@ -21,6 +21,7 @@ import { CommandExitError, type CommandHandle, type Sandbox } from "e2b";
 import type { RpcAgentProcess } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { isRecord } from "../guards";
 import { shellQuote } from "./exec";
+import { VM_ENV_FILE } from "./vm-layout";
 
 /**
  * Called for every complete stdout line that is a frame `RpcClient` has no hook for (parsed): an `extension_ui_request`, a
@@ -28,11 +29,10 @@ import { shellQuote } from "./exec";
  */
 export type FrameTap = (frame: Record<string, unknown>) => void;
 
-/** `envFile`: a 0600 file of `KEY='value'` lines sourced before exec (secret env must never go through `commands.run` envs, which `commands.list` shows). */
+/** `cwd` and `extraArgs`; secret env must never go through `commands.run` envs, which `commands.list` shows, so omp sources {@link VM_ENV_FILE} when it exists. */
 export interface OmpStart {
 	cwd: string;
 	extraArgs: string[];
-	envFile: string | null;
 }
 
 const STDERR_TAIL_BYTES = 32 * 1024;
@@ -175,7 +175,7 @@ export class OmpProcess implements RpcAgentProcess {
 		return this.#detachedBy;
 	}
 
-	/** `[set -a; . <envFile>; set +a;] exec omp <ompArgs(agentArgs, start.extraArgs)>` in the background, stdin on, timeoutMs 0. */
+	/** `[if [ -f VM_ENV_FILE ]; then set -a; . VM_ENV_FILE; set +a; fi;] exec omp <ompArgs(agentArgs, start.extraArgs)>` in the background, stdin on, timeoutMs 0. */
 	static async start(
 		sandbox: Sandbox,
 		agentArgs: string[],
@@ -183,7 +183,8 @@ export class OmpProcess implements RpcAgentProcess {
 		tap: FrameTap,
 	): Promise<OmpProcess> {
 		const process = new OmpProcess(sandbox, tap);
-		const source = start.envFile === null ? "" : `set -a; . ${shellQuote(start.envFile)}; set +a; `;
+		const env = shellQuote(VM_ENV_FILE);
+		const source = `if [ -f ${env} ]; then set -a; . ${env}; set +a; fi; `;
 		const command = `${source}exec omp ${ompArgs(agentArgs, start.extraArgs).map(shellQuote).join(" ")}`;
 		const handle = await sandbox.commands.run(command, {
 			background: true,

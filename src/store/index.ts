@@ -67,6 +67,8 @@ import {
 	StoreError,
 	STRUCTURED_EVENT_KINDS,
 	type StoredSetting,
+	type SecretRow,
+	type SecretSummary,
 	THREAD_ID_PATTERN,
 	type Thread,
 	type ThreadActivity,
@@ -280,8 +282,8 @@ export class Store {
 						`INSERT INTO threads (id, owner, phase, title, name, model, thinking, repo_name, repo_remote_url, repo_base_ref,
 							repo_base_commit, repo_handoff_commit, repo_local_branch, home, workspace, author_name, author_email,
 							secret_files, secret_env, config_overlays, omp_version, policy, created_at, last_activity_at,
-							origin, ref, session, scratch, idempotency_key, idempotency_fingerprint)
-						VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+							origin, ref, session, scratch, idempotency_key, idempotency_fingerprint, mcp_names)
+						VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 					)
 					.run(
 						id,
@@ -313,6 +315,7 @@ export class Store {
 						input.scratch === true ? 1 : 0,
 						input.idempotency?.key ?? null,
 						input.idempotency?.fingerprint ?? "",
+						JSON.stringify(input.mcpServers ?? []),
 					);
 				this.insertTurn(m, 1, input.prompt, input.sentBy ?? input.owner);
 			},
@@ -447,6 +450,20 @@ export class Store {
 	/** Records the pull request the thread's pushes opened. No event, `lastActivityAt` does not move; a no-op for an unknown or deleted thread. */
 	setThreadPullRequest(threadId: string, pr: { number: number; url: string }): void {
 		this.db.query("UPDATE threads SET pr_number = ?, pr_url = ? WHERE id = ? AND deleted_at IS NULL").run(pr.number, pr.url, threadId);
+	}
+
+	/** The thread whose MCP proxy token has this SHA-256 (hex); null for no match or a deleted thread. */
+	threadByMcpToken(sha256: string): Thread | null {
+		if (sha256 === "") return null;
+		const row = this.db
+			.query<ThreadRow, [string]>("SELECT * FROM threads WHERE mcp_token_sha256 = ? AND deleted_at IS NULL")
+			.get(sha256);
+		return row === null ? null : threadFromRow(row);
+	}
+
+	/** Replaces the SHA-256 (hex) of the thread's MCP proxy token. No event; a no-op for an unknown or deleted thread. */
+	setMcpToken(threadId: string, sha256: string): void {
+		this.db.query("UPDATE threads SET mcp_token_sha256 = ? WHERE id = ? AND deleted_at IS NULL").run(sha256, threadId);
 	}
 
 	/**
@@ -1123,6 +1140,70 @@ export class Store {
 			)
 			.all(before, limit)
 			.map(settingsAuditFromRow);
+	}
+
+	// ---- secrets and MCP credentials
+
+	/** The stored secrets without their values, in name order. */
+	listSecrets(): SecretSummary[] {
+		return this.db
+			.query<{ name: string; value: string; repos: string; updated_at: string; updated_by: string }, []>(
+				"SELECT name, value, repos, updated_at, updated_by FROM secrets ORDER BY name",
+			)
+			.all()
+			.map((row) => ({
+				name: row.name,
+				repos: JSON.parse(row.repos) as string[],
+				kind: row.value.startsWith("!") ? "command" : "literal",
+				updatedAt: row.updated_at,
+				updatedBy: row.updated_by,
+			}));
+	}
+
+	/** The stored secrets with their values, in name order. For the secret service only: never serve these. */
+	secretRows(): SecretRow[] {
+		return this.db
+			.query<{ name: string; value: string; repos: string }, []>("SELECT name, value, repos FROM secrets ORDER BY name")
+			.all()
+			.map((row) => ({ name: row.name, value: row.value, repos: JSON.parse(row.repos) as string[] }));
+	}
+
+	/** Inserts or replaces the secret `secret.name`; `actor` is `owner` or `device:<id>`. */
+	putSecret(secret: SecretRow, actor: string): void {
+		this.db
+			.query(
+				`INSERT INTO secrets (name, value, repos, updated_at, updated_by) VALUES (?, ?, ?, ?, ?)
+				ON CONFLICT (name) DO UPDATE SET value = excluded.value, repos = excluded.repos, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+			)
+			.run(secret.name, secret.value, JSON.stringify(secret.repos), this.now().toISOString(), actor);
+	}
+
+	/** False when no secret has this name. */
+	deleteSecret(name: string): boolean {
+		return this.db.query("DELETE FROM secrets WHERE name = ?").run(name).changes > 0;
+	}
+
+	/** The stored OAuth credential JSON of an MCP server URL; null for none. */
+	mcpCredential(url: string): string | null {
+		return this.db.query<{ credential: string }, [string]>("SELECT credential FROM mcp_credentials WHERE url = ?").get(url)?.credential ?? null;
+	}
+
+	/** Inserts or replaces the credential JSON of an MCP server URL; `at` is an ISO time. */
+	putMcpCredential(url: string, credential: string, at: string): void {
+		this.db
+			.query(
+				`INSERT INTO mcp_credentials (url, credential, updated_at) VALUES (?, ?, ?)
+				ON CONFLICT (url) DO UPDATE SET credential = excluded.credential, updated_at = excluded.updated_at`,
+			)
+			.run(url, credential, at);
+	}
+
+	/** The URLs the service holds an OAuth credential for, in URL order. */
+	mcpCredentialUrls(): string[] {
+		return this.db
+			.query<{ url: string }, []>("SELECT url FROM mcp_credentials ORDER BY url")
+			.all()
+			.map((row) => row.url);
 	}
 
 	// ---- devices and pairing offers

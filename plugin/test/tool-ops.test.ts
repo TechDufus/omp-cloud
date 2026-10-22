@@ -1456,7 +1456,7 @@ describe("native views of a result", () => {
 			key: "k",
 			warnings: ["model x is not available"],
 			job: undefined,
-			summary: { repo: { name: "app", baseRef: "main", localBranch: "main" }, scratch: false, base: "", commits: 3, wip: { files: 2, insertions: 5, deletions: 1 }, untracked: [], untrackedTotal: 0, withheld: [], secrets: { files: 0, env: 0 }, conversation: "included", setupBytes: 10, model: "anthropic/claude-sonnet-5-5", thinking: "high", ompVersion: "18.12.3", overlays: [], policy: [] },
+			summary: { repo: { name: "app", baseRef: "main", localBranch: "main" }, scratch: false, base: "", commits: 3, wip: { files: 2, insertions: 5, deletions: 1 }, untracked: [], untrackedTotal: 0, withheld: [], secrets: { files: 0, env: 0 }, conversation: "included", setupBytes: 10, model: "anthropic/claude-sonnet-5-5", thinking: "high", ompVersion: "18.12.3", overlays: [], mcp: [], policy: [] },
 		};
 		const refused: LaunchFailure = { ok: false, index: 1, workspace: "repo", error: new CloudError({ code: "invalid", message: "bad ref", retriable: false, outcomeKnown: true }) };
 		r.behaviour.delegate = () => ({ defaultWorkspace: "repo", outcomes: [launched, refused] });

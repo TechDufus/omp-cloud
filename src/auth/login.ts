@@ -69,6 +69,8 @@ export interface LoginResult {
 	provider: string;
 	credential: AuthCredential;
 	account: string;
+	/** Stores the credential itself, in place of the upload to the broker (MCP logins live in the service's own store). */
+	persist?(): Promise<void>;
 }
 
 /** The boundary to the external OAuth providers. */
@@ -189,11 +191,14 @@ export class LoginManager {
 		if (!this.#flow.has(provider)) throw new LoginError("unknown_provider", `unknown provider ${JSON.stringify(provider.slice(0, 64))}`);
 		let token = "";
 		let tokenError = "";
-		try {
-			token = (await Bun.file(this.#tokenFile).text()).trim();
-			if (token === "") tokenError = "the broker token file is empty";
-		} catch {
-			tokenError = "cannot read the broker token file";
+		// An MCP login is stored by the service itself; it needs no broker token.
+		if (!provider.startsWith("mcp:")) {
+			try {
+				token = (await Bun.file(this.#tokenFile).text()).trim();
+				if (token === "") tokenError = "the broker token file is empty";
+			} catch {
+				tokenError = "cannot read the broker token file";
+			}
 		}
 		const previous = this.#waiting.get(provider);
 		if (previous) {
@@ -333,17 +338,21 @@ export class LoginManager {
 		try {
 			const result = await this.#flow.run(entry.view.provider, this.#controller(entry));
 			if (entry.view.state !== "waiting") return;
-			const response = await fetch(`${this.#brokerUrl}/v1/credential`, {
-				method: "POST",
-				headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-				body: JSON.stringify({ provider: result.provider, credential: result.credential }),
-				signal: AbortSignal.any([entry.abort.signal, AbortSignal.timeout(UPLOAD_TIMEOUT_MS)]),
-			});
-			await response.body?.cancel();
-			if (!response.ok) throw new Error(`the broker refused the credential (HTTP ${response.status})`);
+			if (result.persist === undefined) {
+				const response = await fetch(`${this.#brokerUrl}/v1/credential`, {
+					method: "POST",
+					headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+					body: JSON.stringify({ provider: result.provider, credential: result.credential }),
+					signal: AbortSignal.any([entry.abort.signal, AbortSignal.timeout(UPLOAD_TIMEOUT_MS)]),
+				});
+				await response.body?.cancel();
+				if (!response.ok) throw new Error(`the broker refused the credential (HTTP ${response.status})`);
+			} else {
+				await result.persist();
+			}
 			this.#finish(entry, "done", "", result.account);
 		} catch (error) {
-			this.#finish(entry, "failed", describe(error).replaceAll(token, "[redacted]"));
+			this.#finish(entry, "failed", token === "" ? describe(error) : describe(error).replaceAll(token, "[redacted]"));
 		}
 	}
 

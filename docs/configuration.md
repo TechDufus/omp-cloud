@@ -14,7 +14,7 @@ omp-cloud keeps its own files; omp's config is never read or written. `<config h
 | `token` | string | The owner token: a literal, an environment variable name or a `!command` (run with `/bin/sh -c`); `OMP_CLOUD_TOKEN` wins |
 | `excludeExtensions` | list of strings | Extension names that stay on this machine |
 | `secretFiles` | list of strings | Repository files (relative paths) whose contents go to the cloud agent |
-| `secretEnv` | list of strings | Names of environment variables whose values go to the cloud agent |
+| `secretEnv` | list of strings | Names of environment variables whose values go to the cloud agent. A value every agent on a repository needs belongs in the service's [Secrets](secrets-and-mcp.md#secrets) instead |
 | `policy` | mapping | Flat policy keys a handoff sends to tighten the service's policy for that thread: `bash.patterns`, `tools.approval`, `fetch`, `webSearch`, `browser`, `egress`, `spend.turnUSD`, `spend.threadUSD`, `spend.dayUSD`, `models.allowed`. The service never lets it loosen the policy ([API](api.md#agent-policy)). The launch card lists the keys sent |
 | `deliver` | `tray` or `transcript` | Where a followed thread's finished turns and questions of your own threads go: the inbox and a terminal notification (`tray`, the default), or transcript cards. Yours only |
 
@@ -22,9 +22,11 @@ A repository's file never supplies `url`, `token` or `deliver`: they are ignored
 
 With no `url` from the environment or your file, the machine uses its paired connection (`connection.json` beside `config.yml`) and ignores a `token`; see [Pairing](pairing.md).
 
+A handoff also ships your omp's agent directory (`~/.omp/agent`) and the session's `--config` overlays. Settings that must stay on this machine (credentials, `!command` values, host paths, loopback endpoints) are removed from that copy with a launch warning, and MCP servers are planned separately; see [Secrets and MCP servers](secrets-and-mcp.md#settings-that-stay-on-your-machine).
+
 ## Service config
 
-`service.json` is read at start from `--config`, else `$OMP_CLOUD_CONFIG`, else `~/.config/omp-cloud/service.json`. It is JSON. `omp-cloud setup` writes it (0600) when it is missing; on a rerun it adds a missing `broker`, `dashboard` or `remote` section and sets `vmon.team`, and changes nothing else. A missing required key, an unknown key or an invalid value stops the service with a message naming the field. Everything not listed here is a setting (`GET`/`PUT /api/v1/settings`, see [API](api.md#settings)). Paths are absolute. The three listeners are defined in [API](api.md#listeners).
+`service.json` is read at start from `--config`, else `$OMP_CLOUD_CONFIG`, else `~/.config/omp-cloud/service.json`. It is JSON. `omp-cloud setup` writes it (0600) when it is missing; on a rerun it adds a missing `broker`, `dashboard`, `remote` or `mcp` section and sets `vmon.team`, and changes nothing else. A missing required key, an unknown key or an invalid value stops the service with a message naming the field. Everything not listed here is a setting (`GET`/`PUT /api/v1/settings`, see [API](api.md#settings)). Paths are absolute. The three listeners are defined in [API](api.md#listeners).
 
 | Key | Required | Meaning |
 |---|---|---|
@@ -39,6 +41,7 @@ With no `url` from the environment or your file, the machine uses its paired con
 | `git` | no | `{hosts, fetchTimeoutSeconds, pushTimeoutSeconds}`: the git hosts the service holds a credential for (without any, and without a connected [GitHub App](github.md) for github.com, it fetches nothing and pushes nothing) and the timeouts of a network git call of a base fetch and of a push (default 120 each, at most 2147483) |
 | `dashboard` | no | `{listen, url?}`: the dashboard listener, loopback only; without it there is no dashboard. `url` is the origin browsers use, without a path (default `http://<listen>`). Setup writes `127.0.0.1:8081` |
 | `remote` | no | The remote listener (TLS) for paired devices; without it the service has none. See below |
+| `mcp` | no | `{listen}`: the MCP proxy listener that VMs reach their http MCP servers through; without it the service ships no http MCP server. Setup writes `10.254.254.1:4100`. See [MCP proxy](#mcp-proxy) |
 
 `git.hosts` is keyed by the remote URL's lower-case host, with `:port` when the URL names one (`github.com`, `git.example:8443`). Each entry is `{credential, username?}`: `credential` is a `!command` whose output is the token (never the token itself), and `username` is the Basic-auth user name git sends (default `x-access-token`). `github.com` needs no entry once a GitHub App is connected ([below](#github-app-and-signing-key)); an entry is then used only for a repository the App is not installed on.
 
@@ -62,4 +65,14 @@ The credential command runs in the service's environment (a systemd user unit), 
 | `signing/ed25519.pem` | The SSH key the service signs commits with |
 
 A key file with group or other permission bits is refused (`the GitHub App key <path> must be mode 0600`, `the signing key <path> must be mode 0600`). Both directories are in every [backup](operations.md). The run-time settings are [`git.sign`, `git.committer` and `git.pr`](api.md#settings), with `git.push` deciding whether anything is pushed at all. Connecting, installing, signing and pull requests are explained in [GitHub](github.md); the dashboard's address is `dashboard.url` ([above](#service-config)), and the manifest flow needs a dashboard listener.
+
+## MCP proxy
+
+`mcp` is `{"listen": "<ip>:<port>"}`. The address must be an IP literal (a host name is refused: `mcp.listen must be an IP address, not a host name`) and a specific one (`0.0.0.0` and `::` are refused: `mcp.listen must be a specific address, not a wildcard`). It is plain HTTP and is not the API, so it needs no loopback address; it must be one a VM can reach, and the only host address a VM reaches is the gateway's. `omp-cloud setup` writes `10.254.254.1:4100` when it creates `service.json` and adds the section to an existing file on a rerun (`mcp section added`), the same way as `broker`, `dashboard` and `remote`; the service reads it at start, so restart it afterwards (`systemctl --user restart omp-cloud`).
+
+```json
+"mcp": {"listen": "10.254.254.1:4100"}
+```
+
+The listener starts before the runner. When the port cannot be bound the service still starts, logs `omp-cloud: the MCP proxy could not listen on <listen>: <reason>` (`journalctl --user -u omp-cloud`) and reports `mcpProxy: false` in `whoami`: stdio MCP servers still ship, http ones are not delivered. What the proxy does with a request is in [API](api.md#secrets-and-mcp-servers), and the trust boundary in [Security model](security.md#secrets-and-mcp). The VMs' egress already allows the gateway address on every port ([Security model](security.md#trust-boundaries)), so nothing needs opening; the listener sits on the gateway's address, which only this host and its VMs use.
 

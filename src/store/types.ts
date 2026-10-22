@@ -368,6 +368,8 @@ export interface Thread {
 	scratch: boolean;
 	/** The pull request the thread's pushes opened; null before any. */
 	pr: { number: number; url: string } | null;
+	/** Names of the MCP servers the thread ships (their entries live in the `secrets.json` blob); empty for none. */
+	mcpServers: string[];
 }
 
 /** A validated create request: everything `Store.createThread` needs besides the id. */
@@ -401,6 +403,8 @@ export interface NewThread {
 	scratch?: boolean;
 	/** The create request's `Idempotency-Key` and the SHA-256 (hex) of its prompt; absent means no key. The key is unique per owner among live threads. */
 	idempotency?: { key: string; fingerprint: string };
+	/** Names of the MCP servers the create request ships; absent means none. */
+	mcpServers?: string[];
 }
 
 export type ThreadOrigin = "tool" | "user";
@@ -433,11 +437,18 @@ export interface ThreadPage {
 	total: number;
 }
 
+/** One MCP server a thread ships: an http server the service proxies (its headers stay on the service) or a stdio server that runs in the VM. */
+export type ThreadMcpServer =
+	| { name: string; type: "http"; url: string; headers: Record<string, string> }
+	| { name: string; type: "stdio"; command: string; args: string[]; env: Record<string, string>; cwd?: string };
+
 /** Contents of the `secrets.json` blob, written at create and read by the runner. */
 export interface ThreadSecrets {
 	/** In request order; `content` is base64. */
 	files: { path: string; content: string }[];
 	env: Record<string, string>;
+	/** The MCP servers the thread ships, in request order; absent for none. Never served. */
+	mcp?: ThreadMcpServer[];
 }
 
 /** One entry of a thread's append-only event log. */
@@ -575,6 +586,22 @@ export interface ThreadActivity {
 	kind: "tool" | "assistant";
 	text: string;
 	at: string;
+}
+
+/** A secret as the store lists it: never its value. `kind` is `command` for a `!command` value, else `literal`. */
+export interface SecretSummary {
+	name: string;
+	repos: string[];
+	kind: "command" | "literal";
+	updatedAt: string;
+	updatedBy: string;
+}
+
+/** A stored secret with its value; only the secret service reads these. */
+export interface SecretRow {
+	name: string;
+	value: string;
+	repos: string[];
 }
 
 export type StoreErrorCode =

@@ -6,6 +6,7 @@ import {
   Download,
   GitBranch,
   Hammer,
+  KeyRound,
   Layers,
   Link2,
   type LucideIcon,
@@ -52,6 +53,7 @@ export const NAV: NavGroup[] = [
     items: [
       { source: "docs/configuration.md", icon: SlidersHorizontal },
       { source: "docs/github.md", icon: GitBranch },
+      { source: "docs/secrets-and-mcp.md", icon: KeyRound },
       { source: "docs/updating.md", icon: RefreshCw },
       { source: "docs/operations.md", icon: DatabaseBackup },
       { source: "docs/security.md", icon: ShieldCheck },

@@ -69,6 +69,8 @@ export function setupPaths(env: Record<string, string | undefined> = process.env
 const BROKER_URL = "http://127.0.0.1:8765";
 const DASHBOARD_LISTEN = "127.0.0.1:8081";
 const REMOTE_LISTEN = "0.0.0.0:8443";
+/** The MCP proxy listens on the gateway's address, the only one the VMs reach. */
+const MCP_LISTEN = `${SERVICE_IP}:4100`;
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 const DEV_CLIENT = "omp-cloud-dev";
 
@@ -134,12 +136,13 @@ export function defaultServiceConfig(paths: SetupPaths, apiTokenSha256: string, 
 		broker: { url: BROKER_URL, tokenFile: join(paths.authHome, ".omp", "auth-broker.token") },
 		dashboard: { listen: DASHBOARD_LISTEN },
 		remote: { listen: REMOTE_LISTEN, certFile: join(paths.tlsDir, "cert.pem"), keyFile: join(paths.tlsDir, "key.pem") },
+		mcp: { listen: MCP_LISTEN },
 		models: { default: DEFAULT_MODEL },
 	};
 }
 
 /**
- * The migrations applied to an existing service.json: the `broker`, `dashboard` and `remote` sections are added when
+ * The migrations applied to an existing service.json: the `broker`, `dashboard`, `remote` and `mcp` sections are added when
  * missing. Returns the new document and what changed (empty: nothing to migrate); the input is not modified.
  */
 export function migrateServiceConfig(raw: Record<string, unknown>, paths: SetupPaths): { config: Record<string, unknown>; notes: string[] } {
@@ -156,6 +159,10 @@ export function migrateServiceConfig(raw: Record<string, unknown>, paths: SetupP
 	if (!("remote" in config)) {
 		config.remote = { listen: REMOTE_LISTEN, certFile: join(paths.tlsDir, "cert.pem"), keyFile: join(paths.tlsDir, "key.pem") };
 		notes.push("remote section added");
+	}
+	if (!("mcp" in config)) {
+		config.mcp = { listen: MCP_LISTEN };
+		notes.push("mcp section added");
 	}
 	return { config, notes };
 }

@@ -117,7 +117,8 @@ export interface OverlayPolicy {
  * then applies the owner's policy: omp replaces arrays on a merge, so `bash.patterns` is written whole, the
  * {@link GIT_GUARD_PATTERNS}, then `policy.bash.patterns`, then the shipped files' rules in load order, and a shipped rule
  * can never shadow the guard or the policy; `tools.approval` is the shipped entries overridden by the policy's; a
- * disabled `fetch`, `web_search` or `browser` is switched off.
+ * disabled `fetch`, `web_search` or `browser` is switched off. `maskSecrets` turns on omp's secret obfuscation, which reads
+ * the VM's `secrets.yml`.
  */
 export function overlayConfigYaml(input: {
 	model: string;
@@ -125,6 +126,7 @@ export function overlayConfigYaml(input: {
 	configYamls: (string | null)[];
 	routable: string[];
 	policy: OverlayPolicy;
+	maskSecrets: boolean;
 }): string {
 	const merged: Record<string, unknown> = {};
 	for (const configYaml of input.configYamls) Object.assign(merged, fileRoles(configYaml));
@@ -153,6 +155,7 @@ export function overlayConfigYaml(input: {
 	if (!input.policy.webSearch) overlay.web_search = { enabled: false };
 	if (!input.policy.browser) overlay.browser = { enabled: false };
 	overlay.computer = { enabled: false };
+	if (input.maskSecrets) overlay.secrets = { enabled: true };
 	overlay.collab = { autoStart: "off" };
 	overlay.marketplace = { autoUpdate: "off" };
 	// The first request after a long pause can fail with ECONNRESET on a stale keep-alive connection to the gateway: omp's own retry covers it.
@@ -180,6 +183,8 @@ export function cloudSystemPrompt(input: {
 	localBranch: string;
 	questionTimeoutSeconds: number;
 	secretFiles: string[];
+	/** The names of the MCP servers the thread ships; none for an empty list. */
+	mcpServers: string[];
 	/** The IRC id of the thread's parent in the VM (`runner/irc.ts` `PARENT_AGENT_ID`). */
 	parentId: string;
 }): string {
@@ -189,7 +194,7 @@ export function cloudSystemPrompt(input: {
 			? `If nobody answers within ${formatDuration(input.questionTimeoutSeconds)} you get a note to proceed with your best judgment; `
 			: "If nobody answers in time you get a note to proceed with your best judgment; ";
 	const files = input.secretFiles.length > 0 ? input.secretFiles.join(", ") : "none";
-	return [
+	const lines = [
 		"## Running in the cloud",
 		`You continue this work as an omp cloud agent. The repository ${input.repoName} is checked out at ${VM_WORKSPACE} on branch ${input.branch}${based}.`,
 		"- Work autonomously: nobody watches live. When a decision blocks the work, use the `ask` tool: the user may answer late, so settle everything the question does not block first. " +
@@ -197,6 +202,12 @@ export function cloudSystemPrompt(input: {
 		"- Commit as you go with clear messages; anything uncommitted is committed for you when the turn ends. Never push and never add or change git remotes: those commands are blocked. " +
 			`The service pushes ${input.branch} when the owner's policy allows it, and otherwise the user pulls the branch from the service.`,
 		`- These files were shipped as secrets and must never be printed or committed: ${files}.`,
+	];
+	if (input.mcpServers.length > 0) {
+		lines.push(`- MCP servers: ${input.mcpServers.join(", ")}; the http ones are reached through the service, never print their tokens.`);
+	}
+	lines.push(
 		`- Your parent, the omp that started this thread, is the IRC peer \`${input.parentId}\`. Message it with \`write\` (\`path: "agent://${input.parentId}"\`) to report progress or to ask something that does not block you; it may answer later as an incoming IRC message. Other peers that message you appear under their own ids and are answered the same way. Questions a person must answer still go through \`ask\`.`,
-	].join("\n");
+	);
+	return lines.join("\n");
 }

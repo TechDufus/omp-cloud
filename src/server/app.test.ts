@@ -327,6 +327,8 @@ describe("whoami", () => {
 				"github.app",
 				"commits.signed",
 				"threads.pr",
+				"secrets.store",
+				"mcp.proxy",
 			],
 			limits: { maxMessageBytes: MAX_TEXT_BYTES, maxAnswerBytes: MAX_QUESTION_TEXT_BYTES, maxUploadBytes: MAX_SOURCE_BYTES, listMax: 200, maxTurns: MAX_TURNS },
 			spend: { todayUSD: 0, dayCapUSD: 0 },
@@ -337,12 +339,22 @@ describe("whoami", () => {
 			ompVersion: OMP_VERSION,
 			gitHosts: ["git.example.test:8443", "github.com"],
 			github: { app: null, signing: false },
+			mcpProxy: false,
+			mcpLogins: [],
 			vms: { running: 0, paused: 0 },
 			threads: { starting: 1, working: 1, waiting: 1, idle: 1, failed: 1 },
 			device: null,
 			remote: null,
 			update: { state: "unsupported", available: null },
 		});
+	});
+
+	test("whoami lists the MCP servers the service holds a login for", async () => {
+		store.putMcpCredential("https://b.example.com/mcp", "{}", new Date().toISOString());
+		store.putMcpCredential("https://a.example.com/mcp", "{}", new Date().toISOString());
+		const body = await jsonOf(await call("GET", "/api/v1/whoami"));
+		expect(at(body, "mcpLogins")).toEqual(["https://a.example.com/mcp", "https://b.example.com/mcp"]);
+		expect(at(body, "mcpProxy")).toBe(false);
 	});
 
 	test("modelPatterns follow the providers the gateway serves now, then the direct ones, each once", async () => {

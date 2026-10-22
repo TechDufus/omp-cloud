@@ -211,6 +211,7 @@ describe("a fresh install", () => {
 			broker: { url: "http://127.0.0.1:8765", tokenFile: join(dir, ".local/share/omp-cloud/auth-home/.omp/auth-broker.token") },
 			dashboard: { listen: "127.0.0.1:8081" },
 			remote: { listen: "0.0.0.0:8443", certFile: join(dir, ".config/omp-cloud/tls/cert.pem"), keyFile: join(dir, ".config/omp-cloud/tls/key.pem") },
+			mcp: { listen: "10.254.254.1:4100" },
 			models: { default: "anthropic/claude-sonnet-4-6" },
 		});
 		const written: unknown = JSON.parse(await text(paths.serviceJson));

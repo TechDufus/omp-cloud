@@ -264,4 +264,24 @@ export const MIGRATIONS: readonly string[] = [
 	ALTER TABLE threads ADD COLUMN pr_number INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE threads ADD COLUMN pr_url TEXT NOT NULL DEFAULT '';
 	`,
+	// 13: the service-wide secret store (`secrets`: env values scoped to repository globs, `repos` a JSON array), the OAuth
+	// credentials of MCP servers the service logs in to (`mcp_credentials`, one JSON per URL), and per thread the names of
+	// the MCP servers it ships (`mcp_names`, a JSON array) and the SHA-256 of its MCP proxy token ('' for none).
+	`
+	CREATE TABLE secrets (
+		name TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		repos TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		updated_by TEXT NOT NULL
+	);
+	CREATE TABLE mcp_credentials (
+		url TEXT PRIMARY KEY,
+		credential TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	ALTER TABLE threads ADD COLUMN mcp_names TEXT NOT NULL DEFAULT '[]';
+	ALTER TABLE threads ADD COLUMN mcp_token_sha256 TEXT NOT NULL DEFAULT '';
+	CREATE INDEX threads_mcp_token ON threads (mcp_token_sha256) WHERE mcp_token_sha256 <> '';
+	`,
 ];

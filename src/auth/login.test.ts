@@ -108,6 +108,46 @@ describe("LoginManager", () => {
 		]);
 	});
 
+	test("an MCP login needs no broker token: the flow persists it and nothing is uploaded", async () => {
+		rmSync(tokenFile);
+		let persisted = 0;
+		const flow: LoginFlow = {
+			has: provider => provider.startsWith("mcp:"),
+			async run(provider, controller) {
+				controller.auth(AUTH_URL, "");
+				await controller.prompt("", controller.signal);
+				return {
+					...result(provider, "mcp.example.com"),
+					persist: async () => {
+						persisted++;
+					},
+				};
+			},
+		};
+		const logins = manager(flow);
+		const started = await logins.start("mcp:https://mcp.example.com/mcp");
+		expect(started).toMatchObject({ state: "waiting", url: AUTH_URL });
+		const finished = await logins.input(started.id, "http://localhost:3000/callback?code=c&state=s");
+		expect(finished).toMatchObject({ state: "done", account: "mcp.example.com", error: "" });
+		expect(persisted).toBe(1);
+		expect(uploads).toEqual([]);
+	});
+
+	test("a failed MCP login reports the flow's own message", async () => {
+		rmSync(tokenFile);
+		const logins = manager({ has: provider => provider.startsWith("mcp:"), run: async () => Promise.reject(new Error("the MCP server advertises no OAuth endpoints")) });
+		const started = await logins.start("mcp:https://mcp.example.com/mcp");
+		await until(() => stateOf(logins, started.id) === "failed");
+		expect(logins.get(started.id)?.error).toBe("the MCP server advertises no OAuth endpoints");
+	});
+
+	test("a provider that is not an MCP login still needs the broker token", async () => {
+		rmSync(tokenFile);
+		const logins = manager(scripted(async () => result()));
+		const started = await logins.start("anthropic");
+		expect(started).toMatchObject({ state: "failed", error: "cannot read the broker token file" });
+	});
+
 	test("a device-code login shows its code and finishes without input", async () => {
 		const release = Promise.withResolvers<void>();
 		const logins = manager(

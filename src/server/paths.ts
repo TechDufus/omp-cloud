@@ -6,6 +6,8 @@ export const SETTINGS_PATH = "/api/v1/settings";
 export const GITHUB_PATH = "/api/v1/github";
 /** Every route under this prefix is `handleSigning`'s: the SSH signing key. Owner only. */
 export const SIGNING_PATH = "/api/v1/signing";
+/** Every route under this prefix is `handleSecrets`'s: the service's secret store. Owner only. */
+export const SECRETS_PATH = "/api/v1/secrets";
 /** Public (no token): a device redeems a pairing offer. */
 export const REDEEM_PATH = "/api/v1/pairing/redeem";
 /** Public (no token): a device collects its token once the owner approved. */

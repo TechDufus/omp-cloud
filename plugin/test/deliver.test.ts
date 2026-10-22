@@ -53,6 +53,7 @@ function summary(over: Partial<HandoffSummary> = {}): HandoffSummary {
 		thinking: "high",
 		ompVersion: "18.12.3",
 		overlays: [],
+		mcp: [],
 		policy: [],
 		...over,
 	};
@@ -247,6 +248,7 @@ describe("launchCard", () => {
 			conversation: "included",
 			setupBytes: 10,
 			overlays: ["overlays/0-extra.yml"],
+			mcp: [],
 			policy: ["egress", "fetch"],
 			warnings: ["conversation too large"],
 		});

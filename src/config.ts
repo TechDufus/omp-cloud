@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { isRecord } from "./guards";
@@ -67,6 +68,11 @@ export interface RemoteConfig {
 	allow: string[];
 }
 
+/** The MCP proxy listener: the VMs reach it at the gateway address, so it binds an IP literal (never a wildcard). */
+export interface McpConfig {
+	listen: { hostname: string; port: number };
+}
+
 /** The service configuration, validated by `parseConfig`. */
 export interface Config {
 	listen: { hostname: string; port: number };
@@ -87,6 +93,8 @@ export interface Config {
 	dashboard?: DashboardConfig;
 	/** The TLS listener other machines pair with and use; absent means loopback only. */
 	remote?: RemoteConfig;
+	/** The MCP proxy the VMs reach their http MCP servers through; absent means http MCP servers are not offered. */
+	mcp?: McpConfig;
 }
 
 const RUNNER_DEFAULTS: RunnerConfig = {
@@ -219,6 +227,15 @@ function parseRemote(value: unknown): RemoteConfig | undefined {
 	return remote;
 }
 
+function parseMcp(value: unknown): McpConfig | undefined {
+	if (value === undefined) return undefined;
+	const rec = section(value, "mcp", ["listen"]);
+	const listen = parseListen(rec.listen, "mcp.listen");
+	if (isIP(listen.hostname) === 0) throw new Error("mcp.listen must be an IP address, not a host name");
+	if (listen.hostname === "0.0.0.0" || listen.hostname === "::") throw new Error("mcp.listen must be a specific address, not a wildcard");
+	return { listen };
+}
+
 function parseDashboard(value: unknown): DashboardConfig | undefined {
 	if (value === undefined) return undefined;
 	const rec = section(value, "dashboard", ["listen"], ["url"]);
@@ -335,7 +352,7 @@ function parseGit(value: unknown): GitConfig {
 
 /** Validates parsed JSON; throws an Error naming the offending field. */
 export function parseConfig(raw: unknown): Config {
-	const top = section(raw, "", ["listen", "apiTokenSha256", "dataDir", "vmon", "gateway", "broker", "models"], ["runner", "git", "dashboard", "remote"]);
+	const top = section(raw, "", ["listen", "apiTokenSha256", "dataDir", "vmon", "gateway", "broker", "models"], ["runner", "git", "dashboard", "remote", "mcp"]);
 	const listen = parseListen(top.listen);
 	if (!LOOPBACK_HOST.test(listen.hostname)) {
 		throw new Error('listen must be a loopback address; other machines connect through "remote" (the TLS listener)');
@@ -388,6 +405,7 @@ export function parseConfig(raw: unknown): Config {
 		git: parseGit(top.git),
 		dashboard: parseDashboard(top.dashboard),
 		remote: parseRemote(top.remote),
+		mcp: parseMcp(top.mcp),
 	};
 }
 

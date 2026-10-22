@@ -45,3 +45,15 @@ export function normalizeRemote(raw: string, hosts: readonly string[]): string {
 	const path = scp[3] ?? "";
 	return hosts.includes(host) ? `https://${host}/${path.replace(/^\/+/, "")}` : `${scp[2]}:${path}`;
 }
+
+/**
+ * `<host>/<path>` of a remote, lower-case, without a leading or trailing `/` and without a trailing `.git`: the form a
+ * repository glob of the secret store matches (`github.com/owner/repo`). Null for a remote that is neither a URL nor scp syntax.
+ */
+export function remoteKeyOf(raw: string): string | null {
+	const url = parseUrl(raw);
+	const host = remoteHostOf(raw);
+	const path = url !== null ? url.pathname : (SCP_FORM.exec(raw)?.[3] ?? null);
+	if (host === "" || path === null) return null;
+	return `${host}/${path.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "")}`.toLowerCase();
+}

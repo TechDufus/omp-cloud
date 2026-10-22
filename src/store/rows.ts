@@ -62,6 +62,7 @@ export interface ThreadRow {
 	idempotency_fingerprint: string;
 	pr_number: number;
 	pr_url: string;
+	mcp_names: string;
 }
 
 export interface TurnRow {
@@ -181,6 +182,7 @@ export function threadFromRow(row: ThreadRow): Thread {
 		session: row.session,
 		scratch: row.scratch === 1,
 		pr: row.pr_number === 0 ? null : { number: row.pr_number, url: row.pr_url },
+		mcpServers: JSON.parse(row.mcp_names) as string[],
 	};
 }
 
