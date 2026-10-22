@@ -9,3 +9,5 @@ node_modules/
 /docs/assets/src/
 # mise run site:build output.
 /site/dist/
+# Core dumps the kernel writes into the working directory (they can hold keys and tokens).
+core.[0-9]*
