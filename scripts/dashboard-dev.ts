@@ -924,12 +924,15 @@ const STEP_MS = 2500;
 const CHECK_MS = 1500;
 const MODES: readonly UpdateMode[] = ["off", "notify", "auto"];
 const CHECKOUT_MESSAGE = "this omp-cloud runs from a git checkout; update it with git pull and restart it";
+// Shaped like the feed's notes.md: the CHANGELOG section, so the modals exercise bold titles, code, links and long bullets.
 const RELEASE_NOTES = [
 	"## 0.5.1",
 	"",
-	"- The dashboard and the omp plugin show when an update is ready and restart to it on one click.",
-	"- Threads get short names and release their VM after a week idle; the next message restores them.",
-	"- vibemon is pinned per release: this one needs v0.4.1.",
+	"- **Updates from the dashboard.** The dashboard and the omp plugin show when an update is ready and restart to it on one click; `update.mode` `auto` installs by itself when that needs no downtime. See [Updating](https://github.com/TechDufus/omp-cloud/blob/main/docs/updating.md).",
+	"- **Short thread names.** Threads get short names and release their VM after a week idle; the next message restores them. Needs `git.push` `ask` or `auto`.",
+	"- **vibemon is pinned per release.** This one needs v0.4.1 and the *root helper*; a line that wraps onto",
+	"  a second source line stays one bullet.",
+	"- A plain bullet without a title, with an unsafe [link](javascript:alert(1)) shown as text.",
 ].join("\n");
 const FIRST_NOTES = "## 0.5.0\n\n- First release with a managed install.";
 

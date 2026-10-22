@@ -1,6 +1,7 @@
 /** Settings' "Updates" card: where the service's own update stands, its mode, and the components an update touches. */
 import { useState } from "react";
 import { putSettings, type UpdateMode, type UpdateStatus } from "../api";
+import { Markdown } from "../app/Markdown";
 import { checkedText, vmonRow } from "../app/update";
 import { useUpdate } from "../app/update-context";
 import { dateTime } from "../format";
@@ -166,7 +167,7 @@ export function UpdateCard({ onModeChanged }: { onModeChanged: () => void }) {
 			</div>
 			{status.latest && (
 				<Modal open={reading} title={`omp-cloud ${status.latest.version}`} onClose={() => setReading(false)} cancelLabel="Close">
-					<p className="update-notes">{notes}</p>
+					<Markdown className="update-notes" source={notes} />
 				</Modal>
 			)}
 		</Card>

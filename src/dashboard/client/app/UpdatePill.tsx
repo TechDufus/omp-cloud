@@ -2,6 +2,7 @@
 import { CircleArrowUp, CircleCheck, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import { useState } from "react";
 import { Modal } from "../kit/ui";
+import { Markdown } from "./Markdown";
 import { useUpdate } from "./update-context";
 
 export function UpdatePill() {
@@ -67,7 +68,7 @@ export function UpdatePill() {
 						</button>
 					</span>
 					<Modal open={reading} title={`omp-cloud ${pill.version}`} onClose={() => setReading(false)} cancelLabel="Close">
-						<p className="update-notes">{pill.notes.trim()}</p>
+						<Markdown className="update-notes" source={pill.notes} />
 					</Modal>
 				</>
 			);
