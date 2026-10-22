@@ -7,6 +7,7 @@ import type { CloudConfig, Env } from "./config";
 import { MAX_CONVERSATION_BYTES, packConversation, type ConversationResult } from "./conversation";
 import { CloudError, toCloudError } from "./errors";
 import { planExtensions } from "./extensions";
+import { loginHint } from "./login";
 import { generateName, type TitleGenerator } from "./naming";
 import { sessionOverlays } from "./overlays";
 import { refusePairingCode } from "./pairing";
@@ -97,6 +98,8 @@ export interface LaunchBatchInput {
 	cfg: CloudConfig;
 	client: Pick<CloudClient, "createThread" | "whoami" | "requireCapability">;
 	tasks: LaunchTask[];
+	/** The host of the server when this machine is a paired device (it cannot log the server in); undefined on the owner token. */
+	serverHost?: string;
 	/** Prepended to every task's prompt. */
 	context?: string;
 	origin: ThreadOrigin;
@@ -158,10 +161,10 @@ export function modelServed(patterns: readonly string[], model: string): boolean
 }
 
 /** Stops a handoff whose model the cloud cannot run, before anything is packed or uploaded. */
-export function assertModelServed(who: Pick<Whoami, "modelPatterns">, model: string): void {
+export function assertModelServed(who: Pick<Whoami, "modelPatterns">, model: string, serverHost?: string): void {
 	if (model === "" || modelServed(who.modelPatterns, model)) return;
 	const provider = model.split("/")[0] ?? model;
-	throw new UserError(`☁ the cloud cannot run ${provider} models yet: /cloud login ${provider}`);
+	throw new UserError(`☁ the cloud cannot run ${provider} models yet: ${loginHint(provider, serverHost)}`);
 }
 
 function invalid(message: string, hint?: string): CloudError {
@@ -247,7 +250,7 @@ function planTask(input: LaunchBatchInput, who: Whoami, index: number, fallback:
 		model = split.id;
 		thinking = task.thinking ?? split.thinking;
 	}
-	assertModelServed(who, model);
+	assertModelServed(who, model, input.serverHost);
 	const workspace = task.workspace ?? fallback;
 	if (workspace === "repo" && fallback === "scratch") {
 		throw invalid(`${input.host.cwd} is not a git repository with at least one commit, which workspace "repo" needs`, `use workspace "scratch" for work that is not tied to a repository`);

@@ -303,6 +303,20 @@ describe("model refusal", () => {
 		expect(uploads).toEqual([]);
 	});
 
+	test("on a paired device the refusal sends the owner to the server, with its host and the provider, and never to /cloud login", async () => {
+		const s = await setup();
+		const built = input(s, { model: { provider: "openai-codex", id: "gpt-5" } }, realClient());
+
+		const err = await launchHandoff({ ...built.input, serverHost: "10.0.20.24" }).catch((e: unknown) => e);
+
+		expect(err).toBeInstanceOf(CloudError);
+		expect((err as CloudError).message).toBe(
+			"the cloud cannot run openai-codex models yet: log the server in: run omp-cloud login openai-codex on 10.0.20.24 (over ssh: ssh -t <user>@10.0.20.24 '~/.local/bin/omp-cloud login openai-codex')",
+		);
+		expect((err as CloudError).message).not.toContain("/cloud login");
+		expect(uploads).toEqual([]);
+	});
+
 	test("createThread is never called for a refused model", async () => {
 		const s = await setup();
 		const created: HandoffParts[] = [];

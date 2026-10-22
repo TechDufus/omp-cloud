@@ -63,6 +63,15 @@ function isCertificateFailure(e: unknown): boolean {
 	return /CERT|SELF_SIGNED|ERR_TLS|UNABLE_TO_VERIFY/i.test(code) || /certificate|self.signed/i.test(e.message);
 }
 
+function pinKey(pin: ServerPin): string {
+	return `${pin.fingerprint} ${pin.addresses.join(",")}`;
+}
+
+/** The address of `pin` the next request tries first: the last one that answered in this process, else the first stored. */
+export function usedAddress(pin: ServerPin): string {
+	return lastGood.get(pinKey(pin)) ?? pin.addresses[0] ?? "";
+}
+
 /**
  * A fetch that trusts only `pin`'s certificate: `tls.ca` is that certificate, the host name is not checked,
  * redirects are refused, and the stored addresses are tried in order (the last good one first) when a connection fails.
@@ -70,7 +79,7 @@ function isCertificateFailure(e: unknown): boolean {
  */
 export function pinnedFetch(pin: ServerPin): FetchFn {
 	const ca = certificatePem(pin.certificate);
-	const key = `${pin.fingerprint} ${pin.addresses.join(",")}`;
+	const key = pinKey(pin);
 	return async (input, init) => {
 		const url = new URL(input);
 		url.protocol = "https:";

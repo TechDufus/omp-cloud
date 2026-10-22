@@ -249,6 +249,48 @@ describe("launch text that holds a pairing code", () => {
 	});
 });
 
+describe("provider login on a paired device", () => {
+	const noProviders = (req: Request, url: URL): Response => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", modelPatterns: [], models: [], device: PAIRING_DEVICE })) : answerWhoami(req, url));
+
+	test("/cloud login makes no request and says the server machine does it, naming the host the client reaches", async () => {
+		const svc = fakeTls(cert, noProviders);
+		// The first address refuses connections: the client settles on the second, which is the one the guidance must name.
+		const r = await pairedRig(["127.0.0.2:1", svc.address]);
+		await run(r, "status");
+		expect(notes(r)).toContain("no providers yet (log the server in: run omp-cloud login <provider> on 127.0.0.1 (over ssh: ssh -t <user>@127.0.0.1 '~/.local/bin/omp-cloud login <provider>'))");
+		r.host.notes.length = 0;
+		const before = svc.seen.length;
+
+		await run(r, "login anthropic");
+
+		expect(r.host.notes).toEqual([
+			["☁ a paired device cannot log the cloud in: log the server in: run omp-cloud login anthropic on 127.0.0.1 (over ssh: ssh -t <user>@127.0.0.1 '~/.local/bin/omp-cloud login anthropic')", "error"],
+		]);
+		expect(svc.seen).toHaveLength(before);
+		expect(notes(r)).not.toContain(r.connection.token);
+	});
+
+	test("a handoff of a model the cloud cannot run says the same, and uploads nothing", async () => {
+		const svc = fakeTls(cert, (_req, url) => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", device: PAIRING_DEVICE, capabilities: ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch"] })) : Response.json({ error: "not found" }, { status: 404 })));
+		const r = await pairedRig([svc.address], cert, undefined, {}, { model: { provider: "google", id: "gemini-3" } });
+
+		const out = await runTool({ cloud: r.cloud, ctx: r.host.host, toolCallId: "call-1" }, { op: "delegate", task: "x" });
+
+		expect(out.isError).toBe(true);
+		const text = out.content[0]?.text ?? "";
+		expect(text).toContain("the cloud cannot run google models yet: log the server in: run omp-cloud login google on 127.0.0.1 (over ssh: ssh -t <user>@127.0.0.1 '~/.local/bin/omp-cloud login google')");
+		expect(text).not.toContain("/cloud login");
+		expect(svc.seen.some(s => s.method === "POST")).toBe(false);
+	});
+
+	test("an owner connection keeps /cloud login", async () => {
+		const svc = plainService((req, url) => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", modelPatterns: [] })) : answerWhoami(req, url)));
+		const r = await rig(`url: ${svc.origin}\ntoken: tok\n`);
+		await run(r, "status");
+		expect(notes(r)).toContain("no providers yet (/cloud login <provider>)");
+	});
+});
+
 describe("the watcher follows the connection", () => {
 	test("a token or pin that changes rebuilds it: the next watch uses the new credential", async () => {
 		const svc = fakeTls(cert, (_req, url) => {

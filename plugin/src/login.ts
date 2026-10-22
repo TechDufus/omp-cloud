@@ -5,10 +5,29 @@
  */
 
 import type { CloudClient } from "./api";
+import type { PairedConnection } from "./connection";
 import { CloudError } from "./errors";
+import { parseServerAddress } from "./pairing";
+import { usedAddress } from "./transport";
 import { UserError, type HostUi, type Login } from "./types";
 
 export type LoginApi = Pick<CloudClient, "startLogin" | "login" | "loginInput" | "cancelLogin">;
+
+/** The host of the server a paired connection uses (the address that answered last, without its port); undefined for a connection that is not paired. */
+export function serverHostOf(paired: PairedConnection | undefined): string | undefined {
+	if (!paired) return undefined;
+	const address = usedAddress(paired.server);
+	return parseServerAddress(address)?.host ?? address;
+}
+
+/**
+ * What to tell the user who needs the broker logged in to `provider`. The owner token (`serverHost` undefined) runs
+ * `/cloud login`; a paired device cannot, so it is pointed at the server machine, where `omp-cloud login` works.
+ */
+export function loginHint(provider: string, serverHost: string | undefined): string {
+	if (serverHost === undefined) return `/cloud login ${provider}`;
+	return `log the server in: run omp-cloud login ${provider} on ${serverHost} (over ssh: ssh -t <user>@${serverHost} '~/.local/bin/omp-cloud login ${provider}')`;
+}
 
 export interface RunLoginOptions {
 	pollMs?: number;

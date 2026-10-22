@@ -55,7 +55,7 @@ interface Made {
 	inbox: Inbox;
 }
 
-async function make(list: ThreadSummary[], api: Partial<HubApi> = {}, followOptions: FollowOptions = { backoffMs: () => 1 }, pollMs?: number, inbox: Inbox = new Inbox()): Promise<Made> {
+async function make(list: ThreadSummary[], api: Partial<HubApi> = {}, followOptions: FollowOptions = { backoffMs: () => 1 }, pollMs?: number, inbox: Inbox = new Inbox(), serverHost?: string): Promise<Made> {
 	const tui = await loadTui();
 	if (!tui) throw new Error("the host pi-tui is required for the hub tests");
 	const results: (HubResult | undefined)[] = [];
@@ -80,7 +80,7 @@ async function make(list: ThreadSummary[], api: Partial<HubApi> = {}, followOpti
 		events: feed.source,
 		...api,
 	};
-	const hub = new HubComponent({ api: full, theme, tui, requestRender: () => void renders++, done: r => void results.push(r), now: () => NOW, pollMs, followOptions, inbox });
+	const hub = new HubComponent({ api: full, theme, tui, requestRender: () => void renders++, done: r => void results.push(r), now: () => NOW, pollMs, followOptions, inbox, serverHost });
 	await hub.refresh();
 	return { hub, feed, results, calls, renders: () => renders, inbox };
 }
@@ -103,6 +103,13 @@ describe("HubComponent", () => {
 	test("a cloud that runs no provider says how to add one", async () => {
 		const { hub } = await make(threads, { whoami: async () => whoami({ modelPatterns: [] }) });
 		expect(hub.render(130).join("\n")).toContain("no providers (/cloud login <provider>)");
+	});
+
+	test("on a paired device a cloud with no provider points at the server, not at /cloud login", async () => {
+		const { hub } = await make(threads, { whoami: async () => whoami({ modelPatterns: [] }) }, undefined, undefined, undefined, "10.0.20.24");
+		const text = hub.render(300).join("\n");
+		expect(text).toContain("no providers (log the server in: run omp-cloud login <provider> on 10.0.20.24");
+		expect(text).not.toContain("/cloud login");
 	});
 
 	describe("an update of the service", () => {

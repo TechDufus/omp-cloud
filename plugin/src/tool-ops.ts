@@ -187,12 +187,14 @@ export async function info(env: Env): Promise<OpOutput> {
 	const shown = ids.slice(0, MODELS_LISTED).join(", ");
 	const l = who.limits;
 	const spend = who.spend === null ? "not reported by this service" : `${money(who.spend.todayUSD)} today, ${who.spend.dayCapUSD > 0 ? `day cap ${money(who.spend.dayCapUSD)}` : "no day cap"}`;
+	// A device cannot log the broker in: its owner does that on the server machine.
+	const loginOwner = who.device ? "the owner logs the server in with `omp-cloud login <provider>` on the server machine" : "the owner can run /cloud login <provider>";
 	const lines = [
 		`service: omp-cloud ${version} · you are ${caller} (${who.user})`,
 		`capabilities: ${who.capabilities.length > 0 ? who.capabilities.join(", ") : "none reported"}`,
-		`models: ${ids.length > 0 ? `${shown}${ids.length > MODELS_LISTED ? ` and ${ids.length - MODELS_LISTED} more` : ""}` : "none yet (the owner can run /cloud login <provider>)"}`,
+		`models: ${ids.length > 0 ? `${shown}${ids.length > MODELS_LISTED ? ` and ${ids.length - MODELS_LISTED} more` : ""}` : `none yet (${loginOwner})`}`,
 		`default model: ${who.defaultModel || "none"} (used only for a delegation that names no model; a delegation runs this session's model unless model is set)`,
-		`this session's model: ${model || "none"}${model !== "" ? (modelServed(who.modelPatterns, model) ? " (the cloud can run it)" : " (the cloud cannot run it yet: delegate with another model, or the owner runs /cloud login)") : ""}`,
+		`this session's model: ${model || "none"}${model !== "" ? (modelServed(who.modelPatterns, model) ? " (the cloud can run it)" : ` (the cloud cannot run it yet: delegate with another model, or ${loginOwner})`) : ""}`,
 		`limits: message ${l.maxMessageBytes} bytes · answer ${l.maxAnswerBytes} bytes · upload ${formatTokens(l.maxUploadBytes)}B · list ${l.listMax} · turns per thread ${l.maxTurns}`,
 		`spend: ${spend}`,
 		`vms: ${who.vms.running} running, ${who.vms.paused} paused`,

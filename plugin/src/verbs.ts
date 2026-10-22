@@ -26,7 +26,7 @@ import { HubComponent, type HubResult } from "./hub";
 import { Inbox } from "./inbox";
 import { ProgramStatus, type TerminalSink } from "./program-status";
 import { launchBatch, type LaunchedThread } from "./launch";
-import { loginLines, runLogin } from "./login";
+import { loginHint, loginLines, runLogin, serverHostOf } from "./login";
 import { PairComponent, type PairOutcome } from "./pair";
 import { refusePairingCode } from "./pairing";
 import { applyPull, isClean, notInRepository, pullBundle, type Applied } from "./pull";
@@ -591,13 +591,16 @@ export class Cloud implements CardActions, ToolCloud {
 		if (parsed.kind === "connect") return this.#connect(ctx, parsed);
 		if (parsed.kind === "disconnect") return this.#disconnect(ctx, parsed.force);
 
-		// The TUI shows the sign-in link as a card, and a card waits for an idle agent: refuse before a login starts rather than prompt with no link on screen.
-		if (parsed.kind === "login" && ctx.mode === "tui" && !ctx.isIdle()) {
-			throw new UserError("☁ the agent is working: run /cloud login again when it is idle, so the sign-in link can go in the transcript");
-		}
 		const s = await this.#session(ctx, "quick");
 		if (parsed.kind === "update") return this.#updateCommand(ctx, s);
 		if (parsed.kind === "login") {
+			// A paired device is refused before any service call: every login route is owner-token only.
+			const serverHost = serverHostOf(s.conn.paired);
+			if (serverHost !== undefined) throw new UserError(`☁ a paired device cannot log the cloud in: ${loginHint(parsed.provider, serverHost)}`);
+			// The TUI shows the sign-in link as a card, and a card waits for an idle agent: refuse before a login starts rather than prompt with no link on screen.
+			if (ctx.mode === "tui" && !ctx.isIdle()) {
+				throw new UserError("☁ the agent is working: run /cloud login again when it is idle, so the sign-in link can go in the transcript");
+			}
 			const show = ctx.mode === "tui" ? (l: Login) => this.#deliver.post(ctx, loginCard(l)) : (l: Login) => ctx.ui.notify(loginLines(l).join("\n"), "info");
 			await runLogin(s.client, ctx.ui, parsed.provider, show);
 			return;
@@ -720,7 +723,7 @@ export class Cloud implements CardActions, ToolCloud {
 			const thinking = this.#pi.getThinkingLevel();
 			lines.push(
 				`  user: ${who.user}`,
-				`  runs: ${providers.length > 0 ? providers.join(", ") : "no providers yet (/cloud login <provider>)"}`,
+				`  runs: ${providers.length > 0 ? providers.join(", ") : `no providers yet (${loginHint("<provider>", serverHostOf(conn.paired))})`}`,
 				model === ""
 					? `  a handoff from here runs: the service's fallback model, ${who.defaultModel || "none"}`
 					: `  a handoff from here runs: ${model}${thinking ? ` (thinking ${thinking})` : ""}, this session's model`,
@@ -830,6 +833,7 @@ export class Cloud implements CardActions, ToolCloud {
 					(tuiHost, theme, _keybindings, done) => {
 						built = true;
 						const hub = new HubComponent({
+							serverHost: serverHostOf(s.conn.paired),
 							// Explicit arrows: the hub hands `events` to the follower as a bare function.
 							api: {
 								whoami: async () => {
@@ -1261,6 +1265,7 @@ export class Cloud implements CardActions, ToolCloud {
 				pi: this.#pi,
 				cfg: s.cfg,
 				client: s.client,
+				serverHost: serverHostOf(s.conn.paired),
 				tasks: [{ task, workspace: "repo" }],
 				origin: "user",
 				sessionId: this.#sessionId(ctx),
@@ -1300,6 +1305,7 @@ export class Cloud implements CardActions, ToolCloud {
 				pi: this.#pi,
 				cfg: s.cfg,
 				client: s.client,
+				serverHost: serverHostOf(s.conn.paired),
 				tasks: request.tasks,
 				context: request.context,
 				origin: "tool",

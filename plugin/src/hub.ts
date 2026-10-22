@@ -14,6 +14,7 @@ import { eventLines, lineLabel, lineText } from "./event-lines";
 import { follow, LIFECYCLE_KINDS, type EventSource, type Follower, type FollowOptions } from "./events";
 import { clip, firstLines, formatAge, metricsLine, phaseIcon, plural, threadHeading, threadTag } from "./format";
 import type { Inbox } from "./inbox";
+import { loginHint } from "./login";
 import { repoLabel } from "./repo-key";
 import type { ThreadDetail, ThreadEvent, ThreadSummary, Whoami } from "./types";
 
@@ -39,6 +40,8 @@ export interface HubDeps {
 	tui: Pick<TuiModule, "truncateToWidth" | "matchesKey" | "node" | "text" | "span" | "col" | "row" | "propNode" | "stableKey">;
 	requestRender(): void;
 	done(result: HubResult | undefined): void;
+	/** The host of the server when this machine is a paired device, which cannot log the server in; undefined on the owner token. */
+	serverHost?: string;
 	now?(): number;
 	pollMs?: number;
 	followOptions?: FollowOptions;
@@ -346,7 +349,7 @@ export class HubComponent implements Component {
 		if (who) {
 			const providers = patternProviders(who.modelPatterns);
 			const facts = [
-				{ k: "runs", v: providers.length > 0 ? providers.join(", ") : "no providers · /cloud login <provider>" },
+				{ k: "runs", v: providers.length > 0 ? providers.join(", ") : `no providers · ${loginHint("<provider>", this.#d.serverHost)}` },
 				{ k: "model", v: `threads run their session's model (fallback ${who.defaultModel || "none"})` },
 				{ k: "omp", v: who.ompVersion || "?" },
 				{ k: "VMs", v: `${who.vms.running} running · ${who.vms.paused} paused` },
@@ -460,9 +463,9 @@ export class HubComponent implements Component {
 		const who = this.#who;
 		if (who) {
 			const providers = patternProviders(who.modelPatterns);
-			lines.push(
-				`  runs ${providers.length > 0 ? providers.join(", ") : theme.fg("warning", "no providers (/cloud login <provider>)")} · threads run their session's model (fallback ${who.defaultModel || "none"}) · omp ${who.ompVersion || "?"}`,
-			);
+			const tail = `threads run their session's model (fallback ${who.defaultModel || "none"}) · omp ${who.ompVersion || "?"}`;
+			if (providers.length > 0) lines.push(`  runs ${providers.join(", ")} · ${tail}`);
+			else lines.push(`  runs ${theme.fg("warning", `no providers (${loginHint("<provider>", this.#d.serverHost)})`)}`, `  ${tail}`);
 			const c = who.threads;
 			lines.push(theme.fg("muted", `  VMs ${who.vms.running} running, ${who.vms.paused} paused · threads ${c.working} working, ${c.waiting} waiting, ${c.idle} idle, ${c.failed} failed`));
 		}

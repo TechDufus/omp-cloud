@@ -343,6 +343,20 @@ describe("info", () => {
 		expect(t).toContain("capabilities: none reported");
 	});
 
+	test("a device is told the owner logs the server in on the server machine; the owner connection names /cloud login", async () => {
+		const r = rig();
+		r.host = fakeHost({ model: { provider: "google", id: "gemini-3" } }).host;
+		r.w.who = whoami({ device: { id: "d1", name: "laptop" }, models: [], modelPatterns: [] });
+		const device = text(await call(r, { op: "info" }));
+		expect(device).toContain("models: none yet (the owner logs the server in with `omp-cloud login <provider>` on the server machine)");
+		expect(device).toContain("the cloud cannot run it yet: delegate with another model, or the owner logs the server in with `omp-cloud login <provider>` on the server machine");
+		expect(device).not.toContain("/cloud login");
+
+		r.w.who = whoami({ models: [], modelPatterns: [] });
+		const owner = text(await call(r, { op: "info" }));
+		expect(owner).toContain("models: none yet (the owner can run /cloud login <provider>)");
+	});
+
 	test("the update state is one line: ready for the owner names the command, for a device it names the owner, a service that reports none says nothing", async () => {
 		const r = rig();
 		r.w.who = whoami({ update: { state: "ready", available: "0.5.1" } });
