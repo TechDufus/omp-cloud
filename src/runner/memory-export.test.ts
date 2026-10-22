@@ -1,13 +1,13 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GatewayClients } from "../gateway/clients";
 import type { Store } from "../store";
 import type { Turn } from "../store/types";
 import { type Exec, ExecError, execFailure, localExec } from "./exec";
-import { exportMemory, memoryExportScript, VM_MEMORY_DIR } from "./memory-export";
+import { exportMemory, memoryExportScript, NO_MEMORY, NO_SQLITE, VM_MEMORY_DIR } from "./memory-export";
 import { exit, fakeVm, fakeVmon, type FakeVm, HEAD, openEnv, promptResult, response, sandboxWithOmp, seedThread } from "./test-support";
 import { type ThreadEnv, ThreadRunner } from "./thread";
 
@@ -63,15 +63,15 @@ describe("memoryExportScript", () => {
 		expect(await Bun.file(join(dir, "work")).exists()).toBe(false);
 	});
 
-	test("the script exits 3 without a memory directory and 4 without sqlite3", async () => {
+	test("the script exits NO_MEMORY without a memory directory and NO_SQLITE without sqlite3", async () => {
 		const script = (src: string) => memoryExportScript(src, join(dir, "work"), join(dir, "out.tar"));
 		const missing = await localExec()(script(join(dir, "none"))).catch((error: unknown) => error);
 		if (!(missing instanceof ExecError)) throw new Error("the script did not fail");
-		expect(missing.exitCode).toBe(3);
+		expect(missing.exitCode).toBe(NO_MEMORY);
 		await mkdir(join(dir, "mem"));
 		const noSqlite = await withoutSqlite3()(script(join(dir, "mem"))).catch((error: unknown) => error);
 		if (!(noSqlite instanceof ExecError)) throw new Error("the script did not fail");
-		expect(noSqlite.exitCode).toBe(4);
+		expect(noSqlite.exitCode).toBe(NO_SQLITE);
 	});
 
 	test.skipIf(!HAS_SQLITE3)("snapshots the default store and every bank that has a database, skipping directories without one", async () => {
@@ -141,9 +141,28 @@ describe("memoryExportScript", () => {
 		await mkdir(src, { recursive: true });
 		await writeFile(join(src, "mnemopi.db"), "this is not a database, just text that is long enough to be read as a header");
 		const failure = await exportMemory(localExec(), { src, work: join(dir, "work"), tarPath: join(dir, "out.tar") }).catch((error: unknown) => error);
-		expect(execFailure(failure)).toMatch(/^exit 1: .*(not a database|file is not a database)/i);
+		// sqlite3's exit status is its own: 1 on Debian's 3.46, SQLite's result code (26, SQLITE_NOTADB) on newer ones.
+		expect(execFailure(failure)).toMatch(/^exit \d+: .*not a database/i);
+		expect([NO_MEMORY, NO_SQLITE]).not.toContain((failure as ExecError).exitCode);
 		expect(execFailure(new ExecError("true", 2, "\n"))).toBe("exit 2, no error output");
 		expect(execFailure(new Error("boom"))).toBe("boom");
+	});
+
+	// A newer sqlite3 exits with SQLite's result code, so a failure can exit 3 (SQLITE_PERM) or 4 (SQLITE_ABORT), the
+	// codes the script used for its skips before; a failure must stay a failure whatever code sqlite3 picks.
+	test.each([3, 4, 26])("a sqlite3 that fails with exit %i is a failure, never a skip", async code => {
+		const bin = join(dir, "bin");
+		await mkdir(bin, { recursive: true });
+		await writeFile(join(bin, "sqlite3"), `#!/bin/sh\necho "Error: stepping, failed (${code})" >&2\nexit ${code}\n`);
+		await chmod(join(bin, "sqlite3"), 0o755);
+		const src = join(dir, "mem");
+		await mkdir(src, { recursive: true });
+		await writeFile(join(src, "mnemopi.db"), "");
+		const exec = localExec();
+		const fake: Exec = (command, options) => exec(`PATH=${bin}:$PATH; ${command}`, options);
+		const failure = await exportMemory(fake, { src, work: join(dir, "work"), tarPath: join(dir, "out.tar") }).catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(ExecError);
+		expect(execFailure(failure)).toBe(`exit ${code}: Error: stepping, failed (${code})`);
 	});
 
 	test("the VM's default directory is omp's mnemopi store under the agent dir", () => {
@@ -208,7 +227,7 @@ describe("the turn's memory export", () => {
 		expect(noticesOf(id)).toEqual([]);
 	});
 
-	test.each([3, 4])("exit %i (no memory, or no sqlite3 in the VM) stores nothing and says nothing", async code => {
+	test.each([NO_MEMORY, NO_SQLITE])("exit %i (no memory, or no sqlite3 in the VM) stores nothing and says nothing", async code => {
 		const vm = fakeVm({
 			dirty: false,
 			head: HEAD,

@@ -4,19 +4,23 @@ import { VM_AGENT_DIR } from "./vm-layout";
 /** Where omp's mnemopi backend keeps the VM's memories: the default store and one `banks/<name>/` per project bank. */
 export const VM_MEMORY_DIR = `${VM_AGENT_DIR}/memories/mnemopi`;
 
-/** The script's exit code for a VM without any memory directory. */
-const NO_MEMORY = 3;
+/**
+ * The script's exit code for a VM without any memory directory. The skip codes sit outside what the script's commands
+ * exit with: a newer `sqlite3` exits with SQLite's primary result code (1 to 28, 100, 101), so 3 (SQLITE_PERM) or 4
+ * (SQLITE_ABORT) would otherwise read as a skip.
+ */
+export const NO_MEMORY = 90;
 /** The script's exit code for a VM built from a template without `sqlite3`. */
-const NO_SQLITE = 4;
+export const NO_SQLITE = 91;
 
 /**
  * The shell script that snapshots every mnemopi database under `src` with `VACUUM INTO` (a consistent copy while omp may
- * hold the database open) into `out` and tars the result to `tarPath`. Exits 3 when there is no memory directory and 4
- * when `sqlite3` is missing.
+ * hold the database open) into `out` and tars the result to `tarPath`. Exits `NO_MEMORY` when there is no memory
+ * directory and `NO_SQLITE` when `sqlite3` is missing.
  *
  * The body is a subshell on purpose. The sandbox runs commands through `bash -l -c`, and a login shell that leaves through
  * `exit` while `set -e` is on runs `~/.bash_logout` under it: the VM image's ends in `[ -x /usr/bin/clear_console ] && ...`,
- * which fails and turns every exit code (3, 4, even 0) into 1. `set -e` inside a subshell never reaches the login shell,
+ * which fails and turns every exit code (even 0) into 1. `set -e` inside a subshell never reaches the login shell,
  * which ends normally with the subshell's status.
  */
 export function memoryExportScript(src: string, out: string, tarPath: string): string {
