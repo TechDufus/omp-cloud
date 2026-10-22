@@ -6,6 +6,8 @@ import {
 	type EventRow,
 	type IrcInboxRow,
 	ircInboundFromRow,
+	environmentOf,
+	type EnvironmentRowRaw,
 	eventFromRow,
 	type QuestionRow,
 	questionFromRow,
@@ -36,6 +38,7 @@ import {
 	type ClaimOutcome,
 	type Device,
 	deviceActor,
+	type EnvironmentRow,
 	IRC_IN_EVENT,
 	IRC_NAME_PATTERN,
 	IRC_OUT_EVENT,
@@ -282,8 +285,8 @@ export class Store {
 						`INSERT INTO threads (id, owner, phase, title, name, model, thinking, repo_name, repo_remote_url, repo_base_ref,
 							repo_base_commit, repo_handoff_commit, repo_local_branch, home, workspace, author_name, author_email,
 							secret_files, secret_env, config_overlays, omp_version, policy, created_at, last_activity_at,
-							origin, ref, session, scratch, idempotency_key, idempotency_fingerprint, mcp_names, memory_bank)
-						VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+							origin, ref, session, scratch, idempotency_key, idempotency_fingerprint, mcp_names, memory_bank, setup_run, setup_cache_files)
+						VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 					)
 					.run(
 						id,
@@ -317,6 +320,8 @@ export class Store {
 						input.idempotency?.fingerprint ?? "",
 						JSON.stringify(input.mcpServers ?? []),
 						input.memoryBank ?? "",
+						input.setup?.run ?? "",
+						JSON.stringify(input.setup?.cacheFiles ?? []),
 					);
 				this.insertTurn(m, 1, input.prompt, input.sentBy ?? input.owner);
 			},
@@ -1205,6 +1210,45 @@ export class Store {
 			.query<{ url: string }, []>("SELECT url FROM mcp_credentials ORDER BY url")
 			.all()
 			.map((row) => row.url);
+	}
+
+	// ---- repository environments
+
+	/** The cached environment under `key`; null for none. */
+	environment(key: string): EnvironmentRow | null {
+		const row = this.db
+			.query<EnvironmentRowRaw, [string]>("SELECT key, snapshot_id, template, repo, created_at, last_used_at FROM environments WHERE key = ?")
+			.get(key);
+		return row === null ? null : environmentOf(row);
+	}
+
+	/** Every cached environment, oldest first. */
+	environments(): EnvironmentRow[] {
+		return this.db
+			.query<EnvironmentRowRaw, []>("SELECT key, snapshot_id, template, repo, created_at, last_used_at FROM environments ORDER BY created_at, key")
+			.all()
+			.map(environmentOf);
+	}
+
+	/** Records the environment `key` built now, replacing an earlier row of the key. */
+	putEnvironment(input: { key: string; snapshotId: string; template: string; repo: string }): void {
+		const at = this.now().toISOString();
+		this.db
+			.query(
+				`INSERT INTO environments (key, snapshot_id, template, repo, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)
+				ON CONFLICT (key) DO UPDATE SET snapshot_id = excluded.snapshot_id, template = excluded.template, repo = excluded.repo, created_at = excluded.created_at, last_used_at = excluded.last_used_at`,
+			)
+			.run(input.key, input.snapshotId, input.template, input.repo, at, at);
+	}
+
+	/** Marks the environment `key` used now. */
+	touchEnvironment(key: string): void {
+		this.db.query("UPDATE environments SET last_used_at = ? WHERE key = ?").run(this.now().toISOString(), key);
+	}
+
+	/** False when no environment has this key. */
+	deleteEnvironment(key: string): boolean {
+		return this.db.query("DELETE FROM environments WHERE key = ?").run(key).changes > 0;
 	}
 
 	// ---- devices and pairing offers

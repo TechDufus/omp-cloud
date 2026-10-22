@@ -16,6 +16,7 @@ Every `/cloud` command the plugin adds to omp, where finished turns and question
 | `/cloud stop <id>` | Stop the running turn, cancel queued ones. Cancelling the thread's job in omp's jobs panel, `/jobs` or `proc://<id>/kill` stops the turn too; omp's own cleanup on `/clear`, a switch or a branch does not ([jobs](jobs.md#cancelling)) |
 | `/cloud pull <id> [--into <dir>]` | Fetch the result branch `omp-cloud/<id>` and save the cloud conversation as a local omp session. With `--into <dir>` a repository thread's result is checked out in a new worktree there, and a [scratch thread's](cloud-tool.md#scratch-threads) result is cloned into the new directory. It also [merges the cloud agent's new memories](#memory) into your Mnemopi store |
 | `/cloud resume <id>` | Check out `omp-cloud/<id>` and continue its conversation locally; needs a clean working tree. It also [merges the cloud agent's new memories](#memory) |
+| `/cloud preview <id> <port>` · `/cloud preview stop` | Open a web server the cloud agent runs on `<port>` of its VM in your browser, through a forwarder on `http://localhost:<lp>/`; `stop` ends every preview. See [Previews](#previews) |
 | `/cloud delete <id>` | After a confirmation, delete the thread, its VM and gateway client |
 | `/cloud login <provider>` | Log the cloud broker in to a provider (the server machine's owner connection only). The provider's sign-in link (and a device code, when it uses one) is posted in the transcript as a card to click or copy, then omp asks for the redirect URL or code the browser ended on. In omp's interactive UI the agent must be idle, so the card can appear at once. A paired device is refused before any request and told to run `omp-cloud login <provider>` on the server (over ssh: `ssh -t <user>@<host> '~/.local/bin/omp-cloud login <provider>'`); the same pointer replaces `/cloud login` in a handoff refused for a provider the cloud cannot run, in `/cloud status` and in the hub. `/cloud login mcp:<https url>` logs the service in to an MCP server's OAuth instead of a provider ([Secrets and MCP servers](secrets-and-mcp.md#logging-the-service-in-to-an-mcp-server)) |
 | `/cloud update` | Check the service for a newer omp-cloud; for the owner, when one is ready, confirm and restart the service to install it. A paired device is told what the service says |
@@ -40,6 +41,8 @@ A reference that matches several threads at one step is refused with up to 10 ca
 
 `/cloud <task>` also ships the MCP servers of your `~/.omp/agent/mcp.json` when the service has an MCP proxy. The launch card has an `mcp` row, `<name> (via the service)` for an http server and `<name> (in the VM)` for a stdio one, and a warning for each server or setting that stayed on your machine (`<name> points at this machine and is not shipped`, `<file>: <key> stays on this machine`, `<name> may need a cloud login: /cloud login mcp:<url>`): [Secrets and MCP servers](secrets-and-mcp.md).
 
+When the repository's `.omp-cloud.yml` has a `setup` script, the launch card also has an `env setup` row (`cached by bun.lock`, `cached by the default lockfiles` or `cached by the setup script alone`): the cloud installs your dependencies once and starts later threads on the repository from that result ([Environments](environments.md#per-repository-environments)). A service too old to run it gets the warning `the cloud service cannot run the setup of .omp-cloud.yml; it is not shipped`, and a `setup` in your personal config is ignored with `setup belongs in a repository's .omp-cloud.yml, ignored`.
+
 ## Memory
 
 If you use omp's Mnemopi memory, the cloud agent starts with it and what it remembers comes back. You do not run anything for this.
@@ -53,8 +56,20 @@ When it works, with no setting for it:
 - Your `memory.backend` is `mnemopi`, and `mnemopi.dbPath` is not set. Another backend (Hindsight) or a custom database path is left alone: nothing is merged.
 - The service is new enough to report the capability `threads.memory`; an older one gets no bank rename and returns no memory, without a message.
 - The bank is renamed only when `mnemopi.scoping` is `per-project` or `per-project-tagged` (omp's default is `per-project`). With another scoping the shipped memory keeps its names, and the cloud agent may not find it; the default store still merges back.
+- A database you lack is created with the schema of one you have, never copied from the cloud's file; if your store has none at all, the merge waits with the warning `☁ the cloud memories of <id> are not merged yet: <reason>` until your omp has made one.
 
 A failed merge is a warning, `☁ could not merge the cloud memories of <id>: <reason>`, and never fails the pull: the conversation and the branch are saved either way. What it does not do (deletions and edits in the VM, other banks, embeddings) is under [Known limitations](architecture.md#known-limitations), and what trusting the cloud's memories means is in [Cloud memories](security.md#cloud-memories). The contract is [Cloud memories](api.md#cloud-memories) in the API.
+
+## Previews
+
+`/cloud preview <id> <port>` shows a dev server the cloud agent started in its VM. It starts a forwarder on a free port of this machine, prints `☁ preview of port <port> on <name>: http://localhost:<lp>/` and, in omp's interactive UI, opens that address in your browser. The VM is resumed if it is paused and kept awake while you use it. `/cloud preview stop` ends every preview; so do `/cloud disconnect` and ending omp.
+
+- **Open the address exactly as printed.** The forwarder serves `localhost` only and answers `400` `open http://localhost:<lp>/` to any other host name, `127.0.0.1` included: the dashboard's session cookie lives on `127.0.0.1`, and browsers scope cookies by host, not port, so a previewed page there would run beside it.
+- **No websockets.** A `501` `WebSocket upgrades are not forwarded` answers an upgrade; plain HTTP, streaming and server-sent events work, hot-reload sockets do not.
+- **The agent starts the server.** A thread with no VM yet answers `409` `the thread has no VM; send it a message first`; port 49983 is refused. Ask the agent to run the server detached so it survives its command (`setsid nohup <command> >/dev/null 2>&1 &`).
+- A service without the capability `threads.preview` is refused with `version_skew`.
+
+Both forms work from a paired device. More in [Environments and previews](environments.md#previews) and [API](api.md#environments-and-previews).
 
 ## Where results go
 

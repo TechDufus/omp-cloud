@@ -85,6 +85,7 @@ export function launchCard(args: { origin: ThreadOrigin; thread: string; name: s
 		setupBytes: s.setupBytes,
 		overlays: s.overlays,
 		mcp: s.mcp,
+		...(s.setup !== null ? { environment: s.setup.cacheFiles === undefined ? {} : { cacheFiles: s.setup.cacheFiles } } : {}),
 		policy: s.policy,
 		warnings: args.warnings,
 	};

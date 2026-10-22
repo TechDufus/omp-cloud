@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ThreadPolicy } from "../settings/policy";
 import { MAX_TEXT_BYTES, THINKING_LEVELS } from "../store/types";
-import { parseCreateRequest } from "./create-request";
+import { DEFAULT_SETUP_CACHE_FILES, parseCreateRequest } from "./create-request";
 import { ApiError } from "./errors";
 
 const HANDOFF = "a".repeat(40);
@@ -637,6 +637,7 @@ describe("a full request", () => {
 				secretEnv: ["API_URL", "NPM_TOKEN"],
 				configOverlays: [],
 				memoryBank: "",
+				setup: null,
 				mcpServers: [],
 				ompVersion: "",
 				policy: {},
@@ -670,6 +671,7 @@ describe("a full request", () => {
 			secretEnv: [],
 			configOverlays: [],
 			memoryBank: "",
+			setup: null,
 			mcpServers: [],
 			ompVersion: "",
 			policy: {},
@@ -778,6 +780,50 @@ describe("memory", () => {
 		["memory that is an array", { memory: ["main"] }],
 	])("%s is a 400", (_label, over) => {
 		expect(rejected(request(over)).message).toStartWith("memory");
+	});
+});
+
+describe("setup", () => {
+	test("absent and null mean none", () => {
+		for (const over of [{}, { setup: null }]) expect(parseCreateRequest(request(over)).thread.setup).toBeNull();
+	});
+
+	test("a script alone gets the default cache files", () => {
+		const parsed = parseCreateRequest(request({ setup: { run: "bun install" } })).thread.setup;
+		expect(parsed?.run).toBe("bun install");
+		expect(parsed?.cacheFiles).toEqual([...DEFAULT_SETUP_CACHE_FILES]);
+		expect(parsed?.cacheFiles).toContain("bun.lock");
+		expect(parsed?.cacheFiles).toContain("composer.lock");
+	});
+
+	test("the cache files are kept as sent, also none at all", () => {
+		expect(parseCreateRequest(request({ setup: { run: "make", cacheFiles: ["Makefile.lock", "sub/dir/go.sum"] } })).thread.setup).toEqual({ run: "make", cacheFiles: ["Makefile.lock", "sub/dir/go.sum"] });
+		expect(parseCreateRequest(request({ setup: { run: "make", cacheFiles: [] } })).thread.setup).toEqual({ run: "make", cacheFiles: [] });
+		expect(parseCreateRequest(request({ setup: { run: "make", cacheFiles: null } })).thread.setup?.cacheFiles).toEqual([...DEFAULT_SETUP_CACHE_FILES]);
+	});
+
+	test("the limits: a script up to 16384 characters, up to 32 cache files", () => {
+		expect(parseCreateRequest(request({ setup: { run: "x".repeat(16384) } })).thread.setup?.run).toHaveLength(16384);
+		const files = (count: number) => Array.from({ length: count }, (_, i) => `lock-${i}`);
+		expect(parseCreateRequest(request({ setup: { run: "x", cacheFiles: files(32) } })).thread.setup?.cacheFiles).toHaveLength(32);
+		expect(rejected(request({ setup: { run: "x".repeat(16385) } })).message).toBe("setup.run must be a script of 1 to 16384 characters");
+		expect(rejected(request({ setup: { run: "x", cacheFiles: files(33) } })).message).toBe("setup.cacheFiles has 33 entries; at most 32");
+	});
+
+	test.each<[string, Body, string]>([
+		["setup that is not an object", { setup: "bun install" }, "setup must be an object"],
+		["setup that is an array", { setup: ["bun install"] }, "setup must be an object"],
+		["a missing script", { setup: {} }, "setup.run must be a script of 1 to 16384 characters"],
+		["a blank script", { setup: { run: "  \n" } }, "setup.run must be a script of 1 to 16384 characters"],
+		["a script that is not text", { setup: { run: 7 } }, "setup.run must be a script of 1 to 16384 characters"],
+		["cache files that are not an array", { setup: { run: "x", cacheFiles: "bun.lock" } }, "setup.cacheFiles must be an array"],
+		["a cache file that is not text", { setup: { run: "x", cacheFiles: [7] } }, "setup.cacheFiles[0] must be a string"],
+		["an absolute cache file", { setup: { run: "x", cacheFiles: ["/etc/passwd"] } }, "setup.cacheFiles[0]"],
+		["a cache file that climbs out", { setup: { run: "x", cacheFiles: ["ok", "../x"] } }, "setup.cacheFiles[1]"],
+		["a cache file inside .git", { setup: { run: "x", cacheFiles: [".git/config"] } }, "setup.cacheFiles[0]"],
+		["an empty cache file name", { setup: { run: "x", cacheFiles: [""] } }, "setup.cacheFiles[0]"],
+	])("%s is a 400", (_label, over, message) => {
+		expect(rejected(request(over)).message).toStartWith(message);
 	});
 });
 

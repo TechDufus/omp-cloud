@@ -12,6 +12,7 @@ export const VERBS = [
 	"answer",
 	"stop",
 	"pull",
+	"preview",
 	"resume",
 	"delete",
 	"login",
@@ -37,12 +38,14 @@ export const USAGE_CONNECT = "☁ usage: /cloud connect [<code> | <user@host> | 
 export const USAGE_PULL = "☁ usage: /cloud pull <id> [--into <dir>]";
 export const USAGE_DEVICES = "☁ usage: /cloud devices [revoke <name|id-prefix>]";
 export const USAGE_DISCONNECT = "☁ usage: /cloud disconnect [--force]";
+export const USAGE_PREVIEW = "☁ usage: /cloud preview <id> <port> | /cloud preview stop";
 
 /** What the user typed, before thread ids are resolved. */
 export type Parsed =
 	| { kind: "launch"; task: string }
 	| { kind: "login"; provider: string }
-	| { kind: "hub" | "list" | "unwatch" | "status" | "update" | "dashboard" | "pair" | "help" }
+	| { kind: "preview"; token: string; port: number }
+	| { kind: "hub" | "list" | "unwatch" | "status" | "update" | "dashboard" | "pair" | "previewStop" | "help" }
 	| { kind: "connect"; target: string | undefined; name: string | undefined; replace: boolean; allowPublic: boolean }
 	| { kind: "devices"; revoke: string | undefined }
 	| { kind: "disconnect"; force: boolean }
@@ -53,7 +56,8 @@ export type Parsed =
 export type Command =
 	| { kind: "launch"; task: string }
 	| { kind: "login"; provider: string }
-	| { kind: "hub" | "list" | "unwatch" | "status" | "update" | "dashboard" | "pair" | "help" }
+	| { kind: "preview"; thread: string; port: number }
+	| { kind: "hub" | "list" | "unwatch" | "status" | "update" | "dashboard" | "pair" | "previewStop" | "help" }
 	| { kind: "connect"; target: string | undefined; name: string | undefined; replace: boolean; allowPublic: boolean }
 	| { kind: "devices"; revoke: string | undefined }
 	| { kind: "disconnect"; force: boolean }
@@ -116,6 +120,21 @@ function parseConnect(rest: string): Parsed {
 	return { kind: "connect", target, name, replace, allowPublic };
 }
 
+/** The VM's own agent port: the service refuses it, so it is refused here as well. */
+const AGENT_PORT = 49983;
+
+/** `/cloud preview <id> <port>` or `/cloud preview stop`. */
+function parsePreview(rest: string): Parsed {
+	const ws = words(rest);
+	if (ws === undefined) return { kind: "error", message: USAGE_PREVIEW };
+	if (ws.length === 1 && ws[0]?.toLowerCase() === "stop") return { kind: "previewStop" };
+	const [token = "", raw = ""] = ws;
+	if (ws.length !== 2 || token === "" || !/^\d{1,5}$/.test(raw)) return { kind: "error", message: USAGE_PREVIEW };
+	const port = Number(raw);
+	if (port < 1 || port > 65535 || port === AGENT_PORT) return { kind: "error", message: `☁ port must be 1 to 65535 and not ${AGENT_PORT}` };
+	return { kind: "preview", token, port };
+}
+
 /** `/cloud devices` or `/cloud devices revoke <name|id-prefix>`; the name may hold spaces. */
 function parseDevices(rest: string): Parsed {
 	if (rest === "") return { kind: "devices", revoke: undefined };
@@ -139,6 +158,7 @@ export function parseCommand(args: string): Parsed {
 		const [provider, extra] = splitFirst(rest);
 		return provider === "" || extra !== "" ? { kind: "error", message: USAGE_LOGIN } : { kind: "login", provider };
 	}
+	if (verb === "preview") return parsePreview(rest);
 	if (verb === "connect") return parseConnect(rest);
 	if (verb === "devices") return parseDevices(rest);
 	if (verb === "disconnect") {
@@ -236,6 +256,7 @@ const VERB_HELP: Record<Verb, string> = {
 	stop: "stop the running turn and cancel queued ones",
 	pull: "fetch the thread's result branch; --into <dir> clones a scratch thread there, or checks a repository thread out as a worktree",
 	resume: "continue the thread's conversation locally",
+	preview: "open a dev server a thread runs in its VM (by port) through a local forwarder; `preview stop` ends every preview",
 	delete: "delete a thread",
 	login: "log the cloud broker in to a provider (second login, never a copy of yours)",
 	status: "show the connection and what the cloud can run",
@@ -283,7 +304,7 @@ export function completions(prefix: string, cachedThreads: readonly ThreadRef[])
 			.map(f => ({ value: `${p.slice(0, start)}${f}`, label: f }));
 		return items.length > 0 ? items : null;
 	}
-	if (!isVerb(verb) || !isIdVerb(verb)) return null;
+	if (!isVerb(verb) || (verb !== "preview" && !isIdVerb(verb))) return null;
 	if (verb === "pull" && /\s/.test(rest)) {
 		const start = p.search(/\S*$/);
 		const afterId = /^\S+\s+\S*$/.test(rest) && "--into".startsWith(p.slice(start).toLowerCase());

@@ -584,6 +584,8 @@ export interface HandoffRequest {
 	mcp?: McpShip[];
 	/** The local project bank the handoff renamed for the VM (`threads.memory`); the service records it and the plugin merges the cloud's memories back into it. */
 	memory?: { bank: string };
+	/** The repository's environment setup from `.omp-cloud.yml` (`threads.setup`): `run` once per environment, cached by the contents of `cacheFiles` (absent: the service's default lockfiles). Repository handoffs only. */
+	setup?: { run: string; cacheFiles?: string[] };
 	/** The short human name generated for the task (2-6 words, at most 60 characters). Absent when none could be generated: the service then shows the title. */
 	name?: string;
 	/** Who started the thread. */

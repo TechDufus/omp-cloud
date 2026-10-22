@@ -87,6 +87,25 @@ describe("restoreRepo", () => {
 		await writeFile(bundle, "not a bundle");
 		await expect(restore()).rejects.toBeInstanceOf(ExecError);
 	});
+
+	test("restoring over an environment snapshot removes the untracked files its setup left and keeps the ignored ones", async () => {
+		await restore();
+		// What a setup script leaves in the snapshot: dependencies (ignored), a stray file and a directory (untracked) and an edited tracked file.
+		await exec(`mkdir -p ${q(join(workspace, "deps"))} ${q(join(workspace, "generated"))}`);
+		await writeFile(join(workspace, ".git", "info", "exclude"), "deps/\n");
+		await writeFile(join(workspace, "deps", "stamp"), "12345\n");
+		await writeFile(join(workspace, "stray.txt"), "left behind\n");
+		await writeFile(join(workspace, "generated", "out.txt"), "x\n");
+		await writeFile(join(workspace, "a.txt"), "edited\n");
+
+		await restore();
+
+		expect(await Bun.file(join(workspace, "deps", "stamp")).text()).toBe("12345\n");
+		expect(await Bun.file(join(workspace, "stray.txt")).exists()).toBe(false);
+		expect(await Bun.file(join(workspace, "generated", "out.txt")).exists()).toBe(false);
+		expect(await Bun.file(join(workspace, "a.txt")).text()).toBe("one\ntwo\n");
+		expect(await git(workspace, "status --porcelain")).toBe("");
+	});
 });
 
 describe("finalizeTurn", () => {

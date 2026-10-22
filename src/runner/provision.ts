@@ -136,7 +136,7 @@ function escapeIgnore(path: string): string {
 }
 
 /** Uploads the service's full-history bundle of a delta thread: the cache's base plus the uploaded delta. */
-async function uploadComposedSource(sandbox: Sandbox, input: ProvisionInput, dest: string): Promise<void> {
+export async function uploadComposedSource(sandbox: Sandbox, input: Pick<ProvisionInput, "thread" | "git">, dest: string): Promise<void> {
 	const { thread } = input;
 	const composed = await input.git.composeSource(thread.id, thread.repo.remoteURL);
 	try {

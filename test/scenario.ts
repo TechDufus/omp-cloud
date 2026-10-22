@@ -56,6 +56,12 @@
  *  AE memory: a thread made with a setup tarball holding mnemopi databases (the default store and one bank, `memory: {bank}`) has the bank in
  *     its detail and list entry, and after its turn `GET /memory` serves `memory.tar` whose `./mnemopi.db` and bank database hold those rows
  *     (the VM's sqlite3 exported them); a malformed bank is refused (400)
+ *  AF environment: a thread whose request has `setup` prepares the repository environment in a build sandbox (`preparing the repository environment`,
+ *     then `environment ready`) and its VM starts from the snapshot, so a file the setup wrote into an ignored directory is there; a second
+ *     thread of the same repo uses the cached environment (`using the cached environment`, the same stamp) and, started from the snapshot,
+ *     still obeys `policy.egress`; a changed `bun.lock` prepares a new environment (a new stamp). The scenario deletes the snapshots it made
+ *  AG preview: `GET /threads/{id}/ports/8000/` relays a web server the agent started in the VM; once the idle VM is paused the same GET resumes
+ *     it and answers again; port 49983 is 400 and a websocket upgrade is 501
  */
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
@@ -671,6 +677,8 @@ async function run(): Promise<void> {
 		const kinds = new Set(events.map(e => e.kind));
 		const missing = ["vm", "assistant", "tool", "turn_done", "question_asked"].filter(kind => !kinds.has(kind));
 		if (missing.length > 0) throw new Error(`missing kinds ${missing.join(", ")}; saw ${[...kinds].join(", ")}`);
+		const memoryNotices = events.filter(e => e.kind === "notice" && e.text.startsWith("the memory could not be saved"));
+		if (memoryNotices.length > 0) throw new Error(`the memory export failed on a thread without memories: ${JSON.stringify(memoryNotices.map(e => e.text))}`);
 		return events.length;
 	}, count => `${count} events`);
 
@@ -1466,6 +1474,8 @@ async function run(): Promise<void> {
 		};
 		const everything = await collect("", 500);
 		if (everything.length <= 7) throw new Error(`only ${everything.length} events; the paging below needs more than 7`);
+		const scratchMemoryNotices = everything.filter(e => e.kind === "notice" && String(e.text).startsWith("the memory could not be saved"));
+		if (scratchMemoryNotices.length > 0) throw new Error(`the memory export failed on a scratch thread: ${JSON.stringify(scratchMemoryNotices.map(e => e.text))}`);
 		for (const event of everything) {
 			if (typeof event.seq !== "number" || typeof event.kind !== "string" || event.kind === "" || typeof event.text !== "string") throw new Error(`a malformed event: ${JSON.stringify(event)}`);
 			if (event.turn !== null && typeof event.turn !== "number") throw new Error(`an event turn is neither a number nor null: ${JSON.stringify(event)}`);
@@ -1759,7 +1769,7 @@ async function run(): Promise<void> {
 		expectEqual("service.version", service.version, pkg.version);
 		expectContains("service.version", text(service.version), ".");
 		expectEqual("service.api", service.api, API_VERSION);
-		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.memory"];
+		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.memory", "threads.preview", "threads.setup"];
 		expectEqual("capabilities", JSON.stringify((Array.isArray(who.capabilities) ? who.capabilities.map(text) : []).sort()), JSON.stringify([...expected].sort()));
 		const limits = obj(who.limits, "whoami.limits");
 		expectEqual("limits", JSON.stringify([limits.maxMessageBytes, limits.maxAnswerBytes, limits.listMax, limits.maxTurns]), JSON.stringify([32768, 4000, 200, 200]));
@@ -1849,6 +1859,123 @@ async function run(): Promise<void> {
 			threadId = previous;
 		}
 	});
+
+	await report.step("AF environment: setup runs once per repository state, its snapshot starts the VMs (egress still applies), a changed lockfile prepares again", async () => {
+		const repo = join(dir, "repo-af");
+		await Bun.$`git init -q -b main ${repo}`.quiet();
+		await writeFile(join(repo, ".gitignore"), "deps/\n");
+		await writeFile(join(repo, "bun.lock"), "# lock one\n");
+		await git(repo, "add", "-A");
+		await git(repo, "-c", "user.name=Scenario", "-c", "user.email=scenario@example.com", "commit", "-q", "-m", "initial");
+		const bundleOf = async (name: string): Promise<{ handoff: string; bundle: string }> => {
+			const head = (await git(repo, "rev-parse", "HEAD")).trim();
+			await git(repo, "update-ref", "refs/omp-cloud/handoff", head);
+			const file = join(dir, name);
+			await git(repo, "bundle", "create", file, "refs/omp-cloud/handoff");
+			return { handoff: head, bundle: file };
+		};
+		const first = await bundleOf("af-1.bundle");
+		await commitFile(repo, "bun.lock", "# lock two\n", "change the lockfile");
+		const second = await bundleOf("af-2.bundle");
+		const setup = { run: "mkdir -p deps && date +%s%N > deps/stamp" };
+
+		const vmTexts = async (id: string): Promise<string[]> => (await eventsPage(id, "kind=vm&limit=500")).events.map(e => text(e.text));
+		const indexOfText = (texts: string[], pattern: RegExp): number => texts.findIndex(t => pattern.test(t));
+		/** The stamp the setup wrote, read by the agent into a committed file. */
+		const stampOf = async (): Promise<string> => {
+			const turn = await sendMessage("BASH: cat deps/stamp > stamp.txt");
+			await waitTurnIdle(turn, 120_000);
+			const stamp = text((await apiJson("GET", `/threads/${threadId}/files/stamp.txt`, 200)).text);
+			if (!/^[0-9]{10,}\n$/.test(stamp)) throw new Error(`stamp.txt is not the setup's stamp: ${JSON.stringify(stamp)}`);
+			return stamp;
+		};
+		const previous = threadId;
+		try {
+			const who = await apiJson("GET", "/whoami", 200);
+			if (!(Array.isArray(who.capabilities) && who.capabilities.includes("threads.setup"))) throw new Error("whoami lacks threads.setup");
+
+			// 1. The first thread builds the environment.
+			const one = await createThread(first.handoff, first.bundle, null, { request: { setup } });
+			await waitTurnIdle(1, 900_000);
+			const oneTexts = await vmTexts(one);
+			const preparing = indexOfText(oneTexts, /^preparing the repository environment/);
+			const ready = indexOfText(oneTexts, /^environment ready \(omp-env-[0-9a-f]{16}\)$/);
+			if (preparing < 0 || ready < preparing) throw new Error(`expected "preparing the repository environment" then "environment ready", got ${JSON.stringify(oneTexts)}`);
+			const name = /\((omp-env-[0-9a-f]{16})\)/.exec(oneTexts[ready] ?? "")?.[1] ?? "";
+			if (indexOfText(oneTexts, /^using the cached environment/) >= 0) throw new Error(`the first thread used a cache: ${JSON.stringify(oneTexts)}`);
+			const stampOne = await stampOf();
+			await waitGone(one);
+
+			// 2. The second thread of the same repository finds the cache; its VM comes from the snapshot and still obeys the egress policy.
+			await putSettings({ "policy.egress": ["example.com"] });
+			try {
+				const two = await createThread(first.handoff, first.bundle, null, { request: { setup } });
+				await waitTurnIdle(1, 240_000);
+				const twoTexts = await vmTexts(two);
+				if (indexOfText(twoTexts, new RegExp(`^using the cached environment ${name}$`)) < 0) throw new Error(`expected "using the cached environment ${name}", got ${JSON.stringify(twoTexts)}`);
+				if (indexOfText(twoTexts, /^preparing the repository environment/) >= 0) throw new Error(`the second thread prepared the environment again: ${JSON.stringify(twoTexts)}`);
+				expectEqual("the cached environment's stamp", await stampOf(), stampOne);
+				const probe = await sendMessage("BASH: if curl -s -m 5 -o /dev/null http://1.1.1.1/ 2>/dev/null; then echo reachable; else echo blocked; fi");
+				expectEqual("the internet from a snapshot VM", text(latestOf(await waitTurnIdle(probe, 120_000))?.reply), "DONE=blocked");
+				await waitGone(two);
+			} finally {
+				await putSettings({ "policy.egress": null });
+			}
+
+			// 3. A changed lockfile is another environment.
+			const three = await createThread(second.handoff, second.bundle, null, { request: { setup } });
+			await waitTurnIdle(1, 900_000);
+			const threeTexts = await vmTexts(three);
+			const rebuilt = indexOfText(threeTexts, /^environment ready \(omp-env-[0-9a-f]{16}\)$/);
+			if (indexOfText(threeTexts, /^preparing the repository environment/) < 0 || rebuilt < 0) throw new Error(`a changed bun.lock did not prepare the environment: ${JSON.stringify(threeTexts)}`);
+			if ((threeTexts[rebuilt] ?? "").includes(name)) throw new Error(`the changed bun.lock kept the environment name ${name}`);
+			const stampThree = await stampOf();
+			if (stampThree === stampOne) throw new Error(`the rebuilt environment kept the old stamp ${stampOne.trim()}`);
+			await waitGone(three);
+		} finally {
+			threadId = previous;
+		}
+	});
+
+	await report.step("AG preview: a web server in the VM is relayed through the service, also after the VM paused; port 49983 and websocket upgrades are refused", async () => {
+		const previous = threadId;
+		try {
+			const preview = await createThread(handoff, bundle, null);
+			await waitTurnIdle(1, 240_000);
+			const turn = await sendMessage("BASH: setsid nohup python3 -m http.server 8000 >/dev/null 2>&1 </dev/null & sleep 1");
+			await waitTurnIdle(turn, 120_000);
+
+			const listing = async (what: string): Promise<void> => {
+				for (let tries = 0; tries < 20; tries++) {
+					const res = await api("GET", `/threads/${preview}/ports/8000/`);
+					const body = await res.text();
+					if (res.status === 200) {
+						expectContains(`${what}: the relayed page`, body, "Directory listing");
+						return;
+					}
+					if (tries === 19) throw new Error(`${what}: GET /ports/8000/ answered ${res.status} ${body.slice(0, 200)}`);
+					await Bun.sleep(1000);
+				}
+			};
+			await listing("while running");
+
+			// An idle VM pauses; the next request resumes it.
+			await waitFor("the VM to pause", 90_000, t => vmOf(t)?.state === "paused");
+			const resumedBefore = (await eventsPage(preview, "kind=vm&limit=500")).events.filter(e => text(e.text) === "resumed").length;
+			await listing("after the VM paused");
+			const resumedAfter = (await eventsPage(preview, "kind=vm&limit=500")).events.filter(e => text(e.text) === "resumed").length;
+			expectEqual("resumed events after the relayed request", resumedAfter, resumedBefore + 1);
+
+			await expectRefused("GET", `/threads/${preview}/ports/49983/`, 400, "port must be 1 to 65535 and not 49983");
+			const upgrade = await fetch(`${origin}/api/v1/threads/${preview}/ports/8000/ws`, { headers: { ...authHeaders, upgrade: "websocket", connection: "Upgrade" } });
+			expectEqual("upgrade status", upgrade.status, 501);
+			expectContains("upgrade error", text(obj(await upgrade.json(), "refusal").error), "WebSocket upgrades are not forwarded");
+			expectEqual("without a bearer token", (await fetch(`${origin}/api/v1/threads/${preview}/ports/8000/`)).status, 401);
+			await waitGone(preview);
+		} finally {
+			threadId = previous;
+		}
+	});
 }
 
 let failure: unknown = null;
@@ -1896,6 +2023,21 @@ async function cleanup(): Promise<void> {
 			}
 		} catch (error) {
 			console.log(`cleanup: revoking the service's gateway client failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	if (tempDir !== null) {
+		// The environments the service cached live in vmon as snapshots: delete the ones this scenario's database holds.
+		try {
+			const db = new Database(join(tempDir, "data", "omp-cloud.db"), { readonly: true });
+			try {
+				for (const row of db.query<{ snapshot_id: string }, []>("SELECT snapshot_id FROM environments").all()) {
+					if (key !== null) await Sandbox.deleteSnapshot(row.snapshot_id, vmonOptions(key));
+				}
+			} finally {
+				db.close();
+			}
+		} catch (error) {
+			console.log(`cleanup: deleting the environment snapshots failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 	if (tempDir !== null) await rm(tempDir, { recursive: true, force: true });

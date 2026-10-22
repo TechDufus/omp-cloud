@@ -13,10 +13,16 @@ const NO_SQLITE = 4;
  * The shell script that snapshots every mnemopi database under `src` with `VACUUM INTO` (a consistent copy while omp may
  * hold the database open) into `out` and tars the result to `tarPath`. Exits 3 when there is no memory directory and 4
  * when `sqlite3` is missing.
+ *
+ * The body is a subshell on purpose. The sandbox runs commands through `bash -l -c`, and a login shell that leaves through
+ * `exit` while `set -e` is on runs `~/.bash_logout` under it: the VM image's ends in `[ -x /usr/bin/clear_console ] && ...`,
+ * which fails and turns every exit code (3, 4, even 0) into 1. `set -e` inside a subshell never reaches the login shell,
+ * which ends normally with the subshell's status.
  */
 export function memoryExportScript(src: string, out: string, tarPath: string): string {
 	const q = shellQuote;
 	return [
+		"(",
 		"set -e",
 		`src=${q(src)}`,
 		`[ -d "$src" ] || exit ${NO_MEMORY}`,
@@ -27,6 +33,7 @@ export function memoryExportScript(src: string, out: string, tarPath: string): s
 		`if [ -f "$src/mnemopi.db" ]; then sqlite3 "$src/mnemopi.db" "VACUUM INTO '$out/mnemopi.db'"; fi`,
 		`for d in "$src"/banks/*/; do [ -f "$d/mnemopi.db" ] || continue; b=$(basename "$d"); mkdir -p "$out/banks/$b"; sqlite3 "$d/mnemopi.db" "VACUUM INTO '$out/banks/$b/mnemopi.db'"; done`,
 		`tar -cf ${q(tarPath)} -C "$out" . && rm -rf "$out"`,
+		")",
 	].join("\n");
 }
 

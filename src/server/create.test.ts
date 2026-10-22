@@ -313,6 +313,16 @@ describe("success", () => {
 		expect((error as ApiError).status).toBe(400);
 	});
 
+	test("the repository setup is stored on the thread with the default cache files, and an invalid one refuses the upload", async () => {
+		const thread = await createThreadFromUpload(store, withRequest(full({ setup: { run: "bun install" } }), [["source", bytes("src")]]), OWNER, options());
+		expect(thread.setup?.run).toBe("bun install");
+		expect(thread.setup?.cacheFiles).toContain("bun.lock");
+		expect(store.getThread(thread.id)?.setup).toEqual(thread.setup);
+		const error = await createThreadFromUpload(store, withRequest(full({ setup: { run: "" } }), [["source", bytes("src")]]), OWNER, options()).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(ApiError);
+		expect((error as ApiError).status).toBe(400);
+	});
+
 	test("paths are stored as given", async () => {
 		const req = withRequest(full({ paths: { home: "/home/ada", workspace: "/usr/src" } }), [["source", bytes("src")]]);
 		const thread = await createThreadFromUpload(store, req, OWNER, options());

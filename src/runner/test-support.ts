@@ -174,7 +174,7 @@ export function fakeVm(options: { dirty: boolean; head: string; failBundle?: boo
 	return { sandbox, commands, uploads, paused: () => paused };
 }
 
-/** A vmon that hands out `sandbox` for every connect and records connects and kills (`onKill` runs first). */
+/** A vmon that hands out `sandbox` for every connect, lists the `sandboxes` whose metadata holds the filter, and records connects, listings and kills (`onKill` runs first). */
 export function fakeVmon(
 	sandbox: Sandbox | null,
 	sandboxes: SandboxSummary[] = [],
@@ -195,7 +195,7 @@ export function fakeVmon(
 		},
 		list: async (filter: Record<string, string>) => {
 			filters.push(filter);
-			return sandboxes;
+			return sandboxes.filter(sandbox => Object.entries(filter).every(([key, value]) => sandbox.metadata[key] === value));
 		},
 	} as unknown as Vmon;
 	return { vmon, connects, killed, filters, onKill };

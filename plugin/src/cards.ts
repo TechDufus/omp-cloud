@@ -113,6 +113,8 @@ export interface LaunchCard extends ThreadCardBase {
 	overlays: string[];
 	/** The MCP servers shipped and how the cloud agent reaches them. Absent on cards of older plugins. */
 	mcp?: { name: string; via: "service" | "vm" }[];
+	/** The repository environment setup shipped from `.omp-cloud.yml`; `cacheFiles` is absent when the service's default lockfile list applies. Absent when none, and on cards of older plugins. */
+	environment?: { cacheFiles?: string[] };
 	/** The keys of the `policy` the handoff asked for (`egress`, `fetch`, `spend.turnUSD`, ...). */
 	policy: string[];
 	warnings: string[];
@@ -590,6 +592,7 @@ export function cardContent(d: CardDetails): string {
 			];
 			if (d.withheld.length > 0) lines.push(`Left on this machine: ${d.withheld.join(", ")}.`);
 			if (d.mcp !== undefined && d.mcp.length > 0) lines.push(`MCP servers: ${mcpText(d.mcp)}.`);
+			if (d.environment !== undefined) lines.push(`Environment setup of .omp-cloud.yml runs once and is ${environmentText(d.environment)}.`);
 			if (d.warnings.length > 0) lines.push(`Warnings: ${d.warnings.join("; ")}.`);
 			lines.push("Results arrive later as [cloud] messages; do not poll.");
 			return lines.join("\n");
@@ -667,6 +670,11 @@ function mcpText(servers: readonly { name: string; via: "service" | "vm" }[]): s
 	return servers.map(s => `${s.name} (${s.via === "service" ? "via the service" : "in the VM"})`).join(", ");
 }
 
+/** `cached by <files>`, or `cached by the default lockfiles` when the service picks the files. */
+function environmentText(environment: { cacheFiles?: string[] }): string {
+	return `cached by ${environment.cacheFiles === undefined ? "the default lockfiles" : environment.cacheFiles.length === 0 ? "the setup script alone" : environment.cacheFiles.join(", ")}`;
+}
+
 /** The label/value rows of a launch card; an empty value is left out. */
 function launchRows(d: LaunchCard): [string, string][] {
 	const conversation = d.conversation === "included" ? "conversation" : d.conversation === "too-large" ? "no conversation (too large)" : "no conversation";
@@ -677,6 +685,7 @@ function launchRows(d: LaunchCard): [string, string][] {
 		["setup", `${conversation} · ${(d.setupBytes / 1024).toFixed(0)} KiB omp setup · ${plural(d.secrets.files, "secret file")} · ${plural(d.secrets.env, "secret variable")}`],
 		["overlays", d.overlays.join(", ")],
 		["mcp", mcpText(d.mcp ?? [])],
+		["env setup", d.environment === undefined ? "" : environmentText(d.environment)],
 		["policy", d.policy.join(", ")],
 	];
 }

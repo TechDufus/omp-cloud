@@ -17,8 +17,9 @@ omp-cloud keeps its own files; omp's config is never read or written. `<config h
 | `secretEnv` | list of strings | Names of environment variables whose values go to the cloud agent. A value every agent on a repository needs belongs in the service's [Secrets](secrets-and-mcp.md#secrets) instead |
 | `policy` | mapping | Flat policy keys a handoff sends to tighten the service's policy for that thread: `bash.patterns`, `tools.approval`, `fetch`, `webSearch`, `browser`, `egress`, `spend.turnUSD`, `spend.threadUSD`, `spend.dayUSD`, `models.allowed`. The service never lets it loosen the policy ([API](api.md#agent-policy)). The launch card lists the keys sent |
 | `deliver` | `tray` or `transcript` | Where a followed thread's finished turns and questions of your own threads go: the inbox and a terminal notification (`tray`, the default), or transcript cards. Yours only |
+| `setup` | mapping | `{run, cacheFiles?}`: a script the cloud runs once per repository environment and caches by the contents of `cacheFiles` (default: the common lockfiles). **A repository's `.omp-cloud.yml` only**: in your personal file it is ignored with a warning. See [Environments](environments.md#per-repository-environments) |
 
-A repository's file never supplies `url`, `token` or `deliver`: they are ignored and `/cloud status` says so. Its three lists add to yours, and its `policy` keys replace yours key by key. `/cloud status` shows where `url`, `token` and `deliver` came from, the repository file when one was read and the warnings.
+A repository's file never supplies `url`, `token` or `deliver`, and your personal file never supplies `setup`: they are ignored and `/cloud status` says so. The repository's three lists add to yours, and its `policy` keys replace yours key by key. `/cloud status` shows where `url`, `token` and `deliver` came from, the repository file when one was read and the warnings.
 
 With no `url` from the environment or your file, the machine uses its paired connection (`connection.json` beside `config.yml`) and ignores a `token`; see [Pairing](pairing.md).
 
@@ -76,3 +77,26 @@ A key file with group or other permission bits is refused (`the GitHub App key <
 
 The listener starts before the runner. When the port cannot be bound the service still starts, logs `omp-cloud: the MCP proxy could not listen on <listen>: <reason>` (`journalctl --user -u omp-cloud`) and reports `mcpProxy: false` in `whoami`: stdio MCP servers still ship, http ones are not delivered. What the proxy does with a request is in [API](api.md#secrets-and-mcp-servers), and the trust boundary in [Security model](security.md#secrets-and-mcp). The VMs' egress already allows the gateway address on every port ([Security model](security.md#trust-boundaries)), so nothing needs opening; the listener sits on the gateway's address, which only this host and its VMs use.
 
+## VM toolchain
+
+What every VM contains is two run-time settings, not `service.json` keys: `vm.packages` (the Debian packages installed into the VM template; default `build-essential`, `python3`, `python3-venv`, `python3-pip`, `nodejs`, `npm`, `unzip`, `ripgrep`) and `vm.setup` (shell lines run as root, under `set -eux`, after the packages and omp are installed; default none). Edit them on the dashboard's Settings page or through `PUT /api/v1/settings`.
+
+| Setting | Rules |
+|---|---|
+| `vm.packages` | A list of Debian package names: lower-case letters, digits and `+ . -`, starting with a letter or digit, at most 100 characters each, at most 200 entries. The runner's own tools (`ca-certificates`, `curl`, `git`, `jq`, `procps`, `sqlite3`) are always installed and need not be listed |
+| `vm.setup` | A list of shell lines, at most 16384 characters in all |
+
+Changing either builds a new template, named `omp-agent:<omp version>-<hash>`, the next time a thread (or the service's own prebuild at start) needs a VM; the first thread after the change waits for the build. The order of packages does not matter. VMs that already exist keep the template they were made from, and the [repository environments](environments.md#per-repository-environments) built on the old template are retired. A package Debian does not have, or a line that fails, fails the build, and with it every thread that needs the template, until the setting is fixed. The rules, the build order and what they do to threads are explained in [Environments](environments.md#the-vm-toolchain), and the contract in [API](api.md#settings).
+
+### Docker
+
+A VM can run Docker. Set `vm.packages` to the defaults plus `docker.io`, and `vm.setup` to one line that puts the VM's `user` in the `docker` group:
+
+```json
+{
+  "vm.packages": ["build-essential", "python3", "python3-venv", "python3-pip", "nodejs", "npm", "unzip", "ripgrep", "docker.io"],
+  "vm.setup": ["usermod -aG docker user"]
+}
+```
+
+Debian's package starts `dockerd` as a systemd service when the VM boots, so the agent needs no `dockerd` line: in a VM built from this recipe `docker run --rm hello-world`, run as `user` without `sudo`, pulled the image and printed `Hello from Docker!` (Docker 26.1.5). Starting a second daemon by hand fails with `failed to start daemon, ensure docker is not running or delete /var/run/docker.pid`. The pull needs registry egress: a thread under a `policy.egress` list must allow the registry's hosts, which this check did not exercise. Changing the settings builds a new template, so the first thread after it waits for the build.

@@ -131,8 +131,8 @@ export interface TemplateProbe {
 
 /** The template of this omp on this vmon (`omp-agent:<omp>-<recipe hash>`), asked of vmon through e2b with the team key. e2b loads only when this runs. */
 export async function realTemplateProbe(config: Config, key: string, ompVersion: string): Promise<TemplateProbe> {
-	const [{ Template }, { templateName }, { installedVmonVersion }] = await Promise.all([import("e2b"), import("../vmon/template"), import("../vmon/pin")]);
-	const name = await templateName(config.vmon.template, ompVersion, await installedVmonVersion());
+	const [{ Template }, { templateName }, { installedVmonVersion }, { readStoredRecipe }] = await Promise.all([import("e2b"), import("../vmon/template"), import("../vmon/pin"), import("../update/db")]);
+	const name = await templateName(config.vmon.template, ompVersion, await installedVmonVersion(), readStoredRecipe(config.dataDir));
 	const connection = { apiKey: key, apiUrl: config.vmon.url, sandboxUrl: config.vmon.url, domain: new URL(config.vmon.url).hostname };
 	return {
 		name: async () => name,

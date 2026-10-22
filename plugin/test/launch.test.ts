@@ -436,6 +436,43 @@ describe("the handoff request", () => {
 		});
 	});
 
+	describe("environment setup", () => {
+		const real = realClient();
+		const setupClient = (capabilities: string[]): LaunchClient => ({ createThread: (parts, options) => real.createThread(parts, options), whoami: async () => whoami({ modelPatterns: ["anthropic/*"], capabilities }) });
+
+		test("the repository's setup ships as request.setup to a service with threads.setup, and the summary names the cache files", async () => {
+			const s = await setup();
+			const cfg = await cloudConfig(s, { repo: "setup:\n  run: bun install\n  cacheFiles: [bun.lock]\n" });
+			const result = await launchHandoff(input(s, { withSession: false, cfg }, setupClient(["threads.setup"])).input);
+			expect(only().request.setup).toEqual({ run: "bun install", cacheFiles: ["bun.lock"] });
+			expect(result.summary.setup).toEqual({ cacheFiles: ["bun.lock"] });
+		});
+
+		test("without cacheFiles the request carries none, so the service's default list applies", async () => {
+			const s = await setup();
+			const cfg = await cloudConfig(s, { repo: "setup:\n  run: make deps\n" });
+			const result = await launchHandoff(input(s, { withSession: false, cfg }, setupClient(["threads.setup"])).input);
+			expect(only().request.setup).toEqual({ run: "make deps" });
+			expect(result.summary.setup).toEqual({ cacheFiles: undefined });
+		});
+
+		test("a service without threads.setup gets no setup field and the launch says why", async () => {
+			const s = await setup();
+			const cfg = await cloudConfig(s, { repo: "setup:\n  run: make deps\n" });
+			const result = await launchHandoff(input(s, { withSession: false, cfg }, setupClient([])).input);
+			expect(only().request).not.toHaveProperty("setup");
+			expect(result.summary.setup).toBeNull();
+			expect(result.warnings).toContain("the cloud service cannot run the setup of .omp-cloud.yml; it is not shipped");
+		});
+
+		test("a repository without a setup sends none", async () => {
+			const s = await setup();
+			const result = await launchHandoff(input(s, { withSession: false }, setupClient(["threads.setup"])).input);
+			expect(only().request).not.toHaveProperty("setup");
+			expect(result.summary.setup).toBeNull();
+		});
+	});
+
 	test("secretFiles of the repository's .omp-cloud.yml ship in the request, base64", async () => {
 		const s = await setup();
 		await writeFile(join(s.repo, ".gitignore"), ".env\n");

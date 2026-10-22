@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { GatewayClients } from "../gateway/clients";
 import type { Store } from "../store";
 import type { Turn } from "../store/types";
-import { type Exec, ExecError, localExec } from "./exec";
+import { type Exec, ExecError, execFailure, localExec } from "./exec";
 import { exportMemory, memoryExportScript, VM_MEMORY_DIR } from "./memory-export";
 import { exit, fakeVm, fakeVmon, type FakeVm, HEAD, openEnv, promptResult, response, sandboxWithOmp, seedThread } from "./test-support";
 import { type ThreadEnv, ThreadRunner } from "./thread";
@@ -108,6 +108,42 @@ describe("memoryExportScript", () => {
 		await writeFile(join(src, "mnemopi.db"), "this is not a database, just text that is long enough to be read as a header");
 		const failure = await exportMemory(localExec(), { src, work: join(dir, "work"), tarPath: join(dir, "out.tar") }).catch((error: unknown) => error);
 		expect(failure).toBeInstanceOf(ExecError);
+	});
+
+	// The sandbox's exec shell is `bash -l -c`; the VM image's ~/.bash_logout ends in `[ -x /usr/bin/clear_console ] && ...`, which fails
+	// under an inherited `set -e` on its bash 5.2. This host's bash 5.3 spares that exact form, so the logout here fails plainly.
+	test("a login shell whose logout fails still reports the script's own exit codes", async () => {
+		const home = join(dir, "home");
+		await mkdir(home);
+		await writeFile(join(home, ".bash_logout"), "false\n");
+		const login: Exec = async command => {
+			const proc = Bun.spawn(["bash", "-l", "-c", command], { env: { ...process.env, HOME: home }, stdout: "pipe", stderr: "pipe" });
+			const [stdout, stderr, code] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+			if (code !== 0) throw new ExecError(command, code, stderr);
+			return stdout;
+		};
+		// The failure being guarded against: under `set -e` that logout turns `exit 3` into 1.
+		const plain = await login("set -e\n[ -d /nonexistent ] || exit 3").catch((error: unknown) => error);
+		if (!(plain instanceof ExecError)) throw new Error("the plain script did not fail");
+		expect(plain.exitCode).toBe(1);
+
+		expect(await exportMemory(login, { src: join(dir, "none"), work: join(dir, "work"), tarPath: join(dir, "out.tar") })).toBe(false);
+		await mkdir(join(dir, "mem"));
+		expect(await exportMemory((command, options) => login(`PATH=/nonexistent; ${command}`, options), { src: join(dir, "mem"), work: join(dir, "work"), tarPath: join(dir, "out.tar") })).toBe(false);
+		if (HAS_SQLITE3) {
+			writeMemoryDb(join(dir, "mem", "mnemopi.db"), ["through a login shell"]);
+			expect(await exportMemory(login, { src: join(dir, "mem"), work: join(dir, "work"), tarPath: join(dir, "out.tar") })).toBe(true);
+		}
+	});
+
+	test.skipIf(!HAS_SQLITE3)("a real failure names sqlite3's last stderr line", async () => {
+		const src = join(dir, "mem");
+		await mkdir(src, { recursive: true });
+		await writeFile(join(src, "mnemopi.db"), "this is not a database, just text that is long enough to be read as a header");
+		const failure = await exportMemory(localExec(), { src, work: join(dir, "work"), tarPath: join(dir, "out.tar") }).catch((error: unknown) => error);
+		expect(execFailure(failure)).toMatch(/^exit 1: .*(not a database|file is not a database)/i);
+		expect(execFailure(new ExecError("true", 2, "\n"))).toBe("exit 2, no error output");
+		expect(execFailure(new Error("boom"))).toBe("boom");
 	});
 
 	test("the VM's default directory is omp's mnemopi store under the agent dir", () => {

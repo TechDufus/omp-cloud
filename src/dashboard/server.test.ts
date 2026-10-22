@@ -258,6 +258,16 @@ describe("the guard on the listener", () => {
 		expect(res.status).toBe(404);
 	});
 
+	test("a VM's preview is never served on the dashboard's origin, signed in or not", async () => {
+		const cookie = await signIn();
+		for (const path of ["/api/v1/threads/aaaaaaaaaaa1/ports/8000/", "/api/v1/threads/aaaaaaaaaaa1/ports/8000", "/api/v1/threads/aaaaaaaaaaa1/ports/8000/x/y?z=1"]) {
+			const signedIn = await dash(path, { headers: { cookie, [DASHBOARD_HEADER]: "1" } });
+			expect(signedIn.status).toBe(404);
+			const anonymous = await dash(path, { headers: { [DASHBOARD_HEADER]: "1" } });
+			expect(anonymous.status).toBe(404);
+		}
+	});
+
 	test("anything else is 404, the page itself being the HTML route's", async () => {
 		expect((await dash("/")).status).toBe(404);
 		expect((await dash("/session/x")).status).toBe(404);

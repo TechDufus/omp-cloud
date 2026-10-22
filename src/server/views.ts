@@ -178,6 +178,8 @@ export interface ThreadDetailView extends Omit<ThreadSummaryView, "turns"> {
 	configOverlays: string[];
 	/** What the thread tightened of the service's policy, as sent and normalized; `{}` for none. */
 	policy: Thread["policy"];
+	/** The repository setup the thread's environment is built with (`run` script, `cacheFiles` that key the cache); null for none. */
+	setup: { run: string; cacheFiles: string[] } | null;
 	/** The sandbox the thread runs in; null before one exists. */
 	vm: { sandboxId: string; state: VmRecord["state"]; pid: number | null } | null;
 }
@@ -365,6 +367,7 @@ export function detailView(thread: Thread, stats: ThreadStats, turns: Turn[], vm
 		paths: { ...thread.paths },
 		configOverlays: [...thread.configOverlays],
 		policy: structuredClone(thread.policy),
+		setup: thread.setup === null ? null : { run: thread.setup.run, cacheFiles: [...thread.setup.cacheFiles] },
 		vm: vm === null ? null : { sandboxId: vm.sandboxId, state: vm.state, pid: vm.pid },
 	};
 }

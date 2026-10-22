@@ -41,6 +41,7 @@ import { handleLogins } from "./logins";
 import { GITHUB_PATH, LOGINS_PATH, SECRETS_PATH, SETTINGS_PATH, SIGNING_PATH } from "./paths";
 import { PairingRoutes } from "./pairing-routes";
 import { requireScope } from "./scopes";
+import { NO_VM_MESSAGE, type PreviewOptions, previewPort, proxyPreview, requireNoUpgrade } from "./preview";
 import { handleSecrets } from "./secrets-routes";
 import { handleSettings } from "./settings-routes";
 import { handleSigning } from "./signing-routes";
@@ -87,6 +88,8 @@ export interface AppOptions {
 	secrets?: ServiceSecrets;
 	/** The MCP proxy: whether it is listening (`whoami.mcpProxy`), and the service's own addresses an http MCP server may not point at. Absent: no proxy. */
 	mcp?: { proxy: boolean; selfHosts: readonly string[] };
+	/** Relays `/api/v1/threads/{id}/ports/{port}`: the vmon address and the runner's lookup of the thread's running sandbox. Absent when the runner is off: those routes answer 409. */
+	preview?: PreviewOptions;
 }
 
 /** What the GitHub and signing routes work with. */
@@ -129,6 +132,8 @@ const CAPABILITIES: readonly string[] = [
 	"secrets.store",
 	"mcp.proxy",
 	"threads.memory",
+	"threads.preview",
+	"threads.setup",
 ];
 
 /** A message body: its text plus JSON framing. */
@@ -141,7 +146,8 @@ type ThreadRoute =
 	| { name: "get" | "delete" | "events" | "messages" | "irc" | "stop" | "result" | "conversation" | "memory" | "diff" | "tree"; id: string }
 	| { name: "answer"; id: string; turn: number; question: number }
 	| { name: "reply"; id: string; turn: number }
-	| { name: "files"; id: string; path: string };
+	| { name: "files"; id: string; path: string }
+	| { name: "port"; id: string; port: number; path: string };
 
 type Route = { name: "whoami" | "list" | "create" } | ThreadRoute;
 
@@ -167,6 +173,10 @@ function matchRoute(method: string, pathname: string): Route | null {
 	}
 	const id = rest[1] ?? "";
 	if (!THREAD_ID_PATTERN.test(id)) return null;
+	if (rest[2] === "ports" && rest.length >= 4) {
+		// Any method; the path after the port is relayed as it came, still percent-encoded.
+		return { name: "port", id, port: previewPort(rest[3] ?? ""), path: `/${rest.slice(4).join("/")}` };
+	}
 	if (rest.length === 2) {
 		if (method === "GET") return { name: "get", id };
 		return method === "DELETE" ? { name: "delete", id } : null;
@@ -259,7 +269,7 @@ function stringListField(body: Record<string, unknown>, key: string): string[] {
 
 /** Builds the API over `options.store`. */
 export function createApp(options: AppOptions): App {
-	const { store, apiTokenSha256, dataDir, models, ompVersion, logins, settings, git, remote, modelIds, update, github } = options;
+	const { store, apiTokenSha256, dataDir, models, ompVersion, logins, settings, git, remote, modelIds, update, github, preview } = options;
 	const secrets = options.secrets ?? new ServiceSecrets(store);
 	const questionTimeoutSeconds = options.questionTimeoutSeconds ?? 0;
 	const inspectGate = options.inspectGate ?? INSPECTION_GATE;
@@ -353,6 +363,13 @@ export function createApp(options: AppOptions): App {
 			case "conversation":
 			case "memory":
 				return download(thread, route.name, caller, req);
+			case "port": {
+				requireNoUpgrade(req);
+				requireActive(store, caller, req.signal);
+				if (preview === undefined) throw new ApiError(409, NO_VM_MESSAGE);
+				const sandboxId = await preview.vmFor(thread.id);
+				return proxyPreview({ vmonUrl: preview.vmonUrl, sandboxId, port: route.port, path: route.path, req });
+			}
 			case "answer": {
 				const body = await readJsonObject(req, MAX_ANSWER_BODY_BYTES);
 				requireActive(store, caller, req.signal);

@@ -863,3 +863,38 @@ describe("signResult", () => {
 		expect(await readdir(join(dataDir, "git", "tmp"))).toEqual([]);
 	});
 });
+
+describe("fileHashes", () => {
+	const sha256 = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex");
+
+	test("hashes each file as the handoff commit holds it, null for one it lacks, on a full-history thread", async () => {
+		const sourceBundle = await bundleOf(base, null);
+		const service = await open();
+		const hashes = await service.fileHashes({ threadId: ID, remoteURL: server.url("app"), baseCommit: "", sourceBundle, commit: base, paths: ["a.txt", "b.txt", "bun.lock", "sub/go.sum"] });
+		expect(hashes).toEqual({ "a.txt": sha256("one\n"), "b.txt": sha256("two\n"), "bun.lock": null, "sub/go.sum": null });
+		expect(await readdir(join(dataDir, "git", "tmp"))).toEqual([]);
+	});
+
+	test("reads the commit it is asked for, not the checked-out one, so a changed file changes its hash", async () => {
+		const before = await bundleOf(base, null);
+		const changed = await commit(work, "b.txt", "three\n");
+		const after = await bundleOf(changed, null);
+		const service = await open();
+		const input = { threadId: ID, remoteURL: server.url("app"), baseCommit: "", paths: ["b.txt"] };
+		expect(await service.fileHashes({ ...input, sourceBundle: before, commit: base })).toEqual({ "b.txt": sha256("two\n") });
+		expect(await service.fileHashes({ ...input, sourceBundle: after, commit: changed })).toEqual({ "b.txt": sha256("three\n") });
+	});
+
+	test("reads a delta thread from the git cache's handoff", async () => {
+		const service = await open();
+		await service.prepare(ID, repoOf(base), null);
+		const hashes = await service.fileHashes({ threadId: ID, remoteURL: server.url("app"), baseCommit: base, sourceBundle: null, commit: base, paths: ["a.txt", "nope"] });
+		expect(hashes).toEqual({ "a.txt": sha256("one\n"), nope: null });
+	});
+
+	test("a thread whose base is not available is an InspectError, and nothing is left behind", async () => {
+		const service = await open();
+		await expect(service.fileHashes({ threadId: ID, remoteURL: server.url("app"), baseCommit: "", sourceBundle: null, commit: base, paths: ["a.txt"] })).rejects.toThrow("the thread's source bundle is not stored");
+		expect(await readdir(join(dataDir, "git", "tmp"))).toEqual([]);
+	});
+});

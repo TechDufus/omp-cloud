@@ -23,6 +23,7 @@ import { EnvdRpcProcess, envdSpawner } from "./envd-transport";
 import { isRecord } from "../src/guards";
 import { hostOmp } from "../src/omp-version";
 import { installedVmonVersion } from "../src/vmon/pin";
+import { DEFAULT_RECIPE } from "../src/vmon/recipe";
 import { templateName } from "../src/vmon/template";
 import type { AskQuestion } from "./rpc-ui";
 
@@ -118,7 +119,7 @@ async function play(prompt: string): Promise<number> {
 		sandbox = await Sandbox.connect(flags.sandbox, { timeoutMs: SANDBOX_TIMEOUT_MS });
 		phase(`connected to ${sandbox.sandboxId} (resumed if it was paused)`);
 	} else {
-		const template = await templateName(TEMPLATE_BASE, (await hostOmp()).version, await installedVmonVersion());
+		const template = await templateName(TEMPLATE_BASE, (await hostOmp()).version, await installedVmonVersion(), DEFAULT_RECIPE);
 		sandbox = await Sandbox.create(template, {
 			metadata: { app: APP },
 			timeoutMs: SANDBOX_TIMEOUT_MS,

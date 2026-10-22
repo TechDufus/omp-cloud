@@ -1,4 +1,5 @@
 import { type ConnectionOpts, defaultBuildLogger, Template } from "e2b";
+import type { Recipe } from "./recipe";
 
 /** omp's build service origin, as `omp update` and Tern resolve it: `PI_BUILD_URL`, else this. */
 const DEFAULT_BUILD_URL = "https://build.stencil.so";
@@ -7,16 +8,18 @@ const DEFAULT_BUILD_URL = "https://build.stencil.so";
 const BUILD_SIZE = { cpuCount: 2, memoryMB: 4096 };
 
 /**
- * The recipe of the template of omp `version`: Debian trixie, the tools the runner needs, omp. Provider config is not
- * part of it: the runner writes it per sandbox. vmon provisions the image itself by its `/etc/os-release` (init, its
- * guest agent, sshd, sudo, curl, git, jq and the default user `user` with passwordless sudo), so the base image needs
- * nothing but a root filesystem.
+ * The recipe of the template of omp `version`: Debian trixie, the tools the runner needs, the owner's `recipe.packages`,
+ * omp, then the owner's `recipe.setup` lines as root. Provider config is not part of it: the runner writes it per
+ * sandbox. vmon provisions the image itself by its `/etc/os-release` (init, its guest agent, sshd, sudo, curl, git, jq
+ * and the default user `user` with passwordless sudo), so the base image needs nothing but a root filesystem.
  */
-export function agentTemplate(version: string) {
-	return Template()
+export function agentTemplate(version: string, recipe: Recipe) {
+	const template = Template()
 		.fromImage("debian:trixie-slim")
-		.aptInstall(["ca-certificates", "curl", "git", "jq", "procps", "sqlite3"])
-		.runCmd(installOmp(version), { user: "root" });
+		.aptInstall(["ca-certificates", "curl", "git", "jq", "procps", "sqlite3"]);
+	const withPackages = recipe.packages.length === 0 ? template : template.aptInstall(recipe.packages);
+	const withOmp = withPackages.runCmd(installOmp(version), { user: "root" });
+	return recipe.setup.length === 0 ? withOmp : withOmp.runCmd(["set -eux", ...recipe.setup].join("\n"), { user: "root" });
 }
 
 /**
@@ -28,10 +31,10 @@ export function agentTemplate(version: string) {
  * `^[a-z0-9-_]+$`), so the omp version and the recipe hash live in the tag. `Template.toJSON(recipe, true)` serializes
  * the recipe offline and deterministically, base image included.
  */
-export async function templateName(base: string, version: string, vmonVersion: string | null): Promise<string> {
-	const recipe = await Template.toJSON(agentTemplate(version), true);
+export async function templateName(base: string, version: string, vmonVersion: string | null, recipe: Recipe): Promise<string> {
+	const json = await Template.toJSON(agentTemplate(version, recipe), true);
 	const hash = new Bun.CryptoHasher("sha256")
-		.update(recipe)
+		.update(json)
 		.update(JSON.stringify(BUILD_SIZE))
 		.update(JSON.stringify({ vmon: vmonVersion }))
 		.digest("hex");
@@ -66,10 +69,10 @@ rm -rf "$tmp"
 ${quoted(bin)} --version`;
 }
 
-/** Builds the template `name` (the recipe `agentTemplate(version)` at `BUILD_SIZE`) and returns the seconds it took. */
-export async function buildTemplate(name: string, version: string, connection: ConnectionOpts, log = false): Promise<number> {
+/** Builds the template `name` (the recipe `agentTemplate(version, recipe)` at `BUILD_SIZE`) and returns the seconds it took. */
+export async function buildTemplate(name: string, version: string, recipe: Recipe, connection: ConnectionOpts, log = false): Promise<number> {
 	const started = performance.now();
-	await Template.build(agentTemplate(version), name, {
+	await Template.build(agentTemplate(version, recipe), name, {
 		...connection,
 		...BUILD_SIZE,
 		...(log ? { onBuildLogs: defaultBuildLogger() } : {}),
@@ -79,7 +82,7 @@ export async function buildTemplate(name: string, version: string, connection: C
 
 export interface TemplateOps {
 	exists(name: string): Promise<boolean>;
-	build(name: string, version: string): Promise<void>;
+	build(name: string, version: string, recipe: Recipe): Promise<void>;
 }
 
 /** The templates `<base>:<version>-<recipe hash>` of the omp versions threads ask for, built on first use. */
@@ -103,15 +106,15 @@ export class Templates {
 	 * wait for the same build, and a failed build rejects each of them (the next call tries again). `onBuilding`
 	 * runs for every caller that has to wait for a build, before the wait.
 	 */
-	async ensure(version: string, onBuilding?: () => void): Promise<string> {
-		const name = await templateName(this.#base, version, await this.#vmonVersion());
+	async ensure(version: string, recipe: Recipe, onBuilding?: () => void): Promise<string> {
+		const name = await templateName(this.#base, version, await this.#vmonVersion(), recipe);
 		let build = this.#builds.get(name);
 		if (build === undefined) {
 			if (await this.#ops.exists(name)) return name;
 			// Another caller may have started the build while `exists` was answering.
 			build = this.#builds.get(name);
 			if (build === undefined) {
-				build = this.#ops.build(name, version).finally(() => this.#builds.delete(name));
+				build = this.#ops.build(name, version, recipe).finally(() => this.#builds.delete(name));
 				this.#builds.set(name, build);
 			}
 		}
@@ -125,9 +128,9 @@ export class Templates {
 	 * omp upgrade then finds it ready instead of waiting ~80 s. A thread that arrives meanwhile shares the build. Never
 	 * throws: a failure is logged and the first thread builds it again (`ensure`).
 	 */
-	async prebuild(version: string): Promise<void> {
+	async prebuild(version: string, recipe: Recipe): Promise<void> {
 		try {
-			const name = await this.ensure(version, () => console.log(`omp-cloud: building the VM template for omp ${version} in the background`));
+			const name = await this.ensure(version, recipe, () => console.log(`omp-cloud: building the VM template for omp ${version} in the background`));
 			console.log(`omp-cloud: the VM template ${name} is ready`);
 		} catch (error) {
 			console.error(`omp-cloud: building the VM template for omp ${version} in the background failed: ${error instanceof Error ? error.message : String(error)}`);

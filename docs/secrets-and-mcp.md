@@ -74,7 +74,7 @@ A server whose URL has no `Authorization` header and no login the service knows 
 
 ### stdio servers run in the VM
 
-A stdio server is the VM's own process, with the VM's network and egress. Its `command` must exist there: the VM is the template's Debian image with git, curl, jq and omp (`src/vmon/template.ts`), so a server that needs node or python has no runtime unless the agent installs one. Its `args` and a **relative** `cwd` ship as written. Its `env` may hold only references, `${NAME}` or `${NAME:-default}`, which omp fills from the VM's environment: create the value as a [Secret](#secrets) scoped to the repositories that use the server. A literal value keeps the server home: `<name> is not shipped: its env has literal values; put them in the cloud's Secrets and reference them as ${NAME}`. Only `env` is checked: do not put credentials in `args`.
+A stdio server is the VM's own process, with the VM's network and egress. Its `command` must exist there: the VM is the template's Debian image with git, curl, jq, omp and the packages of the `vm.packages` setting (node, npm and python3 by default, [Environments](environments.md#the-vm-toolchain)), so a server that needs another runtime has none unless you add its package to `vm.packages` or the agent installs it. Its `args` and a **relative** `cwd` ship as written. Its `env` may hold only references, `${NAME}` or `${NAME:-default}`, which omp fills from the VM's environment: create the value as a [Secret](#secrets) scoped to the repositories that use the server. A literal value keeps the server home: `<name> is not shipped: its env has literal values; put them in the cloud's Secrets and reference them as ${NAME}`. Only `env` is checked: do not put credentials in `args`.
 
 ### The proxy
 

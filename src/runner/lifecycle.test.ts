@@ -308,7 +308,10 @@ describe("sweepOrphans", () => {
 
 		await sweepOrphans({ ...env, vmon }, 3600, NOW);
 
-		expect(filters).toEqual([{ app: "omp-cloud", service: store.serviceId() }]);
+		expect(filters).toEqual([
+			{ app: "omp-cloud", service: store.serviceId() },
+			{ app: "omp-cloud-env", service: store.serviceId() },
+		]);
 	});
 
 	test("kills a sandbox no VM record holds once it is older than twice the sweep interval, never a younger or a held one", async () => {
@@ -356,6 +359,48 @@ describe("sweepOrphans", () => {
 		}
 
 		expect(killed).toEqual(["other"]);
+	});
+
+	describe("environment build sandboxes", () => {
+		function envSandbox(id: string, ageMinutes: number, service = store.serviceId()): SandboxSummary {
+			return { ...sandboxStarted(id, ageMinutes), metadata: { app: "omp-cloud-env", service, key: "k" } };
+		}
+
+		test("one older than two hours is killed, a running build (younger) is not", async () => {
+			const { vmon, killed } = fakeVmon(null, [envSandbox("stale", 121), envSandbox("building", 119), envSandbox("fresh", 1)]);
+
+			await sweepOrphans({ ...env, vmon }, 60, NOW);
+
+			expect(killed).toEqual(["stale"]);
+		});
+
+		test("the orphan grace does not apply to a build, and another service's builds are never touched", async () => {
+			// Past the orphan grace (10 minutes) yet far from two hours: the orphan pass must not take it.
+			const { vmon, killed } = fakeVmon(null, [envSandbox("building", 30), envSandbox("theirs", 600, "another-service")]);
+
+			await sweepOrphans({ ...env, vmon }, 60, NOW);
+
+			expect(killed).toEqual([]);
+		});
+
+		test("a sandbox that cannot be killed is logged and the sweep goes on", async () => {
+			const { vmon, killed, onKill } = fakeVmon(null, [envSandbox("stuck", 300), envSandbox("other", 300)]);
+			let first = true;
+			onKill.run = () => {
+				if (!first) return;
+				first = false;
+				throw new Error("vmon is busy");
+			};
+			const quiet = console.error;
+			console.error = () => {};
+			try {
+				await sweepOrphans({ ...env, vmon }, 60, NOW);
+			} finally {
+				console.error = quiet;
+			}
+
+			expect(killed).toEqual(["other"]);
+		});
 	});
 
 	test("revokes the gateway clients of threads without a VM record, never a backed one, the service's own or another service's", async () => {

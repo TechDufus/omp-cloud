@@ -21,6 +21,8 @@ import type { ServiceSecrets } from "../secrets/store";
 import type { Settings } from "../settings";
 import { effectivePolicy } from "../settings/tighten";
 import { MAX_SOURCE_BYTES } from "../server/limits";
+import { ApiError } from "../server/errors";
+import { NO_VM_MESSAGE } from "../server/preview";
 import { titleFromReply, type Store } from "../store";
 import {
 	ANSWERED_BY_DROPPED,
@@ -36,6 +38,7 @@ import {
 	type VmRecord,
 } from "../store/types";
 import { egressNetwork, type Vmon } from "../vmon";
+import { recipeOf } from "../vmon/recipe";
 import {
 	ASK_DROPPED,
 	answersResponse,
@@ -49,7 +52,8 @@ import {
 import { APPROVAL_ABORTED, abortAfterDenying, approvalInput, approvalTimeoutAnswer, parseApprovalRequest, PendingApprovals } from "./approval";
 import { ChildTracker } from "./children";
 import { TurnClock } from "./clock";
-import { sandboxExec, shellQuote } from "./exec";
+import { prepareEnvironment } from "./environment";
+import { execFailure, sandboxExec, shellQuote } from "./exec";
 import { adoptSigned, finalizeTurn, type TurnGit } from "./git";
 import { exportMemory } from "./memory-export";
 import { formatDuration } from "./omp-config";
@@ -166,6 +170,8 @@ const RETRY_DELAYS_S = [5, 15, 30, 60, 120] as const;
 const MAX_RESTORES = 2;
 /** The longest wait between idle-pause attempts after failures. */
 const MAX_IDLE_DELAY_S = 3600;
+/** A preview request extends the sandbox's timeout at most this often. */
+const PREVIEW_EXTEND_MS = 60_000;
 /**
  * Re-attach to drop the SDK's buffered output once this many bytes arrived since the last attach. The e2b SDK's
  * `CommandHandle` keeps all stdout in memory; `disconnect()` then `commands.connect(pid)` starts a fresh, empty handle.
@@ -324,6 +330,8 @@ export class ThreadRunner {
 	#childrenLoaded = false;
 	/** The turn that ran last: the one a child that starts while no turn runs belongs to. */
 	#lastTurn: number | null = null;
+	/** When a preview request last extended the sandbox's timeout (epoch ms): it does so at most once per `PREVIEW_EXTEND_MS`. */
+	#previewExtendedAt = 0;
 
 	constructor(
 		private readonly env: ThreadEnv,
@@ -396,6 +404,44 @@ export class ThreadRunner {
 				console.error(`omp-cloud: pausing the VM of thread ${this.id} failed: ${describe(error)}`);
 			});
 		}, delaySeconds * 1000);
+	}
+
+	/**
+	 * The sandbox a preview request goes to. A running VM is used at once, without waiting for the thread's queue (a turn
+	 * holds it for its whole length); a paused one is resumed in the queue. Every call postpones the idle pause, and keeps
+	 * vmon's own sandbox timeout from pausing a VM somebody is looking at. ApiError 409 when the thread has no VM.
+	 */
+	async vmFor(): Promise<string> {
+		const { store, config } = this.env;
+		const record = store.vm(this.id);
+		if (record === null) throw new ApiError(409, NO_VM_MESSAGE);
+		const sandbox = this.#sandbox;
+		let sandboxId = record.sandboxId;
+		let ready = record.state === "running" && sandbox !== null;
+		if (sandbox !== null && ready && Date.now() - this.#previewExtendedAt >= PREVIEW_EXTEND_MS) {
+			// A failure means vmon paused the sandbox at its timeout: resume it below.
+			ready = await sandbox.setTimeout(config.runner.sandboxTimeoutSeconds * 1000).then(
+				() => true,
+				() => false,
+			);
+			if (ready) this.#previewExtendedAt = Date.now();
+		}
+		if (!ready) sandboxId = await this.#serial(() => this.#resumeForPreview());
+		if (this.#running === null) this.scheduleIdle();
+		return sandboxId;
+	}
+
+	async #resumeForPreview(): Promise<string> {
+		const record = this.env.store.vm(this.id);
+		if (record === null) throw new ApiError(409, NO_VM_MESSAGE);
+		try {
+			await this.#reconnect(record, null);
+		} catch (error) {
+			if (error instanceof VmLostError) throw new ApiError(409, "the VM was lost; send the thread a message to restore it");
+			throw error;
+		}
+		this.#previewExtendedAt = Date.now();
+		return record.sandboxId;
 	}
 
 	/** The thread was deleted: ends running work and timers, kills the sandbox, revokes the client, forgets the VM. */
@@ -1131,7 +1177,7 @@ export class ThreadRunner {
 			await downloadBlob(sandbox, MEMORY_EXPORT_PATH, this.env.store, this.id, "memory.tar", MAX_MEMORY_BYTES);
 			await exec(`rm -f ${shellQuote(MEMORY_EXPORT_PATH)}`).catch(() => undefined);
 		} catch (error) {
-			if (!isMissingThread(error)) this.#event("notice", `the memory could not be saved: ${describe(error)}`, turn.id);
+			if (!isMissingThread(error)) this.#event("notice", `the memory could not be saved: ${execFailure(error)}`, turn.id);
 		}
 	}
 
@@ -1309,26 +1355,53 @@ export class ThreadRunner {
 		}
 	}
 
-	/** Creates the sandbox from the thread's omp version's template (building it first if needed), registers the gateway client, provisions the VM. Leaves omp to the caller. */
+	/**
+	 * Creates the sandbox from the thread's omp version's template (building it first if needed) or, when the thread's
+	 * repository has a `setup`, from its cached environment (built first for the thread's first VM), registers the
+	 * gateway client and provisions the VM. Leaves omp to the caller.
+	 */
 	async #createVm(thread: Thread, turnId: number): Promise<VmRecord> {
 		const { store, vmon, gateway, models, config, serviceId } = this.env;
 		const version = thread.ompVersion || this.env.ompVersion;
-		const template = await vmon.ensureTemplate(version, () => this.#event("vm", `building the omp ${version} VM template`, turnId));
+		const template = await vmon.ensureTemplate(version, recipeOf(this.env.settings), () => this.#event("vm", `building the omp ${version} VM template`, turnId));
 		const policy = effectivePolicy(this.env.settings, thread.policy);
-		const sandbox = await vmon.create(
-			template,
-			{ app: "omp-cloud", service: serviceId, thread: this.id, owner: thread.owner },
-			config.runner.sandboxTimeoutSeconds * 1000,
-			egressNetwork(config.gateway.url, policy.egress),
-		);
+		const network = egressNetwork(config.gateway.url, policy.egress);
+		const metadata = { app: "omp-cloud", service: serviceId, thread: this.id, owner: thread.owner };
+		const timeoutMs = config.runner.sandboxTimeoutSeconds * 1000;
+		const { env: serviceEnv, failures } = await this.env.secrets.resolveForThread(thread);
+		for (const failure of failures) this.#event("notice", failure, turnId);
+		const environment =
+			thread.setup === null
+				? null
+				: await prepareEnvironment(
+						{ store, vmon, git: this.env.git, serviceId, sandboxTimeoutMs: timeoutMs },
+						{
+							thread,
+							setup: thread.setup,
+							template,
+							network,
+							secrets: serviceEnv,
+							mayBuild: thread.archivedAt === null && store.threadStats(thread.id).resultTurn === null,
+							emit: text => this.#event("vm", text, turnId),
+							warn: text => this.#event("notice", text, turnId),
+						},
+					);
+		let sandbox: Sandbox;
+		try {
+			sandbox = await vmon.create(environment?.snapshotId ?? template, metadata, timeoutMs, network);
+		} catch (error) {
+			if (environment === null) throw error;
+			// The snapshot is gone from vmon (deleted outside the service, or vmon was reset): forget it and start from the template.
+			store.deleteEnvironment(environment.key);
+			this.#event("notice", `the cached environment ${environment.name} could not start (${describe(error)}); using the template`, turnId);
+			sandbox = await vmon.create(template, metadata, timeoutMs, network);
+		}
 		this.#sandbox = sandbox;
 		const record = store.putVm({ threadId: this.id, sandboxId: sandbox.sandboxId, state: "running", pid: null, sessionFile: null });
 		this.#event("vm", `sandbox ${sandbox.sandboxId} created`, turnId);
 		if (thread.archivedAt !== null) this.#event("vm", "restoring from the archive", turnId);
 		const token = await gateway.issue(clientName(serviceId, this.id));
 		const served = models.providers();
-		const { env: serviceEnv, failures } = await this.env.secrets.resolveForThread(thread);
-		for (const failure of failures) this.#event("notice", failure, turnId);
 		const provisioned = await provisionVm(sandbox, {
 			thread,
 			store,

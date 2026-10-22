@@ -74,7 +74,8 @@ export function usedAddress(pin: ServerPin): string {
 
 /**
  * A fetch that trusts only `pin`'s certificate: `tls.ca` is that certificate, the host name is not checked,
- * redirects are refused, and the stored addresses are tried in order (the last good one first) when a connection fails.
+ * redirects are refused unless the caller asks for `redirect: "manual"` (the preview relay hands a previewed app's own
+ * redirects to the browser), and the stored addresses are tried in order (the last good one first) when a connection fails.
  * `input` is any URL of the service; its host is replaced by each address in turn.
  */
 export function pinnedFetch(pin: ServerPin): FetchFn {
@@ -90,7 +91,7 @@ export function pinnedFetch(pin: ServerPin): FetchFn {
 			const target = new URL(url);
 			target.host = address;
 			try {
-				const res = await fetch(target.href, { ...init, tls: { ca, checkServerIdentity: () => undefined }, redirect: "error" });
+				const res = await fetch(target.href, { ...init, tls: { ca, checkServerIdentity: () => undefined }, redirect: init?.redirect === "manual" ? "manual" : "error" });
 				lastGood.set(key, address);
 				return res;
 			} catch (e) {

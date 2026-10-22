@@ -62,7 +62,19 @@ export interface CloudConfig {
 	home: string;
 	/** Where a paired connection lives (`connection.json` beside the personal file), whether or not it exists. */
 	connectionFile: string;
+	/** The repository's environment setup from `.omp-cloud.yml`: a script the cloud runs once per environment and caches. Repository file only. */
+	setup: SetupConfig | undefined;
 }
+
+/** The `setup` key of a repository file: `run` is a shell script, `cacheFiles` the repository files whose contents key the cached result. */
+export interface SetupConfig {
+	run: string;
+	/** Undefined asks the service for its default list. */
+	cacheFiles: string[] | undefined;
+}
+
+const SETUP_RUN_MAX = 16384;
+const SETUP_CACHE_FILES_MAX = 32;
 
 /** Where a connection comes from: the environment, the personal file, or the pairing of this machine. */
 export type ConnectionSource = Origin | "paired";
@@ -88,11 +100,30 @@ interface FileSettings {
 	deliver: DeliverMode | undefined;
 	/** Which of `url` and `token` the file set, whatever their type. */
 	set: IgnoredKey[];
+	setup: SetupConfig | undefined;
 	warnings: string[];
 }
 
 const LIST_KEYS = ["excludeExtensions", "secretFiles", "secretEnv"] as const;
-const KEYS: readonly string[] = ["url", "token", "policy", "deliver", ...LIST_KEYS];
+const KEYS: readonly string[] = ["url", "token", "policy", "deliver", "setup", ...LIST_KEYS];
+
+/** `setup` as a {@link SetupConfig}, or the reason it does not fit. */
+function parseSetup(value: unknown): SetupConfig | string {
+	if (!isRecord(value)) return "is not a mapping with run and cacheFiles, ignored";
+	for (const key of Object.keys(value)) if (key !== "run" && key !== "cacheFiles") return `has an unknown key ${key}, ignored`;
+	const run = value.run;
+	if (typeof run !== "string" || run.trim() === "") return "needs run: a non-empty script, ignored";
+	if (run.length > SETUP_RUN_MAX) return `run is longer than ${SETUP_RUN_MAX} characters, ignored`;
+	const files = value.cacheFiles;
+	if (files === undefined) return { run, cacheFiles: undefined };
+	if (!Array.isArray(files) || files.length > SETUP_CACHE_FILES_MAX) return `cacheFiles must be a list of at most ${SETUP_CACHE_FILES_MAX} paths, ignored`;
+	for (const file of files) {
+		if (typeof file !== "string" || file === "" || file.length > 200 || file.startsWith("/") || file.split(/[\\/]/).includes("..")) {
+			return "cacheFiles must hold relative repository paths, ignored";
+		}
+	}
+	return { run, cacheFiles: [...new Set(files as string[])] };
+}
 
 function text(v: unknown): string | undefined {
 	return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
@@ -138,7 +169,7 @@ async function readMapping(path: string): Promise<Record<string, unknown> | unde
 function fileSettings(path: string, doc: Record<string, unknown>, repository: boolean): FileSettings {
 	const warnings: string[] = [];
 	const warn = (key: string, what: string): void => void warnings.push(`${path}: ${key} ${what}`);
-	const out: FileSettings = { url: undefined, token: undefined, excludeExtensions: [], secretFiles: [], secretEnv: [], policy: {}, deliver: undefined, set: [], warnings };
+	const out: FileSettings = { url: undefined, token: undefined, excludeExtensions: [], secretFiles: [], secretEnv: [], policy: {}, deliver: undefined, set: [], setup: undefined, warnings };
 	for (const [key, value] of Object.entries(doc)) {
 		if (!KEYS.includes(key)) {
 			warn(key, "is not a known key, ignored");
@@ -151,6 +182,14 @@ function fileSettings(path: string, doc: Record<string, unknown>, repository: bo
 			if (repository) warn(key, "is a personal setting, ignored");
 			else if (value === "tray" || value === "transcript") out.deliver = value;
 			else warn(key, "is not tray or transcript, ignored");
+		} else if (key === "setup") {
+			if (!repository) {
+				warn(key, "belongs in a repository's .omp-cloud.yml, ignored");
+			} else {
+				const parsed = parseSetup(value);
+				if (typeof parsed === "string") warn(key, parsed);
+				else out.setup = parsed;
+			}
 		} else if (key === "policy") {
 			if (isRecord(value)) out.policy = { ...value };
 			else warn(key, "is not a mapping, ignored");
@@ -199,6 +238,7 @@ export async function readConfig(input: ConfigInput): Promise<CloudConfig> {
 		secretFiles: union(personal.secretFiles, repo.secretFiles),
 		secretEnv: union(personal.secretEnv, repo.secretEnv),
 		policy: { ...personal.policy, ...repo.policy },
+		setup: repo.setup,
 		deliver: personal.deliver ?? "tray",
 		deliverFrom: personal.deliver === undefined ? undefined : "personal",
 		personalFile,

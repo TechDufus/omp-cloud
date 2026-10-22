@@ -54,6 +54,7 @@ function summary(over: Partial<HandoffSummary> = {}): HandoffSummary {
 		ompVersion: "18.12.3",
 		overlays: [],
 		mcp: [],
+		setup: null,
 		policy: [],
 		...over,
 	};

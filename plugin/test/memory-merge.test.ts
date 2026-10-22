@@ -128,13 +128,55 @@ describe("mergeWorkingMemory", () => {
 		expect(mergeWorkingMemory(p.local, p.vm, SINCE, Database).inserted).toBe(0);
 	});
 
-	test("a missing local database is created by copying the snapshot into place", async () => {
+	/** The names of the schema objects of `file`, shadow tables of the full-text index included. */
+	function schema(file: string): string[] {
+		const db = new Database(file, { readonly: true });
+		const rows = db.query<{ type: string; name: string }, []>("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+		db.close();
+		return rows.map(r => `${r.type}:${r.name}`);
+	}
+
+	test("a missing local database is created with the schema of a local one and merged, never copied from the snapshot", async () => {
 		const dir = await tmp("omp-cloud-merge-");
 		await makeDb(join(dir, "vm.db"), [{ content: "first cloud memory", at: AFTER }]);
+		await makeDb(join(dir, "reference.db"), [{ content: "the reference's own row", at: BEFORE }]);
 		const local = join(dir, "memories", "mnemopi", "banks", "app-1", "mnemopi.db");
-		expect(mergeWorkingMemory(local, join(dir, "vm.db"), SINCE, Database)).toEqual({ inserted: 1 });
+		expect(mergeWorkingMemory(local, join(dir, "vm.db"), SINCE, Database, join(dir, "reference.db"))).toEqual({ inserted: 1 });
 		expect(contents(local)).toEqual(["first cloud memory"]);
 		expect(found(local, "cloud")).toEqual(["first cloud memory"]);
+		expect(schema(local)).toEqual(schema(join(dir, "reference.db")));
+		expect(await Bun.file(`${local}.${process.pid}.tmp`).exists()).toBe(false);
+	});
+
+	test("a snapshot's extra trigger and table do not reach a database made for it", async () => {
+		const dir = await tmp("omp-cloud-merge-");
+		await makeDb(join(dir, "vm.db"), [{ content: "legit cloud memory", at: AFTER }]);
+		const vm = new Database(join(dir, "vm.db"));
+		vm.run("CREATE TABLE pwned (x INTEGER)");
+		vm.run("CREATE TRIGGER evil AFTER INSERT ON working_memory BEGIN INSERT INTO pwned VALUES (1); END");
+		vm.close();
+		await makeDb(join(dir, "reference.db"), []);
+		const local = join(dir, "memories", "mnemopi", "mnemopi.db");
+		expect(mergeWorkingMemory(local, join(dir, "vm.db"), SINCE, Database, join(dir, "reference.db"))).toEqual({ inserted: 1 });
+		expect(contents(local)).toEqual(["legit cloud memory"]);
+		expect(schema(local).filter(o => o.includes("evil") || o.includes("pwned"))).toEqual([]);
+		// What omp does next: its own connection inserts a row. Nothing of the snapshot fires.
+		const db = new Database(local);
+		db.run("INSERT INTO working_memory(id, content, created_at) VALUES ('local-1', 'a local row', ?)", [AFTER]);
+		expect(db.query("SELECT name FROM sqlite_master WHERE name IN ('evil', 'pwned')").all()).toEqual([]);
+		db.close();
+		expect(contents(local)).toEqual(["a local row", "legit cloud memory"]);
+	});
+
+	test("a missing local database with no local one to copy the schema from is deferred, and nothing is created", async () => {
+		const dir = await tmp("omp-cloud-merge-");
+		await makeDb(join(dir, "vm.db"), [{ content: "waits in the export", at: AFTER }]);
+		const local = join(dir, "memories", "mnemopi", "mnemopi.db");
+		const merged = mergeWorkingMemory(local, join(dir, "vm.db"), SINCE, Database);
+		expect(merged.inserted).toBe(0);
+		expect(merged.deferred).toContain("no local mnemopi database");
+		expect(await Bun.file(local).exists()).toBe(false);
+		expect(await Bun.file(`${local}.${process.pid}.tmp`).exists()).toBe(false);
 	});
 
 	test("a snapshot with fewer columns merges through the columns both databases have", async () => {
@@ -228,12 +270,26 @@ describe("mergeCloudMemory", () => {
 		expect(await mergeCloudMemory({ client: r.client, target, settings, agentDir: r.agentDir })).toBe(0);
 	});
 
-	test("a missing local project bank is created from the VM's", async () => {
+	test("a missing local project bank is created with the schema of the local default database", async () => {
 		const r = await rig(async dir => {
 			await makeDb(join(dir, "banks", vmBank, "mnemopi.db"), [{ content: "project cloud memory", at: AFTER }]);
 		});
+		await makeDb(r.local("mnemopi.db"), []);
 		expect(await mergeCloudMemory({ client: r.client, target, settings, agentDir: r.agentDir })).toBe(1);
 		expect(found(r.local("banks", "app-laptop", "mnemopi.db"), "project")).toEqual(["project cloud memory"]);
+	});
+
+	test("with no local database at all the merge is deferred with a warning and nothing is created", async () => {
+		const r = await rig(async dir => {
+			await makeDb(join(dir, "mnemopi.db"), [{ content: "global cloud memory", at: AFTER }]);
+			await makeDb(join(dir, "banks", vmBank, "mnemopi.db"), [{ content: "project cloud memory", at: AFTER }]);
+		});
+		const told: string[] = [];
+		expect(await mergeCloudMemory({ client: r.client, target, settings, agentDir: r.agentDir, onDeferred: m => told.push(m) })).toBe(0);
+		expect(told).toHaveLength(2);
+		expect(told[0]).toContain(target.id);
+		expect(await Bun.file(r.local("mnemopi.db")).exists()).toBe(false);
+		expect(await Bun.file(r.local("banks", "app-laptop", "mnemopi.db")).exists()).toBe(false);
 	});
 
 	test("without a handoff bank only the default database merges", async () => {
@@ -241,6 +297,7 @@ describe("mergeCloudMemory", () => {
 			await makeDb(join(dir, "mnemopi.db"), [{ content: "global cloud memory", at: AFTER }]);
 			await makeDb(join(dir, "banks", vmBank, "mnemopi.db"), [{ content: "project cloud memory", at: AFTER }]);
 		});
+		await makeDb(r.local("banks", "other", "mnemopi.db"), []);
 		expect(await mergeCloudMemory({ client: r.client, target: { ...target, bank: "" }, settings, agentDir: r.agentDir })).toBe(1);
 		expect(await Bun.file(r.local("banks", vmBank, "mnemopi.db")).exists()).toBe(false);
 	});
@@ -251,6 +308,7 @@ describe("mergeCloudMemory", () => {
 			await makeDb(join(dir, "banks", named, "mnemopi.db"), [{ content: "team memory", at: AFTER }]);
 			await makeDb(join(dir, "banks", vmBank, "mnemopi.db"), [{ content: "unnamed memory", at: AFTER }]);
 		});
+		await makeDb(r.local("mnemopi.db"), []);
 		expect(await mergeCloudMemory({ client: r.client, target, settings: { ...settings, bank: "team" }, agentDir: r.agentDir })).toBe(1);
 		expect(contents(r.local("banks", "app-laptop", "mnemopi.db"))).toEqual(["team memory"]);
 	});

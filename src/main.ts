@@ -191,6 +191,7 @@ export async function serve(args: readonly string[]): Promise<void> {
 			ompVersion,
 			schema: MIGRATIONS.length,
 		});
+		const started = runner;
 		const app = createApp({
 			store,
 			apiTokenSha256: config.apiTokenSha256,
@@ -211,6 +212,7 @@ export async function serve(args: readonly string[]): Promise<void> {
 					: { origin: dashboardUrl, upstream: dashboardUpstream(config.dashboard), sessions: dashboardSessions },
 			vmon,
 			vmonDashboard: `${config.vmon.url}/dashboard/`,
+			preview: started === undefined ? undefined : { vmonUrl: config.vmon.url, vmFor: threadId => started.vmFor(threadId) },
 			remote: remote?.settings,
 			update,
 		});

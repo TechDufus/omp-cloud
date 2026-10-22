@@ -330,6 +330,8 @@ describe("whoami", () => {
 				"secrets.store",
 				"mcp.proxy",
 				"threads.memory",
+				"threads.preview",
+				"threads.setup",
 			],
 			limits: { maxMessageBytes: MAX_TEXT_BYTES, maxAnswerBytes: MAX_QUESTION_TEXT_BYTES, maxUploadBytes: MAX_SOURCE_BYTES, listMax: 200, maxTurns: MAX_TURNS },
 			spend: { todayUSD: 0, dayCapUSD: 0 },
@@ -433,7 +435,8 @@ describe("thread detail", () => {
 		const res = await call("GET", threadPath());
 		expect(res.status).toBe(200);
 		const body = await jsonOf(res);
-		expect(keysOf(body)).toEqual(sorted(...SUMMARY_KEYS, "paths", "configOverlays", "policy", "vm"));
+		expect(keysOf(body)).toEqual(sorted(...SUMMARY_KEYS, "paths", "configOverlays", "policy", "setup", "vm"));
+		expect(at(body, "setup")).toBeNull();
 		expect(at(body, "vm")).toBeNull();
 		expect(at(body, "phase")).toBe("starting");
 		expect(at(body, "latest")).toBeNull();
@@ -461,6 +464,13 @@ describe("thread detail", () => {
 		expect(vm).toEqual({ sandboxId: "sbx-1", state: "paused", pid: 4242 });
 		store.putVm({ threadId: ID, sandboxId: "sbx-1", state: "running", pid: null, sessionFile: null });
 		expect(at(await jsonOf(await call("GET", threadPath())), "vm")).toEqual({ sandboxId: "sbx-1", state: "running", pid: null });
+	});
+
+	test("shows the thread's repository setup in the detail only", async () => {
+		seed(ID, { setup: { run: "bun install", cacheFiles: ["bun.lock"] } });
+		expect(at(await jsonOf(await call("GET", threadPath())), "setup")).toEqual({ run: "bun install", cacheFiles: ["bun.lock"] });
+		const list = await jsonOf(await call("GET", "/api/v1/threads"));
+		expect(keysOf(at(list, "threads", 0))).toEqual(SUMMARY_KEYS);
 	});
 
 	test("serves a thread's name, archive state, metrics and activity, and its turns' requests, tools and context", async () => {

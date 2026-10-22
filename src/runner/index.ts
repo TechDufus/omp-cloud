@@ -14,6 +14,7 @@ import type { ServiceSecrets } from "../secrets/store";
 import type { Settings } from "../settings";
 import type { Store } from "../store";
 import type { Vmon } from "../vmon";
+import { recipeOf } from "../vmon/recipe";
 import { archiveSweep, sweepOrphans } from "./lifecycle";
 import { clientName, loseVm, releaseVm, serviceClientName, ThreadRunner, type ThreadEnv } from "./thread";
 
@@ -99,7 +100,7 @@ export class Runner {
 		}
 		runner.#scheduleSweep(Math.min(FIRST_SWEEP_SECONDS, options.config.runner.lifecycleSweepSeconds));
 		// The template of the host's omp for the installed vmon, built in the background when missing (never throws).
-		void options.vmon.prebuildTemplate(options.ompVersion);
+		void options.vmon.prebuildTemplate(options.ompVersion, recipeOf(options.settings));
 		return runner;
 	}
 
@@ -113,6 +114,11 @@ export class Runner {
 		await Promise.all([...this.#threads.values()].map(thread => thread.detach()));
 		await Promise.race([this.#sweeping, Bun.sleep(SWEEP_STOP_WAIT_MS)]);
 		this.#threads.clear();
+	}
+
+	/** The sandbox of the thread's VM for a preview request; see `ThreadRunner.vmFor`. */
+	vmFor(threadId: string): Promise<string> {
+		return this.#thread(threadId).vmFor();
 	}
 
 	/** Runs one sweep after `delaySeconds`, then the next one `lifecycleSweepSeconds` after it ended. */

@@ -129,6 +129,19 @@ export interface SignInput {
 	committer: { name: string; email: string } | null;
 }
 
+/** What `fileHashes` reads: the thread's base (as `SignInput` holds it) and the files to hash at `commit`. */
+export interface FileHashesInput {
+	threadId: string;
+	remoteURL: string;
+	baseCommit: string;
+	/** The path of `source.bundle`; null when the thread has none. Needed by full-history threads. */
+	sourceBundle: string | null;
+	/** The handoff commit: a full object name the base history holds. */
+	commit: string;
+	/** Repository-relative paths. */
+	paths: readonly string[];
+}
+
 /** A result bundle whose new commits the service signed; `dispose` deletes it. */
 export interface SignedResult {
 	bundlePath: string;
@@ -399,6 +412,33 @@ export class GitService {
 		} catch (error) {
 			await rm(dir, { recursive: true, force: true });
 			throw error;
+		}
+	}
+
+	/**
+	 * The SHA-256 (hex) of each of `paths` as the thread's repository holds it at `commit` (a full object name, in the
+	 * thread's base history), null for a path that is not there. Reads a scratch repository built as `inspect` builds
+	 * one. Throws `InspectError` (`base`) when the base is not available, `Error` for local failures.
+	 */
+	async fileHashes(input: FileHashesInput): Promise<Record<string, string | null>> {
+		const dir = await mkdtemp(join(this.#tmpDir, "hashes-"));
+		const repo = join(dir, "repo.git");
+		const local = { cwd: repo, timeoutMs: LOCAL_TIMEOUT_MS };
+		const hash = async (): Promise<Record<string, string | null>> => {
+			await this.#ok(["init", "--bare", "--quiet", repo], { timeoutMs: LOCAL_TIMEOUT_MS });
+			const source: InspectSource = { threadId: input.threadId, remoteURL: input.remoteURL, baseCommit: input.baseCommit, sourceBundle: input.sourceBundle, resultBundle: null, resultBranch: "" };
+			await this.#loadBase(source, repo, local);
+			const hashes: Record<string, string | null> = {};
+			for (const path of input.paths) {
+				const read = await this.#runRaw(["cat-file", "blob", `${input.commit}:${path}`], local);
+				hashes[path] = read.code === 0 ? new Bun.CryptoHasher("sha256").update(read.stdout).digest("hex") : null;
+			}
+			return hashes;
+		};
+		try {
+			return input.baseCommit === "" ? await hash() : await this.#locked(this.#cachePath(this.normalize(input.remoteURL)), hash);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
 		}
 	}
 

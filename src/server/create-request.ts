@@ -4,7 +4,7 @@ import { SettingError } from "../settings/registry";
 import type { ThreadPolicy } from "../settings/policy";
 import { parseThreadPolicy } from "../settings/tighten";
 import { MAX_TEXT_BYTES, THINKING_LEVELS } from "../store/types";
-import type { Author, NewThread, Paths, Repo, ThreadMcpServer, ThreadOrigin, ThreadSecrets } from "../store/types";
+import type { Author, NewThread, Paths, Repo, ThreadMcpServer, ThreadOrigin, ThreadSecrets, ThreadSetup } from "../store/types";
 import { ApiError } from "./errors";
 
 /** A validated create request. */
@@ -49,6 +49,23 @@ const MAX_CONFIG_OVERLAYS = 8;
 const OVERLAY_SEGMENT = /^[A-Za-z0-9._-]+$/;
 const REF_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const MAX_SESSION_CHARS = 128;
+const MAX_SETUP_RUN_CHARS = 16384;
+const MAX_SETUP_CACHE_FILES = 32;
+/** The repository files whose contents key a cached environment when a request's `setup` names none: the lockfiles and requirement lists of the common ecosystems. */
+export const DEFAULT_SETUP_CACHE_FILES: readonly string[] = [
+	"bun.lock",
+	"bun.lockb",
+	"package-lock.json",
+	"pnpm-lock.yaml",
+	"yarn.lock",
+	"Cargo.lock",
+	"go.sum",
+	"poetry.lock",
+	"uv.lock",
+	"requirements.txt",
+	"Gemfile.lock",
+	"composer.lock",
+];
 /** The name of a scratch thread's repository when the request gives none. */
 const SCRATCH_NAME = "scratch";
 
@@ -301,6 +318,31 @@ function parseMemory(body: Record<string, unknown>): string {
 	return bank;
 }
 
+/**
+ * Validates `setup`: absent or null is none, else `{run, cacheFiles?}` with a script of 1 to 16384 characters and at
+ * most 32 clean relative repository paths whose contents key the cached environment (`DEFAULT_SETUP_CACHE_FILES` when
+ * omitted).
+ */
+function parseSetup(body: Record<string, unknown>): ThreadSetup | null {
+	const raw = body.setup;
+	if (raw === undefined || raw === null) return null;
+	if (!isRecord(raw)) throw bad("setup must be an object");
+	const run = raw.run;
+	if (typeof run !== "string" || run.trim() === "" || run.length > MAX_SETUP_RUN_CHARS || !run.isWellFormed() || run.includes("\0")) {
+		throw bad(`setup.run must be a script of 1 to ${MAX_SETUP_RUN_CHARS} characters`);
+	}
+	const files = raw.cacheFiles;
+	if (files === undefined || files === null) return { run, cacheFiles: [...DEFAULT_SETUP_CACHE_FILES] };
+	if (!Array.isArray(files)) throw bad("setup.cacheFiles must be an array");
+	if (files.length > MAX_SETUP_CACHE_FILES) throw bad(`setup.cacheFiles has ${files.length} entries; at most ${MAX_SETUP_CACHE_FILES}`);
+	const cacheFiles = files.map((file, i) => {
+		if (typeof file !== "string") throw bad(`setup.cacheFiles[${i}] must be a string`);
+		if (!validSecretPath(file)) throw bad(`setup.cacheFiles[${i}]: ${JSON.stringify(cut(file, MAX_QUOTED_CHARS))} must be a clean relative path outside .git`);
+		return file;
+	});
+	return { run, cacheFiles };
+}
+
 /** Validates `configOverlays`: at most 8 clean relative paths of safe segments, in load order. */
 function parseConfigOverlays(body: Record<string, unknown>): string[] {
 	const raw = body.configOverlays ?? [];
@@ -470,6 +512,7 @@ export function parseCreateRequest(raw: unknown, selfHosts: readonly string[] = 
 	const session = parseSession(raw);
 	const name = parseName(raw);
 	const memoryBank = parseMemory(raw);
+	const setup = parseSetup(raw);
 
 	return {
 		thread: {
@@ -492,6 +535,7 @@ export function parseCreateRequest(raw: unknown, selfHosts: readonly string[] = 
 			scratch,
 			mcpServers: mcp.map(server => server.name),
 			memoryBank,
+			setup,
 		},
 		secrets,
 	};

@@ -1,5 +1,6 @@
 import { Sandbox, SandboxNotFoundError, type SandboxNetworkOpts, Template } from "e2b";
 import { installedVmonVersion } from "./pin";
+import type { Recipe } from "./recipe";
 import { buildTemplate, Templates } from "./template";
 
 export interface SandboxSummary {
@@ -70,8 +71,8 @@ export class Vmon {
 			config.template,
 			{
 				exists: name => Template.exists(name, connection),
-				build: async (name, version) => {
-					const seconds = await buildTemplate(name, version, connection);
+				build: async (name, version, recipe) => {
+					const seconds = await buildTemplate(name, version, recipe, connection);
 					console.log(`omp-cloud: built the template ${name} in ${seconds.toFixed(1)} s`);
 				},
 			},
@@ -80,14 +81,14 @@ export class Vmon {
 		return new Vmon(connection, templates);
 	}
 
-	/** The template name of an omp version, built first when it does not exist; see `Templates.ensure`. */
-	ensureTemplate(version: string, onBuilding?: () => void): Promise<string> {
-		return this.templates.ensure(version, onBuilding);
+	/** The template name of an omp version and recipe, built first when it does not exist; see `Templates.ensure`. */
+	ensureTemplate(version: string, recipe: Recipe, onBuilding?: () => void): Promise<string> {
+		return this.templates.ensure(version, recipe, onBuilding);
 	}
 
-	/** Builds the template of omp `version` for the installed vmon in the background when it is missing; never throws. */
-	prebuildTemplate(version: string): Promise<void> {
-		return this.templates.prebuild(version);
+	/** Builds the template of omp `version` and `recipe` for the installed vmon in the background when it is missing; never throws. */
+	prebuildTemplate(version: string, recipe: Recipe): Promise<void> {
+		return this.templates.prebuild(version, recipe);
 	}
 
 	/**
@@ -102,6 +103,20 @@ export class Vmon {
 			lifecycle: { onTimeout: "pause" },
 			...(network === undefined ? {} : { network }),
 		});
+	}
+
+	/**
+	 * A filesystem snapshot of the running `sandbox` under `name`: only the disk is kept (no memory), so a sandbox created
+	 * from it boots cold from that disk. Returns the snapshot id, which `create` takes in place of a template name.
+	 */
+	async snapshot(sandbox: Sandbox, name: string): Promise<string> {
+		const info = await sandbox.createSnapshot({ name, mode: "filesystem" });
+		return info.snapshotId;
+	}
+
+	/** Deletes a snapshot; false when it was already gone. */
+	deleteSnapshot(snapshotId: string): Promise<boolean> {
+		return Sandbox.deleteSnapshot(snapshotId, this.connection);
 	}
 
 	/** Resumes a paused sandbox or extends a running one; null when vmon no longer has it. */

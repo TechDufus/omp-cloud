@@ -155,12 +155,20 @@ function localFox(agentDir: string): string[] {
 	}
 }
 
+/** The laptop's own default mnemopi database, which a new local bank takes its schema from. */
+async function seedLocalStore(r: Rig): Promise<void> {
+	const dir = join(r.agentDir, "memories", "mnemopi");
+	await mkdir(dir, { recursive: true });
+	new Mnemopi({ dbPath: join(dir, "mnemopi.db"), noEmbeddings: true, proactiveLinking: false }).close();
+}
+
 const MNEMOPI = "memory:\n  backend: mnemopi\n";
 
 describe("a finished turn merges the cloud's memories", () => {
 	test("with the mnemopi backend, they reach the local project bank the handoff renamed", async () => {
 		state.memory = await exportTar();
 		const r = await setup(MNEMOPI);
+		await seedLocalStore(r);
 		await finishTurn(r);
 		await until(() => state.requests.includes(`GET /api/v1/threads/${ID}/memory`));
 		await until(() => {
@@ -172,6 +180,15 @@ describe("a finished turn merges the cloud's memories", () => {
 		});
 		expect(localFox(r.agentDir)).toEqual(["the second marker is RED-FOX"]);
 		expect(r.host.notes.filter(n => n[1] === "warning")).toEqual([]);
+	});
+
+	test("without a local mnemopi database to take the schema from, the merge waits and says so", async () => {
+		state.memory = await exportTar();
+		const r = await setup(MNEMOPI);
+		await finishTurn(r);
+		await until(() => r.host.notes.some(n => n[0].includes("are not merged yet")));
+		expect(r.host.notes.find(n => n[0].includes("are not merged yet"))?.[1]).toBe("warning");
+		expect(await Bun.file(join(r.agentDir, "memories", "mnemopi", "banks", "app-laptop", "mnemopi.db")).exists()).toBe(false);
 	});
 
 	test("an archive with an unexpected entry is a warning that names the thread and the entry", async () => {

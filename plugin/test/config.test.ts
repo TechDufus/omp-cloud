@@ -55,6 +55,7 @@ describe("readConfig", () => {
 			secretFiles: [],
 			secretEnv: [],
 			policy: {},
+			setup: undefined,
 			deliver: "tray",
 			deliverFrom: undefined,
 			personalFile: l.personal,
@@ -204,6 +205,41 @@ describe("readConfig", () => {
 		await mkdir(join(l.home, ".omp", "agent"), { recursive: true });
 		await writeFile(join(l.home, ".omp", "agent", "config.yml"), "cloud:\n  url: http://old.example\n  token: old\n");
 		expect(await read(l)).toMatchObject({ url: undefined, token: undefined });
+	});
+
+	test("setup is read from the repository file with its cacheFiles, or without them", async () => {
+		const withFiles = await layout({ repo: "setup:\n  run: |\n    bun install\n    bun run build\n  cacheFiles: [bun.lock, package.json, bun.lock]\n" });
+		expect(await read(withFiles)).toMatchObject({ setup: { run: "bun install\nbun run build\n", cacheFiles: ["bun.lock", "package.json"] }, warnings: [] });
+		const plain = await layout({ repo: "setup:\n  run: make deps\n" });
+		expect(await read(plain)).toMatchObject({ setup: { run: "make deps", cacheFiles: undefined }, warnings: [] });
+		expect((await read(await layout({ repo: "setup:\n  run: x\n  cacheFiles: []\n" }))).setup).toEqual({ run: "x", cacheFiles: [] });
+	});
+
+	test("setup in the personal file warns and is not used", async () => {
+		const l = await layout({ personal: "setup:\n  run: make deps\n" });
+		const cfg = await read(l);
+		expect(cfg.setup).toBeUndefined();
+		expect(cfg.warnings).toEqual([`${l.personal}: setup belongs in a repository's .omp-cloud.yml, ignored`]);
+	});
+
+	test("a setup that does not fit is ignored with a warning that never quotes the script", async () => {
+		const cases: [string, string][] = [
+			["setup: make", "is not a mapping with run and cacheFiles, ignored"],
+			["setup:\n  cacheFiles: [a]\n", "needs run: a non-empty script, ignored"],
+			["setup:\n  run: '  '\n", "needs run: a non-empty script, ignored"],
+			[`setup:\n  run: ${"x".repeat(16385)}\n`, "run is longer than 16384 characters, ignored"],
+			["setup:\n  run: x\n  extra: 1\n", "has an unknown key extra, ignored"],
+			["setup:\n  run: x\n  cacheFiles: lock\n", "cacheFiles must be a list of at most 32 paths, ignored"],
+			[`setup:\n  run: x\n  cacheFiles: [${Array.from({ length: 33 }, (_, i) => `f${i}`).join(", ")}]\n`, "cacheFiles must be a list of at most 32 paths, ignored"],
+			["setup:\n  run: x\n  cacheFiles: [/etc/passwd]\n", "cacheFiles must hold relative repository paths, ignored"],
+			["setup:\n  run: x\n  cacheFiles: ['../x']\n", "cacheFiles must hold relative repository paths, ignored"],
+		];
+		for (const [file, why] of cases) {
+			const l = await layout({ repo: file });
+			const cfg = await read(l);
+			expect(cfg.setup).toBeUndefined();
+			expect(cfg.warnings).toEqual([`${l.repoFile}: setup ${why}`]);
+		}
 	});
 });
 

@@ -1007,6 +1007,15 @@ describe("plain cards", () => {
 		}
 	});
 
+	test("a launch card says what caches the repository environment, in the plain lines and the model text; no row without one", () => {
+		expect(cardPlain(launch({ environment: { cacheFiles: ["bun.lock", "package.json"] } }))).toContain("env setup cached by bun.lock, package.json");
+		expect(cardPlain(launch({ environment: {} }))).toContain("env setup cached by the default lockfiles");
+		expect(cardPlain(launch({ environment: { cacheFiles: [] } }))).toContain("env setup cached by the setup script alone");
+		expect(cardContent(launch({ environment: { cacheFiles: ["bun.lock"] } }))).toContain("Environment setup of .omp-cloud.yml runs once and is cached by bun.lock.");
+		expect(cardPlain(launch({})).some(l => l.startsWith("env setup"))).toBe(false);
+		expect(cardContent(launch({}))).not.toContain("Environment setup");
+	});
+
 	test("a launch card leaves out empty rows and says when the conversation did not ship", () => {
 		const lines = cardPlain(launch({ overlays: [], policy: [], model: "", thinking: "", ompVersion: "", conversation: "too-large", untracked: [], untrackedTotal: 0, withheld: [], warnings: [] }));
 		expect(lines.some(l => l.startsWith("overlays"))).toBe(false);

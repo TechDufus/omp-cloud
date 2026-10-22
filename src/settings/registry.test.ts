@@ -340,6 +340,35 @@ describe("policy.models.allowed", () => {
 	});
 });
 
+describe("vm.packages and vm.setup", () => {
+	const packages = (raw: unknown) => REGISTRY["vm.packages"].parse(raw);
+	const setup = (raw: unknown) => REGISTRY["vm.setup"].parse(raw);
+
+	test("the default packages are the toolchain, the default setup is empty", () => {
+		expect(REGISTRY["vm.packages"].default).toEqual(["build-essential", "python3", "python3-venv", "python3-pip", "nodejs", "npm", "unzip", "ripgrep"]);
+		expect(REGISTRY["vm.setup"].default).toEqual([]);
+		expect(REGISTRY["vm.packages"].type).toBe("string[]");
+	});
+
+	test("packages take Debian package names, up to 200", () => {
+		expect(packages(["docker.io", "g++", "libstdc++-14-dev", "python3.13", "x"])).toEqual(["docker.io", "g++", "libstdc++-14-dev", "python3.13", "x"]);
+		expect(packages([])).toEqual([]);
+		expect(packages(Array.from({ length: 200 }, (_, i) => `p${i}`))).toHaveLength(200);
+		expect(() => packages(Array.from({ length: 201 }, (_, i) => `p${i}`))).toThrow("vm.packages holds at most 200 entries");
+		for (const bad of ["Docker", "-x", "a b", "a;b", "", ".x", "a".repeat(101), "a/b"]) expect(() => packages([bad])).toThrow(SettingError);
+		for (const bad of ["docker.io", ["ok", 3], null, { 0: "x" }]) expect(() => packages(bad)).toThrow("vm.packages must be a list of strings");
+	});
+
+	test("setup takes shell lines, up to 16384 characters in all", () => {
+		expect(setup(["usermod -aG docker user", "echo done"])).toEqual(["usermod -aG docker user", "echo done"]);
+		expect(setup([])).toEqual([]);
+		expect(setup(["x".repeat(16383)])).toHaveLength(1);
+		expect(() => setup(["x".repeat(16384)])).toThrow("vm.setup holds at most 16384 characters in all");
+		expect(() => setup(["a".repeat(10000), "b".repeat(7000)])).toThrow("vm.setup holds at most 16384 characters in all");
+		for (const bad of ["echo hi", [1], null]) expect(() => setup(bad)).toThrow("vm.setup must be a list of strings");
+	});
+});
+
 describe("lifecycle.archiveAfterDays", () => {
 	const parse = (raw: unknown) => REGISTRY["lifecycle.archiveAfterDays"].parse(raw);
 

@@ -1,6 +1,7 @@
 import {
   Archive,
   Bot,
+  Boxes,
   Code,
   DatabaseBackup,
   Download,
@@ -53,6 +54,7 @@ export const NAV: NavGroup[] = [
     items: [
       { source: "docs/configuration.md", icon: SlidersHorizontal },
       { source: "docs/github.md", icon: GitBranch },
+      { source: "docs/environments.md", icon: Boxes },
       { source: "docs/secrets-and-mcp.md", icon: KeyRound },
       { source: "docs/updating.md", icon: RefreshCw },
       { source: "docs/operations.md", icon: DatabaseBackup },

@@ -92,6 +92,8 @@ export interface HandoffSummary {
 	overlays: string[];
 	/** The MCP servers the handoff shipped and how the cloud agent reaches them. */
 	mcp: McpSummary[];
+	/** The repository environment setup shipped (`setup` of `.omp-cloud.yml`); null when none. `cacheFiles` is undefined when the service's default lockfile list applies. */
+	setup: { cacheFiles: string[] | undefined } | null;
 	/** The keys of `policy` the handoff asked for. */
 	policy: string[];
 }
@@ -318,6 +320,7 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 	signal?.throwIfAborted();
 	const meta = who.capabilities.includes("threads.meta");
 	const idempotent = who.capabilities.includes("threads.idempotency");
+	const setupSupported = who.capabilities.includes("threads.setup");
 	// The project bank the VM will look for: a per-project bank of this machine's default mnemopi store, renamed at handoff
 	// (the VM works in another directory, which omp hashes into the bank name).
 	const memoryBank = who.capabilities.includes("threads.memory") ? planMemoryBank(await readMemorySettings(input.pi, input.env), host.cwd, who.vmWorkspace) : undefined;
@@ -424,6 +427,8 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 				const shippedMcp = await mcp();
 				local.push(...shippedMcp.warnings);
 				if (!snap && cfg.secretFiles.length > 0) local.push("secretFiles are files of a repository: none shipped to a scratch thread");
+				const shipSetup = snap !== undefined && cfg.setup !== undefined && setupSupported;
+				if (snap && cfg.setup !== undefined && !setupSupported) local.push("the cloud service cannot run the setup of .omp-cloud.yml; it is not shipped");
 				const scratchEnv = snap ? {} : readSecretEnv(cfg.secretEnv, input.env);
 				const author = snap ? snap.author : await readAuthor(host.cwd);
 				const common = {
@@ -451,6 +456,7 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 						paths: s.paths,
 						secretFiles: s.secretFiles,
 						secretEnv: s.secretEnv,
+						...(cfg.setup !== undefined && shipSetup ? { setup: { run: cfg.setup.run, ...(cfg.setup.cacheFiles !== undefined ? { cacheFiles: cfg.setup.cacheFiles } : {}) } } : {}),
 					};
 					return { request, source: s.bundlePath ?? undefined, conversation: conversationPath, setup: made.path };
 				};
@@ -484,6 +490,7 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 					ompVersion,
 					overlays: made.configOverlays,
 					mcp: shippedMcp.summary,
+					setup: shipSetup && cfg.setup !== undefined ? { cacheFiles: cfg.setup.cacheFiles } : null,
 					policy: Object.keys(plan.policy),
 				};
 				return { ok: true, index, response: created.summary, replayed: created.replayed, workspace: plan.workspace, key: plan.key, warnings: [...local, ...(snap?.warnings ?? []), ...created.summary.warnings], summary };

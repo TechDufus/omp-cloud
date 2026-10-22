@@ -122,6 +122,8 @@ describe("get and list", () => {
 			["policy.spend.threadUSD", "number"],
 			["policy.spend.dayUSD", "number"],
 			["policy.models.allowed", "string[]"],
+			["vm.packages", "string[]"],
+			["vm.setup", "string[]"],
 			["lifecycle.archiveAfterDays", "number"],
 			["update.mode", "enum"],
 			["update.feed", "string"],

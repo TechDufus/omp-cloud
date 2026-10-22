@@ -288,4 +288,18 @@ export const MIGRATIONS: readonly string[] = [
 	`
 	ALTER TABLE threads ADD COLUMN memory_bank TEXT NOT NULL DEFAULT '';
 	`,
+	// 15: the repository setup a thread's `.omp-cloud.yml` asked for (`setup_run` the shell script, '' for none; `setup_cache_files` a JSON array of the repository paths whose contents key the cached environment) and `environments`, the cache of
+	// built environments: `key` is the SHA-256 of the template, repository, script and cache-file hashes, `snapshot_id` the vmon snapshot of the VM the setup ran in.
+	`
+	ALTER TABLE threads ADD COLUMN setup_run TEXT NOT NULL DEFAULT '';
+	ALTER TABLE threads ADD COLUMN setup_cache_files TEXT NOT NULL DEFAULT '[]';
+	CREATE TABLE environments (
+		key TEXT PRIMARY KEY,
+		snapshot_id TEXT NOT NULL,
+		template TEXT NOT NULL,
+		repo TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		last_used_at TEXT NOT NULL
+	);
+	`,
 ];

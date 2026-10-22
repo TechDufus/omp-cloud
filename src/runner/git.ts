@@ -8,7 +8,8 @@ const DEFAULT_AUTHOR_EMAIL = "omp-cloud@localhost";
 
 /**
  * Rebuilds the owner's repository in `workspace` from the uploaded bundle: the bundle's `refs/omp-cloud/handoff` must
- * be `handoffCommit`, and `branch` is checked out there. Sets the commit identity (defaults for an empty author) and
+ * be `handoffCommit`, and `branch` is checked out there; untracked files are removed and ignored ones kept (a workspace from
+ * an environment snapshot still holds its setup's dependencies). Sets the commit identity (defaults for an empty author) and
  * `remote.origin.url` when `remoteURL` is set. Throws `ExecError` when git fails, `Error` on a handoff mismatch.
  */
 export async function restoreRepo(
@@ -30,6 +31,8 @@ export async function restoreRepo(
 		throw new Error(`the uploaded source is at ${got}, not the handoff commit ${input.handoffCommit}`);
 	}
 	await exec(`git -C ${ws} checkout -q -f -B ${shellQuote(input.branch)} ${HANDOFF_REF}`);
+	// An environment snapshot (`setup`) may hold files the setup script left untracked; ignored ones (dependencies) stay.
+	await exec(`git -C ${ws} clean -fdq`);
 	const settings: [string, string][] = [
 		["user.name", input.author.name || DEFAULT_AUTHOR_NAME],
 		["user.email", input.author.email || DEFAULT_AUTHOR_EMAIL],

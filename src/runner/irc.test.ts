@@ -207,6 +207,7 @@ function thread(overrides: Partial<Thread>): Thread {
 		pr: null,
 		mcpServers: [],
 		memoryBank: "",
+		setup: null,
 		...overrides,
 	};
 }

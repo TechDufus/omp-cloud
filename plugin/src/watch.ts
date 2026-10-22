@@ -32,6 +32,7 @@ export function helpLines(): string[] {
 		answer: "/cloud answer <id> [text]",
 		stop: "/cloud stop <id>",
 		pull: "/cloud pull <id>",
+		preview: "/cloud preview <id> <port>",
 		resume: "/cloud resume <id>",
 		delete: "/cloud delete <id>",
 		login: "/cloud login <provider>",

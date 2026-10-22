@@ -373,6 +373,8 @@ export interface Thread {
 	mcpServers: string[];
 	/** The memory bank the thread's laptop used for the project, so the cloud memories merge back into it; "" for none. */
 	memoryBank: string;
+	/** The setup script of the thread's repository (`.omp-cloud.yml` `setup`) and the repository files whose contents key its cached environment; null for none. */
+	setup: ThreadSetup | null;
 }
 
 /** A validated create request: everything `Store.createThread` needs besides the id. */
@@ -410,9 +412,29 @@ export interface NewThread {
 	mcpServers?: string[];
 	/** The laptop's memory bank for the project; absent means none. */
 	memoryBank?: string;
+	/** The repository setup of the create request; absent means none. */
+	setup?: ThreadSetup | null;
 }
 
 export type ThreadOrigin = "tool" | "user";
+
+/** What a repository's `setup` is: the shell script and the repository paths that key its cache. */
+export interface ThreadSetup {
+	run: string;
+	cacheFiles: string[];
+}
+
+/** A cached repository environment: the vmon snapshot of a VM after the setup ran. */
+export interface EnvironmentRow {
+	/** SHA-256 hex of the template, the repository, the script and the cache files' hashes. */
+	key: string;
+	snapshotId: string;
+	/** The template the setup ran on. */
+	template: string;
+	repo: string;
+	createdAt: string;
+	lastUsedAt: string;
+}
 
 /** The filters of a paged thread list; an absent filter does not narrow. */
 export interface ThreadListFilter {

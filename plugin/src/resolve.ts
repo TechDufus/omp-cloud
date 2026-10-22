@@ -86,6 +86,7 @@ export async function resolveParsed(parsed: Parsed, client: Pick<CloudClient, "t
 		throw e;
 	}
 	if (parsed.kind === "send" || parsed.kind === "answer") return { kind: parsed.kind, thread, text: parsed.text };
+	if (parsed.kind === "preview") return { kind: "preview", thread, port: parsed.port };
 	if (parsed.kind === "pull") return { kind: "pull", thread, into: parsed.into };
 	return { kind: parsed.kind, thread };
 }

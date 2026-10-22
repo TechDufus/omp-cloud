@@ -65,6 +65,12 @@ export function isSecretLiteral(value: string): boolean {
 
 const MAX_PROTECTED_PATTERNS = 100;
 
+/** The packages the VM template carries unless `vm.packages` says otherwise. */
+export const DEFAULT_VM_PACKAGES = ["build-essential", "python3", "python3-venv", "python3-pip", "nodejs", "npm", "unzip", "ripgrep"] as const;
+const MAX_VM_PACKAGES = 200;
+const VM_PACKAGE_PATTERN = /^[a-z0-9][a-z0-9+.-]{0,99}$/;
+const MAX_VM_SETUP_CHARS = 16384;
+
 /** The most entries of any list or record setting. */
 const MAX_ENTRIES = 100;
 
@@ -179,6 +185,10 @@ export interface SettingValues {
 	"update.unit": string;
 	/** The units the update's omp step checks and restarts; empty skips the step. */
 	"update.ompUnits": readonly string[];
+	/** The Debian packages of the VM template besides the runner's own. */
+	"vm.packages": readonly string[];
+	/** Shell lines run as root when the VM template is built. */
+	"vm.setup": readonly string[];
 }
 
 export type SettingKey = keyof SettingValues;
@@ -403,6 +413,39 @@ export const REGISTRY: Registry = {
 				}
 				return item;
 			});
+		},
+	},
+	"vm.packages": {
+		key: "vm.packages",
+		type: "string[]",
+		default: [...DEFAULT_VM_PACKAGES],
+		doc: `The Debian packages installed in the VM template, besides the ones the runner needs (ca-certificates, curl, git, jq, procps, sqlite3). Changing the list builds a new template on the next thread. Each entry is a package name; at most ${MAX_VM_PACKAGES} entries.`,
+		parse(raw) {
+			if (!Array.isArray(raw) || !raw.every((item): item is string => typeof item === "string")) {
+				throw new SettingError("vm.packages must be a list of strings");
+			}
+			if (raw.length > MAX_VM_PACKAGES) throw new SettingError(`vm.packages holds at most ${MAX_VM_PACKAGES} entries`);
+			for (const name of raw) {
+				if (!VM_PACKAGE_PATTERN.test(name)) {
+					throw new SettingError(`vm.packages entries are Debian package names (lower case letters, digits and + . -): ${JSON.stringify(name.slice(0, 50))}`);
+				}
+			}
+			return raw;
+		},
+	},
+	"vm.setup": {
+		key: "vm.setup",
+		type: "string[]",
+		default: [],
+		doc: `Shell lines run as root when the VM template is built, after the packages and omp are installed (for example usermod -aG docker user). The lines run under set -eux; changing them builds a new template on the next thread. At most ${MAX_VM_SETUP_CHARS} characters in all.`,
+		parse(raw) {
+			if (!Array.isArray(raw) || !raw.every((item): item is string => typeof item === "string")) {
+				throw new SettingError("vm.setup must be a list of strings (shell lines)");
+			}
+			if (raw.reduce((sum, line) => sum + line.length + 1, 0) > MAX_VM_SETUP_CHARS) {
+				throw new SettingError(`vm.setup holds at most ${MAX_VM_SETUP_CHARS} characters in all`);
+			}
+			return raw;
 		},
 	},
 	"lifecycle.archiveAfterDays": {

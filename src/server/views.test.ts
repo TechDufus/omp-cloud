@@ -73,6 +73,7 @@ describe("summaryView", () => {
 		pr: null,
 		mcpServers: [],
 		memoryBank: "",
+		setup: null,
 	};
 
 	function turn(overrides: Partial<Turn>): Turn {

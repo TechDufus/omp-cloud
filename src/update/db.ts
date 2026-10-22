@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdtemp, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { REGISTRY } from "../settings/registry";
+import { DEFAULT_RECIPE, type Recipe, recipeFrom } from "../vmon/recipe";
 import { lastLine, type CommandRunner } from "./system";
 
 const DB_FILE = "omp-cloud.db";
@@ -68,6 +69,40 @@ export function readUpdateSettings(dataDir: string): UpdateSettings {
 		db.close();
 	}
 	return found;
+}
+
+/**
+ * The stored `vm.packages` and `vm.setup` straight from the database, read-only, for the setup and doctor checks that
+ * name the VM template while the database may be at another schema than the binary (a newer binary runs before the
+ * service migrates it). A missing database, a missing settings table or a value the validator refuses gives the default.
+ */
+export function readStoredRecipe(dataDir: string): Recipe {
+	let db: Database;
+	try {
+		db = new Database(join(dataDir, DB_FILE), { readonly: true });
+	} catch {
+		return DEFAULT_RECIPE;
+	}
+	let packages: readonly string[] = REGISTRY["vm.packages"].default;
+	let setup: readonly string[] = REGISTRY["vm.setup"].default;
+	try {
+		db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+		const rows = db.query<{ key: string; value: string }, []>("SELECT key, value FROM settings WHERE key IN ('vm.packages', 'vm.setup')").all();
+		for (const row of rows) {
+			try {
+				const raw: unknown = JSON.parse(row.value);
+				if (row.key === "vm.packages") packages = REGISTRY["vm.packages"].parse(raw);
+				else setup = REGISTRY["vm.setup"].parse(raw);
+			} catch {
+				// A stored value the validator refuses keeps its default, as the service's Settings does.
+			}
+		}
+	} catch {
+		// A database without the settings table yet (the service never ran) has nothing stored.
+	} finally {
+		db.close();
+	}
+	return recipeFrom(packages, setup);
 }
 
 /**

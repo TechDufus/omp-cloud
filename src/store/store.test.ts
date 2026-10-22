@@ -1383,6 +1383,67 @@ describe("migration 14", () => {
 	});
 });
 
+describe("migration 15 and repository environments", () => {
+	test("a version 14 database gains the setup columns and the environments table, empty for its threads", async () => {
+		store.close();
+		await rm(dir, { recursive: true, force: true });
+		await mkdir(join(dir, "threads"), { recursive: true });
+		const raw = new Database(join(dir, "omp-cloud.db"));
+		for (const migration of MIGRATIONS.slice(0, 14)) raw.run(migration);
+		raw.run("PRAGMA user_version = 14");
+		raw
+			.query(
+				`INSERT INTO threads (id, owner, phase, title, model, thinking, repo_name, repo_remote_url, repo_base_ref, repo_base_commit,
+					repo_handoff_commit, repo_local_branch, home, workspace, author_name, author_email, secret_files, secret_env, created_at, last_activity_at)
+				VALUES (?, 'owner', 'idle', 'old', 'm', '', 'repo', '', '', '', 'def', '', '', '', '', '', '[]', '[]', ?, ?)`,
+			)
+			.run(ID, iso(0), iso(0));
+		raw.close();
+
+		store = open();
+		expect(store.getThread(ID)?.setup).toBeNull();
+		expect(store.environments()).toEqual([]);
+		store.close();
+
+		const check = new Database(join(dir, "omp-cloud.db"), { readonly: true });
+		expect(check.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(MIGRATIONS.length);
+		expect(MIGRATIONS.length).toBeGreaterThanOrEqual(15);
+		expect(check.query<{ name: string }, []>("SELECT name FROM pragma_table_info('threads')").all().map((row) => row.name)).toEqual(expect.arrayContaining(["setup_run", "setup_cache_files"]));
+		expect(check.query<{ name: string }, []>("SELECT name FROM pragma_table_info('environments')").all().map((row) => row.name)).toEqual(["key", "snapshot_id", "template", "repo", "created_at", "last_used_at"]);
+		check.close();
+		store = open();
+	});
+
+	test("a thread keeps the setup it was created with, none for a thread without", () => {
+		const setup = { run: "bun install", cacheFiles: ["bun.lock", "sub/go.sum"] };
+		expect(store.createThread(ID, newThread({ setup })).thread.setup).toEqual(setup);
+		expect(store.createThread("bbbbbbbbbbbb", newThread()).thread.setup).toBeNull();
+		expect(store.createThread("cccccccccccc", newThread({ setup: null })).thread.setup).toBeNull();
+		expect(store.getThread(ID)?.setup).toEqual(setup);
+	});
+
+	test("an environment is stored under its key, touched, replaced and deleted", () => {
+		expect(store.environment("k1")).toBeNull();
+		store.putEnvironment({ key: "k1", snapshotId: "snap-1", template: "omp-agent:1", repo: "github.com/a/b" });
+		expect(store.environment("k1")).toEqual({ key: "k1", snapshotId: "snap-1", template: "omp-agent:1", repo: "github.com/a/b", createdAt: iso(0), lastUsedAt: iso(0) });
+
+		tick();
+		store.touchEnvironment("k1");
+		expect(store.environment("k1")).toMatchObject({ createdAt: iso(0), lastUsedAt: iso(1000) });
+
+		tick();
+		store.putEnvironment({ key: "k1", snapshotId: "snap-2", template: "omp-agent:1", repo: "github.com/a/b" });
+		expect(store.environment("k1")).toMatchObject({ snapshotId: "snap-2", createdAt: iso(2000), lastUsedAt: iso(2000) });
+
+		tick();
+		store.putEnvironment({ key: "k0", snapshotId: "snap-0", template: "omp-agent:1", repo: "local/x" });
+		expect(store.environments().map((row) => row.key)).toEqual(["k1", "k0"]);
+		expect(store.deleteEnvironment("k1")).toBe(true);
+		expect(store.deleteEnvironment("k1")).toBe(false);
+		expect(store.environments().map((row) => row.key)).toEqual(["k0"]);
+	});
+});
+
 describe("secrets and MCP", () => {
 	test("secrets are listed without values, in name order; a put replaces and stamps the clock and actor", () => {
 		store.putSecret({ name: "B_TOKEN", value: "!op read x", repos: ["*"] }, "owner");

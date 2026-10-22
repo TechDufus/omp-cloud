@@ -3,6 +3,7 @@
  * `lifecycle.archiveAfterDays` (the thread itself lives on), the orphan sweep removes whatever of this service's sandboxes
  * and gateway clients no VM record holds.
  */
+import { ENV_APP, ENV_SANDBOX_MAX_AGE_MS } from "./environment";
 import { clientName, serviceClientName, type ThreadEnv, type ThreadRunner } from "./thread";
 
 /** At most this many threads are archived by one sweep. */
@@ -39,8 +40,9 @@ export async function archiveSweep(
 /**
  * Kills this service's sandboxes that no VM record holds and that started more than `max(10 minutes, 2 x sweepSeconds)`
  * ago, and revokes its gateway clients named after a thread that no VM record backs (never the service's own client).
- * The vmon is shared: only sandboxes carrying exactly `{app: "omp-cloud", service}` are looked at. A failure on one
- * item is logged and leaves it for the next sweep.
+ * The vmon is shared: only sandboxes carrying exactly `{app: "omp-cloud", service}` are looked at. A second pass kills the
+ * environment build sandboxes (`{app: "omp-cloud-env", service}`) older than 2 hours: a running build is younger, so only
+ * a service that died mid-build leaves one. A failure on one item is logged and leaves it for the next sweep.
  */
 export async function sweepOrphans(env: ThreadEnv, sweepSeconds: number, now: number): Promise<void> {
 	const { store, vmon, gateway, serviceId } = env;
@@ -59,6 +61,17 @@ export async function sweepOrphans(env: ThreadEnv, sweepSeconds: number, now: nu
 			console.log(`omp-cloud: killed the orphaned sandbox ${sandbox.sandboxId}`);
 		} catch (error) {
 			console.error(`omp-cloud: killing the orphaned sandbox ${sandbox.sandboxId} failed: ${describe(error)}`);
+		}
+	}
+
+	for (const sandbox of await vmon.list({ app: ENV_APP, service: serviceId })) {
+		const started = Date.parse(sandbox.startedAt);
+		if (!Number.isFinite(started) || now - started < ENV_SANDBOX_MAX_AGE_MS) continue;
+		try {
+			await vmon.kill(sandbox.sandboxId);
+			console.log(`omp-cloud: killed the stale environment sandbox ${sandbox.sandboxId}`);
+		} catch (error) {
+			console.error(`omp-cloud: killing the stale environment sandbox ${sandbox.sandboxId} failed: ${describe(error)}`);
 		}
 	}
 

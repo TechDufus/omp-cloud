@@ -22,6 +22,7 @@ import { Deliverer, launchCard, threadsFromEntries } from "./deliver";
 import { devicesCard, runDisconnect, runRevoke } from "./devices";
 import { clip, metricsLine, plural, threadHeading, threadTag, truncateText } from "./format";
 import { DashboardForwarder } from "./forwarder";
+import { PreviewForwarder } from "./preview";
 import { HubComponent, type HubResult } from "./hub";
 import { Inbox } from "./inbox";
 import { ProgramStatus, type TerminalSink } from "./program-status";
@@ -178,6 +179,8 @@ export class Cloud implements CardActions, ToolCloud {
 	#commandCtx: CommandHost | undefined;
 	#forwarder: DashboardForwarder | undefined;
 	#forwarderKey = "";
+	/** The running previews, keyed `<thread id>:<port>`; each remembers the connection it was started on. */
+	readonly #previews = new Map<string, { forwarder: PreviewForwarder; connection: string }>();
 	readonly #chains = new Map<string, Promise<unknown>>();
 	/** Threads with a watched-turn save queued but not started, and the newest host that asked. */
 	readonly #waiting = new Map<string, Host>();
@@ -276,6 +279,7 @@ export class Cloud implements CardActions, ToolCloud {
 		this.#updates.stop();
 		this.#autoAsk.close();
 		this.#agents.dispose();
+		this.#stopPreviews();
 	}
 
 	/** The host's pi-tui, once imported; the hub overlay and the live widget need it. */
@@ -300,9 +304,10 @@ export class Cloud implements CardActions, ToolCloud {
 		this.#deliver.flush(host);
 	}
 
-	/** Stops the dashboard forwarder of a paired connection, if one runs. */
+	/** Stops the dashboard forwarder of a paired connection and every preview, if any run. */
 	stopForwarder(): void {
 		this.#forwarder?.stop();
+		this.#stopPreviews();
 	}
 
 	async handle(args: string, ctx: CommandHost): Promise<void> {
@@ -590,6 +595,11 @@ export class Cloud implements CardActions, ToolCloud {
 			}
 			return;
 		}
+		if (parsed.kind === "previewStop") {
+			const stopped = this.#stopPreviews();
+			ctx.ui.notify(stopped === 0 ? "☁ no previews are running" : `☁ stopped ${plural(stopped, "preview")}`, "info");
+			return;
+		}
 		if (parsed.kind === "launch") {
 			// Handlers have a short budget and uploads exceed it; slash commands run
 			// immediately even while the agent streams, so detach the launch.
@@ -686,6 +696,9 @@ export class Cloud implements CardActions, ToolCloud {
 				return;
 			case "pull":
 				await this.#pull(ctx, s, cmd.thread, cmd.into);
+				return;
+			case "preview":
+				await this.#preview(ctx, s, cmd.thread, cmd.port);
 				return;
 			case "resume":
 				await this.#resume(ctx, s, cmd.thread);
@@ -818,6 +831,31 @@ export class Cloud implements CardActions, ToolCloud {
 		this.#forwarder = DashboardForwarder.start({ upstream: pinnedFetch(paired.server), base: s.conn.url, token: s.conn.token });
 		this.#forwarderKey = s.key;
 		return this.#forwarder;
+	}
+
+	/** Stops every preview forwarder; how many were running. */
+	#stopPreviews(): number {
+		const running = [...this.#previews.values()].filter(p => !p.forwarder.stopped);
+		for (const { forwarder } of this.#previews.values()) forwarder.stop();
+		this.#previews.clear();
+		return running.length;
+	}
+
+	/** `/cloud preview <id> <port>`: relays a port of the thread's VM to a loopback address of this machine and opens it in the TUI's browser. */
+	async #preview(ctx: Host, s: Session, thread: string, port: number): Promise<void> {
+		await s.client.requireCapability("threads.preview");
+		const key = `${thread}:${port}`;
+		let entry = this.#previews.get(key);
+		if (!entry || entry.forwarder.stopped || entry.connection !== s.key) {
+			entry?.forwarder.stop();
+			const upstream = s.conn.paired ? pinnedFetch(s.conn.paired.server) : (input: string, init?: RequestInit) => fetch(input, init);
+			entry = { forwarder: PreviewForwarder.start({ upstream, base: s.conn.url, token: s.conn.token, thread, port }), connection: s.key };
+			this.#previews.set(key, entry);
+		}
+		const url = entry.forwarder.url;
+		ctx.ui.notify([`☁ preview of port ${port} on ${this.#tag(thread)}: ${url}`, "  /cloud preview stop ends it"].join("\n"), "info");
+		// Only the interactive TUI opens a browser: never RPC or print mode. The address was printed either way.
+		if (ctx.mode === "tui") this.#open(url);
 	}
 
 	// -----------------------------------------------------------------------
@@ -1121,7 +1159,7 @@ export class Cloud implements CardActions, ToolCloud {
 	async #mergeMemory(client: Pick<CloudClient, "whoami" | "downloadMemory">, memory: MemoryRun): Promise<void> {
 		try {
 			const settings = await readMemorySettings(this.#pi, this.#env);
-			await mergeCloudMemory({ client, target: memory.target, settings, agentDir: this.#pi.pi.settings.getAgentDir() });
+			await mergeCloudMemory({ client, target: memory.target, settings, agentDir: this.#pi.pi.settings.getAgentDir(), onDeferred: message => memory.notify(`☁ ${message}`) });
 		} catch (e) {
 			memory.notify(`☁ could not merge the cloud memories of ${memory.target.id}: ${errorText(e)}`);
 		}

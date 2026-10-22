@@ -1,6 +1,7 @@
 import type { ThreadPolicy } from "../settings/policy";
 import type {
 	Device,
+	EnvironmentRow,
 	IrcInbound,
 	OfferStatus,
 	PairingOffer,
@@ -64,6 +65,21 @@ export interface ThreadRow {
 	pr_url: string;
 	mcp_names: string;
 	memory_bank: string;
+	setup_run: string;
+	setup_cache_files: string;
+}
+
+export interface EnvironmentRowRaw {
+	key: string;
+	snapshot_id: string;
+	template: string;
+	repo: string;
+	created_at: string;
+	last_used_at: string;
+}
+
+export function environmentOf(row: EnvironmentRowRaw): EnvironmentRow {
+	return { key: row.key, snapshotId: row.snapshot_id, template: row.template, repo: row.repo, createdAt: row.created_at, lastUsedAt: row.last_used_at };
 }
 
 export interface TurnRow {
@@ -184,6 +200,7 @@ export function threadFromRow(row: ThreadRow): Thread {
 		scratch: row.scratch === 1,
 		pr: row.pr_number === 0 ? null : { number: row.pr_number, url: row.pr_url },
 		mcpServers: JSON.parse(row.mcp_names) as string[],
+		setup: row.setup_run === "" ? null : { run: row.setup_run, cacheFiles: JSON.parse(row.setup_cache_files) as string[] },
 		memoryBank: row.memory_bank,
 	};
 }

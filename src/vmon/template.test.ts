@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Template } from "e2b";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installOmp, Templates, templateName } from "./template";
+import { DEFAULT_RECIPE, type Recipe, recipeFrom } from "./recipe";
+import { agentTemplate, installOmp, Templates, templateName } from "./template";
 
 const VMON = "v0.4.0";
 
@@ -22,7 +24,7 @@ function fakeOps(existing: string[] = []) {
 		},
 		ops: {
 			exists: async (name: string) => present.has(name),
-			build: (name: string, version: string) => {
+			build: (name: string, version: string, _recipe: Recipe) => {
 				builds.push(`${name}@${version}`);
 				const { promise, resolve, reject } = Promise.withResolvers<void>();
 				finishers.set(name, {
@@ -40,21 +42,21 @@ function fakeOps(existing: string[] = []) {
 
 describe("templateName", () => {
 	test("holds the version and a 12-hex recipe hash, and is a valid vmon tag", async () => {
-		const name = await templateName("omp-agent", "18.12.3", VMON);
+		const name = await templateName("omp-agent", "18.12.3", VMON, DEFAULT_RECIPE);
 		expect(name).toMatch(/^omp-agent:18\.12\.3-[0-9a-f]{12}$/);
 		expect(name.slice(name.indexOf(":") + 1)).toMatch(/^[a-z0-9-_.]+$/);
 	});
 
 	test("the same recipe gives the same tag", async () => {
-		expect(await templateName("omp-agent", "18.12.3", VMON)).toBe(await templateName("omp-agent", "18.12.3", VMON));
+		expect(await templateName("omp-agent", "18.12.3", VMON, DEFAULT_RECIPE)).toBe(await templateName("omp-agent", "18.12.3", VMON, DEFAULT_RECIPE));
 	});
 
 	test("a changed recipe gives a different tag", async () => {
-		const before = await templateName("omp-agent", "18.12.3", VMON);
+		const before = await templateName("omp-agent", "18.12.3", VMON, DEFAULT_RECIPE);
 		const saved = process.env.PI_BUILD_URL;
 		process.env.PI_BUILD_URL = "https://build.example.test";
 		try {
-			expect(await templateName("omp-agent", "18.12.3", VMON)).not.toBe(before);
+			expect(await templateName("omp-agent", "18.12.3", VMON, DEFAULT_RECIPE)).not.toBe(before);
 		} finally {
 			if (saved === undefined) delete process.env.PI_BUILD_URL;
 			else process.env.PI_BUILD_URL = saved;
@@ -62,26 +64,68 @@ describe("templateName", () => {
 	});
 
 	test("different versions give different tags", async () => {
-		expect(await templateName("omp-agent", "18.12.3", VMON)).not.toBe(await templateName("omp-agent", "18.12.2", VMON));
+		expect(await templateName("omp-agent", "18.12.3", VMON, DEFAULT_RECIPE)).not.toBe(await templateName("omp-agent", "18.12.2", VMON, DEFAULT_RECIPE));
 	});
 
 	test("another vmon version, or none installed, gives a different tag with the same shape", async () => {
-		const names = [VMON, "v0.4.1", null].map(vmon => templateName("omp-agent", "18.12.3", vmon));
+		const names = [VMON, "v0.4.1", null].map(vmon => templateName("omp-agent", "18.12.3", vmon, DEFAULT_RECIPE));
 		const resolved = await Promise.all(names);
 		expect(new Set(resolved).size).toBe(3);
 		for (const name of resolved) expect(name).toMatch(/^omp-agent:18\.12\.3-[0-9a-f]{12}$/);
 	});
+
+	test("the packages and the setup lines are part of the recipe", async () => {
+		const base = await templateName("omp-agent", "18.12.3", VMON, DEFAULT_RECIPE);
+		const more = await templateName("omp-agent", "18.12.3", VMON, recipeFrom([...DEFAULT_RECIPE.packages, "docker.io"], []));
+		const setup = await templateName("omp-agent", "18.12.3", VMON, recipeFrom(DEFAULT_RECIPE.packages, ["usermod -aG docker user"]));
+		const otherSetup = await templateName("omp-agent", "18.12.3", VMON, recipeFrom(DEFAULT_RECIPE.packages, ["true"]));
+		expect(new Set([base, more, setup, otherSetup]).size).toBe(4);
+	});
+
+	test("the order and repetition of the packages do not matter", async () => {
+		const packages = ["unzip", "ripgrep", "python3"];
+		const forward = await templateName("omp-agent", "18.12.3", VMON, recipeFrom(packages, []));
+		const backward = await templateName("omp-agent", "18.12.3", VMON, recipeFrom([...packages].reverse(), []));
+		const repeated = await templateName("omp-agent", "18.12.3", VMON, recipeFrom([...packages, "ripgrep"], []));
+		expect(backward).toBe(forward);
+		expect(repeated).toBe(forward);
+	});
 });
 
-const NAME_3 = await templateName("omp-agent", "18.12.3", VMON);
-const NAME_2 = await templateName("omp-agent", "18.12.2", VMON);
+describe("agentTemplate", () => {
+	/** The recipe's steps as the builder serializes them: the apt installs, then the omp install, then the setup lines. */
+	async function steps(recipe: Recipe): Promise<string> {
+		return Template.toJSON(agentTemplate("18.12.3", recipe), true);
+	}
+
+	test("installs the recipe's packages after the runner's own and before omp, and runs the setup lines last as root under set -eux", async () => {
+		const json = await steps(recipeFrom(["ripgrep"], ["echo one", "echo two"]));
+		const at = (text: string) => json.indexOf(text);
+		expect(at("sqlite3")).toBeGreaterThan(-1);
+		expect(at("ripgrep")).toBeGreaterThan(at("sqlite3"));
+		expect(at("linux-x86_64")).toBeGreaterThan(at("ripgrep"));
+		expect(at("set -eux\\necho one\\necho two")).toBeGreaterThan(at("linux-x86_64"));
+	});
+
+	test("empty packages and no setup add no steps: the runner's packages and omp only", async () => {
+		const parsed: { steps: { type: string; args: string[] }[] } = JSON.parse(await steps(recipeFrom([], [])));
+		const runs = parsed.steps.filter(step => step.type === "RUN").map(step => step.args[0] ?? "");
+		expect(runs).toHaveLength(2);
+		expect(runs[0]).toContain("sqlite3");
+		expect(runs[1]).toContain("linux-x86_64");
+		expect(await steps(recipeFrom([], []))).not.toContain("ripgrep");
+	});
+});
+
+const NAME_3 = await templateName("omp-agent", "18.12.3", VMON, DEFAULT_RECIPE);
+const NAME_2 = await templateName("omp-agent", "18.12.2", VMON, DEFAULT_RECIPE);
 const installed = async (): Promise<string | null> => VMON;
 
 describe("Templates.ensure", () => {
 	test("an existing template is returned without a build or a notice", async () => {
 		const fake = fakeOps([NAME_3]);
 		let notices = 0;
-		const name = await new Templates("omp-agent", fake.ops, installed).ensure("18.12.3", () => notices++);
+		const name = await new Templates("omp-agent", fake.ops, installed).ensure("18.12.3", DEFAULT_RECIPE, () => notices++);
 		expect(name).toBe(NAME_3);
 		expect(fake.builds).toEqual([]);
 		expect(notices).toBe(0);
@@ -91,13 +135,13 @@ describe("Templates.ensure", () => {
 		const fake = fakeOps();
 		const templates = new Templates("omp-agent", fake.ops, installed);
 		let notices = 0;
-		const pending = templates.ensure("18.12.3", () => notices++);
+		const pending = templates.ensure("18.12.3", DEFAULT_RECIPE, () => notices++);
 		await Bun.sleep(0);
 		expect(fake.builds).toEqual([`${NAME_3}@18.12.3`]);
 		expect(notices).toBe(1);
 		fake.finish(NAME_3);
 		expect(await pending).toBe(NAME_3);
-		expect(await templates.ensure("18.12.3", () => notices++)).toBe(NAME_3);
+		expect(await templates.ensure("18.12.3", DEFAULT_RECIPE, () => notices++)).toBe(NAME_3);
 		expect(fake.builds).toHaveLength(1);
 		expect(notices).toBe(1);
 	});
@@ -106,7 +150,7 @@ describe("Templates.ensure", () => {
 		const fake = fakeOps();
 		const templates = new Templates("omp-agent", fake.ops, installed);
 		let notices = 0;
-		const callers = [1, 2, 3].map(() => templates.ensure("18.12.3", () => notices++));
+		const callers = [1, 2, 3].map(() => templates.ensure("18.12.3", DEFAULT_RECIPE, () => notices++));
 		await Bun.sleep(0);
 		expect(fake.builds).toHaveLength(1);
 		let settled = 0;
@@ -122,8 +166,8 @@ describe("Templates.ensure", () => {
 	test("different versions build side by side", async () => {
 		const fake = fakeOps();
 		const templates = new Templates("omp-agent", fake.ops, installed);
-		const a = templates.ensure("18.12.3");
-		const b = templates.ensure("18.12.2");
+		const a = templates.ensure("18.12.3", DEFAULT_RECIPE);
+		const b = templates.ensure("18.12.2", DEFAULT_RECIPE);
 		await Bun.sleep(0);
 		expect(fake.builds.sort()).toEqual([`${NAME_2}@18.12.2`, `${NAME_3}@18.12.3`].sort());
 		fake.finish(NAME_2);
@@ -134,8 +178,8 @@ describe("Templates.ensure", () => {
 	test("a failed build rejects every waiter and the next call builds again", async () => {
 		const fake = fakeOps();
 		const templates = new Templates("omp-agent", fake.ops, installed);
-		const first = templates.ensure("18.12.3");
-		const second = templates.ensure("18.12.3");
+		const first = templates.ensure("18.12.3", DEFAULT_RECIPE);
+		const second = templates.ensure("18.12.3", DEFAULT_RECIPE);
 		const outcomes = Promise.allSettled([first, second]);
 		await Bun.sleep(0);
 		fake.fail(NAME_3, new Error("download failed"));
@@ -143,7 +187,7 @@ describe("Templates.ensure", () => {
 		expect(settled.map(outcome => outcome.status)).toEqual(["rejected", "rejected"]);
 		expect(String((settled[0] as PromiseRejectedResult).reason)).toContain("download failed");
 
-		const retry = templates.ensure("18.12.3");
+		const retry = templates.ensure("18.12.3", DEFAULT_RECIPE);
 		await Bun.sleep(0);
 		expect(fake.builds).toHaveLength(2);
 		fake.finish(NAME_3);
@@ -154,11 +198,11 @@ describe("Templates.ensure", () => {
 		const fake = fakeOps([NAME_3]);
 		let vmon: string | null = VMON;
 		const templates = new Templates("omp-agent", fake.ops, async () => vmon);
-		expect(await templates.ensure("18.12.3")).toBe(NAME_3);
+		expect(await templates.ensure("18.12.3", DEFAULT_RECIPE)).toBe(NAME_3);
 		expect(fake.builds).toEqual([]);
 
 		vmon = "v0.5.0";
-		const upgraded = templates.ensure("18.12.3");
+		const upgraded = templates.ensure("18.12.3", DEFAULT_RECIPE);
 		await Bun.sleep(0);
 		expect(fake.builds).toHaveLength(1);
 		const [started] = fake.builds;
@@ -177,7 +221,7 @@ describe("Templates.prebuild", () => {
 		try {
 			const fake = fakeOps();
 			const templates = new Templates("omp-agent", fake.ops, installed);
-			const pending = templates.prebuild("18.12.3");
+			const pending = templates.prebuild("18.12.3", DEFAULT_RECIPE);
 			await Bun.sleep(0);
 			expect(fake.builds).toEqual([`${NAME_3}@18.12.3`]);
 			fake.finish(NAME_3);
@@ -186,7 +230,7 @@ describe("Templates.prebuild", () => {
 			expect(lines.some(line => line.includes(`${NAME_3} is ready`))).toBe(true);
 
 			lines.length = 0;
-			await templates.prebuild("18.12.3");
+			await templates.prebuild("18.12.3", DEFAULT_RECIPE);
 			expect(fake.builds).toHaveLength(1);
 			expect(lines.some(line => line.includes("building"))).toBe(false);
 		} finally {
@@ -201,13 +245,13 @@ describe("Templates.prebuild", () => {
 		try {
 			const fake = fakeOps();
 			const templates = new Templates("omp-agent", fake.ops, installed);
-			const pending = templates.prebuild("18.12.3");
+			const pending = templates.prebuild("18.12.3", DEFAULT_RECIPE);
 			await Bun.sleep(0);
 			fake.fail(NAME_3, new Error("download failed"));
 			await pending;
 			expect(lines.some(line => line.includes("download failed"))).toBe(true);
 
-			const retry = templates.ensure("18.12.3");
+			const retry = templates.ensure("18.12.3", DEFAULT_RECIPE);
 			await Bun.sleep(0);
 			expect(fake.builds).toHaveLength(2);
 			fake.finish(NAME_3);

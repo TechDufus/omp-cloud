@@ -4,6 +4,7 @@ import { isRecord } from "../guards";
 import type { App } from "../server/app";
 import { tokenMatches } from "../server/auth";
 import { DASHBOARD_LINKS_PATH } from "../server/dashboard-routes";
+import { isPreviewPath } from "../server/preview";
 import { checkRequest, type GuardPolicy, guardPolicy, sessionCaller } from "./guard";
 import { AttemptLimiter, type DashboardSessions, sessionIdOf } from "./session";
 
@@ -114,6 +115,8 @@ export function createDashboardServer(options: DashboardServerOptions): Dashboar
 		if (isSession) return req.method === "POST" ? signIn(req) : session(req);
 		// Links are minted only through the bearer listener.
 		if (pathname === DASHBOARD_LINKS_PATH) return failure(404, "not found");
+		// A page the VM serves must never run on this origin, which carries the owner's session cookie: previews go through the bearer listeners.
+		if (isPreviewPath(pathname)) return failure(404, "not found");
 		const caller = sessionCaller(req, sessions);
 		if (caller === null) return failure(401, "unauthorized");
 		return app.fetchAs(caller, req, server);
