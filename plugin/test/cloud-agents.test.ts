@@ -252,7 +252,7 @@ describe("registry ref", () => {
 });
 
 describe("session shim", () => {
-	const UNDEFINED_WHEN_IDLE = ["runStartedAt", "sessionFile", "servingModel", "baseSystemPrompt", "agent.state.streamMessage"];
+	const UNDEFINED_WHEN_IDLE = ["runStartedAt", "sessionFile", "servingModel", "baseSystemPrompt", "agent.state.streamMessage", "promptCacheEntry", "extensionRunner"];
 
 	/** `path` of `root`: the object that holds the last member, and the member. */
 	function member(root: unknown, path: string): { owner: unknown; value: unknown } {
@@ -283,6 +283,32 @@ describe("session shim", () => {
 		expect(session.sessionManager.getArtifactsDir()).toBe(r.dir);
 		expect(session.sessionManager.getCwd()).toBe("/work");
 		expect(session.sessionManager.getSessionId()).toBe(ID);
+	});
+
+	test("usage is the thread's finished turns plus the running turn's events, read the same by the hub, the status line and the stats", () => {
+		const r = rig();
+		const d = working([turn(1, { state: "running" })], { metrics: null });
+		r.agents.observe(d);
+		const session = shimOf(r);
+		expect(session.sessionManager.getUsageStatistics().cost).toBe(0);
+
+		const usage = (seq: number, cost: number) => event(seq, { kind: "usage", turn: 1, text: JSON.stringify({ input: 100, output: 20, cacheRead: 900, cacheWrite: 30, cost, model: "m", stopReason: "toolUse", context: { tokens: 1050, window: 128_000 } }) });
+		r.agents.event(d, usage(1, 0.5));
+		r.agents.event(d, usage(2, 0.57));
+		// The log is replayed (a followed thread picked up again): nothing is counted twice.
+		r.agents.event(d, usage(1, 0.5));
+
+		expect(session.sessionManager.getUsageStatistics()).toMatchObject({ input: 200, output: 40, cacheRead: 1800, cacheWrite: 60, totalTokens: 2100, subagentCost: 0 });
+		expect(session.sessionManager.getUsageStatistics().cost).toBeCloseTo(1.07, 10);
+		expect(session.getSessionStats()).toMatchObject({ assistantMessages: 2, tokens: { input: 200, output: 40, cacheWrite: 60 }, contextUsage: { tokens: 1050, contextWindow: 128_000 } });
+		expect(session.getSessionStats().cost).toBeCloseTo(1.07, 10);
+		expect(session.getContextUsage()).toMatchObject({ tokens: 1050, contextWindow: 128_000 });
+		expect(session.model).toMatchObject({ contextWindow: 128_000 });
+
+		// The turn ends and the service's metrics hold it: it is not added again.
+		r.agents.observe(idle([turn(1, { reply: "done" })], { metrics: metrics({ requests: 2, usage: { inputTokens: 200, outputTokens: 40, cacheReadTokens: 1800, cacheWriteTokens: 60, cost: 1.07 } }) }));
+		expect(session.sessionManager.getUsageStatistics().cost).toBe(1.07);
+		expect(session.getSessionStats().assistantMessages).toBe(2);
 	});
 
 	test("run state follows the thread: isStreaming, runStartedAt, subscribe, subscribeRunState", () => {

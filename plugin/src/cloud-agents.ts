@@ -39,6 +39,7 @@ import { clip, spanBetween } from "./format";
 import { isRecord } from "./guards";
 import { readArchiveJournal } from "./session-sync";
 import { taskResultText } from "./task-result";
+import { TurnProgress } from "./turn-progress";
 import type { IrcReceiptKind, ThreadDetail, ThreadEvent, ThreadMetrics, ThreadResult, ThreadTurn } from "./types";
 import { parseIrcPayload } from "./wire";
 
@@ -182,6 +183,57 @@ export interface ShimMember {
 	args?: () => unknown[];
 }
 
+/** The cumulative usage omp's status line and the Agent Hub read of a session (`SessionManager.getUsageStatistics`). */
+interface SessionUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	orchestrationInput: number;
+	orchestrationOutput: number;
+	orchestrationCacheRead: number;
+	premiumRequests: number;
+	cost: number;
+	/** The share of `cost` that completed subagent results carry: none, a cloud agent's cost is its own. */
+	subagentCost: number;
+}
+
+/** What a cloud agent has none of: one array, so omp's status line sees an unchanged value. */
+const NONE: readonly never[] = Object.freeze([]);
+
+/**
+ * `agent.state`: the thread's model, thinking level and run state, and nothing local (no tools, no system prompt). `messages`
+ * is a new array at each read, which makes the Agent Hub reread its row's metrics from `getSessionStats` rather than reuse a
+ * cached scan of an unchanged list.
+ */
+class SessionState {
+	readonly streamMessage: undefined = undefined;
+	readonly tools: readonly never[] = NONE;
+	readonly systemPrompt: readonly never[] = NONE;
+	readonly #session: Pick<CloudSession, "model" | "thinkingLevel" | "isStreaming">;
+
+	constructor(session: Pick<CloudSession, "model" | "thinkingLevel" | "isStreaming">) {
+		this.#session = session;
+	}
+
+	get model(): CloudSession["model"] {
+		return this.#session.model;
+	}
+
+	get thinkingLevel(): string | undefined {
+		return this.#session.thinkingLevel;
+	}
+
+	get isStreaming(): boolean {
+		return this.#session.isStreaming;
+	}
+
+	get messages(): unknown[] {
+		return [];
+	}
+}
+
 /** The message the smoke test delivers. */
 const PROBE: IrcMessage = { id: "probe", from: "Main", to: "Probe", body: "ping", ts: 0 };
 
@@ -219,6 +271,55 @@ export const SHIM_MEMBERS: readonly ShimMember[] = [
 	{ path: "activeToolExecutionUpdates", kind: "call", consumer: "modes/controllers/session-focus-controller.ts" },
 	{ path: "prompt", kind: "call", consumer: "pi-tui agent-transcript-viewer.ts (hub chat)", args: () => ["ping", { streamingBehavior: "steer" }] },
 	{ path: "steer", kind: "call", consumer: "vibe/runtime.ts; modes/rpc/rpc-mode.ts", args: () => ["ping"] },
+	// What omp reads of the session it focuses (`ctx.viewSession` of the Agent Hub's focus): the focus controller's attach, the event controller's resets, timers and tool rendering, the transcript replay, the pending-message bar, the todo HUD and the status line (pi-tui's `StatusLineSession`).
+	{ path: "agent.getPendingToolResults", kind: "call", consumer: "modes/controllers/event-controller.ts resetTranscriptAnchors, restorePendingToolResults, agent_start" },
+	{ path: "state", kind: "get", consumer: "pi-tui status-line/component.ts, segments.ts, footer.ts" },
+	{ path: "state.messages", kind: "get", consumer: "pi-tui status-line/component.ts (token rate)" },
+	{ path: "agent.state.tools", kind: "get", consumer: "pi-tui status-line/component.ts, context-usage.ts" },
+	{ path: "systemPrompt", kind: "get", consumer: "pi-tui status-line/component.ts" },
+	{ path: "skills", kind: "get", consumer: "pi-tui status-line/component.ts" },
+	{ path: "modelRegistry", kind: "get", consumer: "pi-tui status-line/footer.ts" },
+	{ path: "modelRegistry.isUsingOAuth", kind: "call", consumer: "pi-tui status-line/footer.ts", args: () => [{ id: "m", provider: "p" }] },
+	{ path: "isRetrying", kind: "get", consumer: "modes/controllers/event-controller.ts resetTranscriptAnchors; input-controller.ts" },
+	{ path: "retryAttempt", kind: "get", consumer: "modes/controllers/event-controller.ts message_end; modes/utils/ui-helpers.ts" },
+	{ path: "isTtsrAbortPending", kind: "get", consumer: "modes/controllers/event-controller.ts message_end" },
+	{ path: "isCompacting", kind: "get", consumer: "modes/controllers/event-controller.ts idle compaction and recap; input-controller.ts" },
+	{ path: "isGeneratingHandoff", kind: "get", consumer: "modes/controllers/input-controller.ts" },
+	{ path: "hasAbortedToolCallTail", kind: "get", consumer: "modes/interactive-mode.ts syncRetryHintRow" },
+	{ path: "isAutoThinking", kind: "get", consumer: "pi-tui status-line/component.ts, segments.ts, footer.ts" },
+	{ path: "compactionSpeculation", kind: "get", consumer: "pi-tui status-line/component.ts" },
+	{ path: "contextUsageRevision", kind: "get", consumer: "pi-tui status-line/component.ts" },
+	{ path: "promptCacheEntry", kind: "get", consumer: "modes/controllers/event-controller.ts idle compaction" },
+	{ path: "extensionRunner", kind: "get", consumer: "modes/utils/ui-helpers.ts addMessageToChat" },
+	{ path: "tokenRate", kind: "get", consumer: "modes/interactive-mode.ts tokenRate" },
+	{ path: "tokenRate.rate", kind: "call", consumer: "modes/interactive-mode.ts working-row token rate" },
+	{ path: "getToolByName", kind: "call", consumer: "modes/controllers/event-controller.ts; modes/utils/ui-helpers.ts", args: () => ["read"] },
+	{ path: "hasBuiltInTool", kind: "call", consumer: "modes/controllers/event-controller.ts; modes/utils/ui-helpers.ts", args: () => ["read"] },
+	{ path: "getTodoPhases", kind: "call", consumer: "modes/interactive-mode.ts reloadTodos; event-controller.ts" },
+	{ path: "getContextUsage", kind: "call", consumer: "modes/controllers/event-controller.ts idle compaction; pi-tui status-line/footer.ts, component.ts" },
+	{ path: "runIdleCompaction", kind: "call", consumer: "modes/controllers/event-controller.ts idle compaction timer" },
+	{ path: "runEphemeralTurn", kind: "call", consumer: "modes/controllers/event-controller.ts idle recap", args: () => [{ promptText: "recap", signal: new AbortController().signal }] },
+	{ path: "getGoalModeState", kind: "call", consumer: "modes/controllers/event-controller.ts; pi-tui status-line/segments.ts" },
+	{ path: "getAsyncJobSnapshot", kind: "call", consumer: "modes/utils/ui-helpers.ts replay; pi-tui status-line/component.ts" },
+	{ path: "getAsyncJobTree", kind: "call", consumer: "modes/interactive-mode.ts jobs sheet; command-controller.ts /jobs" },
+	{ path: "getRunningJobWidgets", kind: "call", consumer: "pi-tui status-line/component.ts" },
+	{ path: "getQueuedMessages", kind: "call", consumer: "modes/utils/ui-helpers.ts updatePendingMessagesDisplay" },
+	{ path: "popLastQueuedMessage", kind: "call", consumer: "modes/controllers/input-controller.ts" },
+	{ path: "buildTranscriptSessionContext", kind: "call", consumer: "modes/utils/ui-helpers.ts renderInitialMessages; modes/interactive-mode.ts", args: () => [{ keepInFlightToolCalls: true }] },
+	{ path: "autoResolvedThinkingLevel", kind: "call", consumer: "pi-tui status-line/segments.ts, footer.ts" },
+	{ path: "isFastModeActive", kind: "call", consumer: "pi-tui status-line/component.ts, segments.ts" },
+	{ path: "configuredThinkingLevel", kind: "call", consumer: "modes/slash-commands/builtin-modes.ts, builtin-completions.ts; selector-controller.ts" },
+	{ path: "getAvailableEffortSelectors", kind: "call", consumer: "modes/slash-commands/builtin-completions.ts" },
+	{ path: "cycleThinkingLevel", kind: "call", consumer: "modes/controllers/input-controller.ts" },
+	{ path: "cycleRoleModels", kind: "call", consumer: "modes/controllers/input-controller.ts", args: () => [["default"], "forward"] },
+	{ path: "retry", kind: "call", consumer: "modes/controllers/input-controller.ts" },
+	{ path: "abortCompaction", kind: "call", consumer: "modes/controllers/input-controller.ts" },
+	{ path: "abortHandoff", kind: "call", consumer: "modes/controllers/input-controller.ts" },
+	{ path: "abortRetry", kind: "call", consumer: "modes/controllers/input-controller.ts" },
+	{ path: "sessionManager.getSessionName", kind: "call", consumer: "pi-tui status-line/component.ts, segments.ts" },
+	{ path: "sessionManager.getBranch", kind: "call", consumer: "modes/interactive-mode.ts todo HUD (reloadTodos)" },
+	{ path: "sessionManager.appendCustomEntry", kind: "call", consumer: "modes/interactive-mode.ts todo HUD", args: () => ["probe", {}] },
+	{ path: "sessionManager.flush", kind: "call", consumer: "modes/interactive-mode.ts todo HUD" },
 ];
 
 /** What the shim needs of the agents that own it. */
@@ -231,6 +332,8 @@ interface SessionHost {
 	stop(): Promise<void>;
 	messages(): unknown[];
 	detail(): ThreadDetail;
+	/** The thread's metrics with the running turn's own added: what the job's tile shows. */
+	metrics(): ThreadMetrics | null;
 	dir(): string;
 	cwd(): string;
 }
@@ -328,17 +431,28 @@ export class CloudSession {
 		getSessionId: (): string => this.#host.thread,
 		getSessionFile: (): undefined => undefined,
 		getEntries: (): unknown[] => [],
-		getUsageStatistics: (): { cost: number; subagentCost: number } => ({ cost: this.#host.detail().metrics?.usage.cost ?? 0, subagentCost: 0 }),
+		/** The thread's name: omp tints the status line of a focused view with it. */
+		getSessionName: (): string | undefined => this.#host.detail().name || undefined,
+		getBranch: (): unknown[] => [],
+		appendCustomEntry: (_customType: string, _data?: unknown): void => {},
+		flush: async (): Promise<void> => {},
+		/** The thread's lifetime usage, the running turn's included: the cost the job's tile shows, which the Agent Hub's rows and omp's cost total read here ahead of anything else. */
+		getUsageStatistics: (): SessionUsage => {
+			const u = this.#host.metrics()?.usage;
+			const input = u?.inputTokens ?? 0;
+			const output = u?.outputTokens ?? 0;
+			const cacheRead = u?.cacheReadTokens ?? 0;
+			const cacheWrite = u?.cacheWriteTokens ?? 0;
+			return { input, output, cacheRead, cacheWrite, totalTokens: input + output + cacheRead + cacheWrite, orchestrationInput: input, orchestrationOutput: output, orchestrationCacheRead: cacheRead, premiumRequests: 0, cost: u?.cost ?? 0, subagentCost: 0 };
+		},
 	};
 
+	/** omp's `AgentSession.state` is `agent.state`: one object, read by the status line of a focused view and by the hub. */
+	readonly state = new SessionState(this);
+
 	readonly agent = {
-		state: {
-			get messages(): unknown[] {
-				return [];
-			},
-			isStreaming: false,
-			streamMessage: undefined,
-		},
+		state: this.state,
+		getPendingToolResults: (): unknown[] => [],
 	};
 
 	get sessionFile(): undefined {
@@ -347,7 +461,7 @@ export class CloudSession {
 
 	/** The Agent Hub's row metrics. */
 	getSessionStats(): { tokens: { input: number; output: number; cacheWrite: number }; assistantMessages: number; toolCalls: number; cost: number; contextUsage: { tokens: number; contextWindow: number } | null } {
-		const m = this.#host.detail().metrics;
+		const m = this.#host.metrics();
 		return {
 			tokens: { input: m?.usage.inputTokens ?? 0, output: m?.usage.outputTokens ?? 0, cacheWrite: m?.usage.cacheWriteTokens ?? 0 },
 			assistantMessages: m?.requests ?? 0,
@@ -369,8 +483,9 @@ export class CloudSession {
 	get model(): { id: string; provider: string; contextWindow: number } | undefined {
 		const d = this.#host.detail();
 		if (d.model === "") return undefined;
+		const contextWindow = this.#host.metrics()?.context?.window ?? 0;
 		const [provider = "", ...rest] = d.model.split("/");
-		return { id: rest.length > 0 ? rest.join("/") : provider, provider: rest.length > 0 ? provider : "", contextWindow: d.metrics?.context?.window ?? 0 };
+		return { id: rest.length > 0 ? rest.join("/") : provider, provider: rest.length > 0 ? provider : "", contextWindow };
 	}
 
 	get baseSystemPrompt(): undefined {
@@ -392,6 +507,156 @@ export class CloudSession {
 	activeToolExecutionUpdates(): Iterable<unknown> {
 		return [];
 	}
+
+	// Members omp reads of the session it focuses (`SHIM_MEMBERS`, "What omp reads of the session it focuses"): a cloud agent has no local tools, retries, compaction, queue, goal or todo state, so each answers as an idle session that has none.
+
+	get isRetrying(): boolean {
+		return false;
+	}
+
+	get retryAttempt(): number {
+		return 0;
+	}
+
+	get isTtsrAbortPending(): boolean {
+		return false;
+	}
+
+	get isCompacting(): boolean {
+		return false;
+	}
+
+	get isGeneratingHandoff(): boolean {
+		return false;
+	}
+
+	get hasAbortedToolCallTail(): boolean {
+		return false;
+	}
+
+	get isAutoThinking(): boolean {
+		return false;
+	}
+
+	get compactionSpeculation(): "idle" {
+		return "idle";
+	}
+
+	get contextUsageRevision(): number {
+		return 0;
+	}
+
+	get promptCacheEntry(): undefined {
+		return undefined;
+	}
+
+	get extensionRunner(): undefined {
+		return undefined;
+	}
+
+	get systemPrompt(): readonly string[] {
+		return NONE;
+	}
+
+	get skills(): readonly unknown[] {
+		return NONE;
+	}
+
+	readonly modelRegistry = { isUsingOAuth: (_model: unknown): boolean => false };
+
+	/** The working row's generation rate: a cloud agent reports none. */
+	readonly tokenRate = { rate: (): null => null };
+
+	getToolByName(_name: string): undefined {
+		return undefined;
+	}
+
+	hasBuiltInTool(_name: string): boolean {
+		return false;
+	}
+
+	getTodoPhases(): unknown[] {
+		return [];
+	}
+
+	/** The context in use as the service reported it: the status line's gauge. */
+	getContextUsage(): { tokens: number; contextWindow: number; percent: number | null } | undefined {
+		const context = this.#host.metrics()?.context;
+		if (!context) return undefined;
+		return { tokens: context.tokens, contextWindow: context.window, percent: context.window > 0 ? (context.tokens / context.window) * 100 : null };
+	}
+
+	/** The cloud agent's own omp compacts its context; the local timer has nothing to run. */
+	async runIdleCompaction(): Promise<void> {}
+
+	/** The idle recap's side request would bill a model here for nothing: no reply, no recap. */
+	async runEphemeralTurn(_args: unknown): Promise<{ replyText: string }> {
+		return { replyText: "" };
+	}
+
+	getGoalModeState(): undefined {
+		return undefined;
+	}
+
+	getAsyncJobSnapshot(_options?: unknown): null {
+		return null;
+	}
+
+	getAsyncJobTree(_options?: unknown): null {
+		return null;
+	}
+
+	getRunningJobWidgets(): unknown[] {
+		return [];
+	}
+
+	getQueuedMessages(): { steering: string[]; followUp: string[]; liveSteered: number } {
+		return { steering: [], followUp: [], liveSteered: 0 };
+	}
+
+	popLastQueuedMessage(): undefined {
+		return undefined;
+	}
+
+	/** The transcript omp replays when the agent is focused: the thread's turns, or the exported conversation. */
+	buildTranscriptSessionContext(_options?: unknown): { messages: unknown[]; models: Record<string, string>; injectedTtsrRules: string[]; mode: string } {
+		return { messages: this.#host.messages(), models: {}, injectedTtsrRules: [], mode: "none" };
+	}
+
+	autoResolvedThinkingLevel(): undefined {
+		return undefined;
+	}
+
+	isFastModeActive(): boolean {
+		return false;
+	}
+
+	configuredThinkingLevel(): string | undefined {
+		return this.thinkingLevel;
+	}
+
+	getAvailableEffortSelectors(): string[] {
+		return [];
+	}
+
+	/** The agent's thinking level is the thread's: nothing here to cycle. */
+	cycleThinkingLevel(): undefined {
+		return undefined;
+	}
+
+	async cycleRoleModels(_order: readonly string[], _direction: string): Promise<undefined> {
+		return undefined;
+	}
+
+	async retry(): Promise<boolean> {
+		return false;
+	}
+
+	abortCompaction(): void {}
+
+	abortHandoff(): void {}
+
+	abortRetry(): void {}
 
 	/** The hub's chat box: a message typed to the agent is a message to the cloud agent. */
 	async prompt(text: string, _opts?: unknown): Promise<void> {
@@ -440,6 +705,10 @@ interface Agent {
 	/** The conversation of the last exported turn, with the number of finished turns it covers. */
 	loaded: { messages: unknown[]; finished: number } | undefined;
 	hydrating: boolean;
+	/** What the turn the stream is on has done so far (its events), which the thread's `metrics` do not hold until the turn ends. */
+	progress: { turn: number; tracker: TurnProgress } | undefined;
+	/** The newest event of the stream taken into `progress`: a replay of the log never counts a request twice. */
+	eventSeq: number;
 }
 
 /** The registry refs, artifacts and message routes of the cloud threads a session follows. One instance per plugin. */
@@ -522,11 +791,27 @@ export class CloudAgents {
 			this.#inbound(a, e);
 			return;
 		}
+		this.#progress(a, e);
 		if (e.turn === null || (e.kind !== "assistant" && e.kind !== "tool" && e.kind !== "tool_error")) return;
 		const lines = a.log.get(e.turn) ?? [];
 		lines.push(e.kind === "assistant" ? e.text : e.kind === "tool" ? `» ${e.text}` : `! ${e.text}`);
 		if (lines.length > LOG_LINES) lines.splice(0, lines.length - LOG_LINES);
 		a.log.set(e.turn, lines);
+	}
+
+	/** The running turn's own requests, tokens and cost are taken from its events as the job's tile takes them; an event the agent already took (a replay of the log) is skipped. */
+	#progress(a: Agent, e: ThreadEvent): void {
+		if (e.turn === null || e.seq <= a.eventSeq) return;
+		a.eventSeq = e.seq;
+		if (a.progress?.turn !== e.turn) a.progress = { turn: e.turn, tracker: new TurnProgress(this.#now) };
+		a.progress.tracker.note(e);
+	}
+
+	/** The thread's metrics sum finished turns only: while the turn the events belong to is not finished, its progress is added, so the hub, the status line and the job's tile agree on requests, tokens and cost. */
+	#metrics(a: Agent): ThreadMetrics | null {
+		const p = a.progress;
+		const turn = p && a.detail.turns.find(t => t.id === p.turn);
+		return p && (turn === undefined || isLive(turn)) ? p.tracker.metrics(a.detail.metrics) : a.detail.metrics;
 	}
 
 	/** Whether the turn's reply is on its way to the agent that woke the thread: nothing else delivers it. */
@@ -640,6 +925,8 @@ export class CloudAgents {
 			parentId: MAIN_AGENT_ID,
 			loaded: undefined,
 			hydrating: false,
+			progress: undefined,
+			eventSeq: 0,
 		};
 		a.shim = new CloudSession(
 			{
@@ -652,6 +939,7 @@ export class CloudAgents {
 				stop: () => this.#stop(a),
 				messages: () => this.#messages(a),
 				detail: () => a.detail,
+				metrics: () => this.#metrics(a),
 				dir: () => this.dir(),
 				cwd: this.#opts.cwd,
 			},

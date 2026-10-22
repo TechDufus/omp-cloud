@@ -21,15 +21,18 @@ import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/
 import { formatSessionHistoryMarkdown } from "@oh-my-pi/pi-coding-agent/session/session-history-format";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
+import { aggregateCost, aggregateMetrics, hubFallbackStatsSession, hubRowMetrics, type AgentMetrics } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+import type { ObservableSession } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { CloudError } from "../src/errors";
 import { isRecord } from "../src/guards";
 import { CloudAgents, IRC_CAPABILITY, planModeFromEntries, type AgentsClient } from "../src/cloud-agents";
 import { CloudJobs } from "../src/cloud-jobs";
 import { Deliverer } from "../src/deliver";
-import type { IrcMessageBody, IrcReceipt, ThreadDetail, ThreadTurn } from "../src/types";
-import { detail, event, turn } from "./builders";
+import type { IrcMessageBody, IrcReceipt, ThreadDetail, ThreadEvent, ThreadTurn } from "../src/types";
+import { detail, event, metrics, turn } from "./builders";
 import { fakeHost, fakePi, until } from "./fakes";
 import { cleanup, isolateOmp, tmp } from "./helpers";
 
@@ -181,6 +184,8 @@ interface Rig {
 	asides: [string, string][];
 	/** The origin the session records for the thread: `tool` threads wake the model. */
 	origin: { value: "tool" | "user" };
+	/** The frames the jobs published on omp's session bus (the Subagents strip and the hub read them): channel and payload. */
+	frames: [string, unknown][];
 }
 
 const rigs: Rig[] = [];
@@ -219,6 +224,7 @@ async function rig(opts: RigOptions = {}): Promise<Rig> {
 	const stops: string[] = [];
 	const asides: [string, string][] = [];
 	const origin: Rig["origin"] = { value: "tool" };
+	const frames: Rig["frames"] = [];
 	const jobs = new CloudJobs({
 		manager: () => manager,
 		wakes: (_thread, t) => origin.value === "tool" && t.origin !== "irc",
@@ -227,8 +233,9 @@ async function rig(opts: RigOptions = {}): Promise<Rig> {
 		stop: thread => void stops.push(thread),
 		transitioning: () => agents.ownerTransitioning(),
 		aside: (thread, label) => void asides.push([thread, label]),
+		events: () => ({ emit: (channel, data) => void frames.push([channel, data]) }),
 	});
-	const r: Rig = { agents, registry, router: InternalUrlRouter.instance(), dir, client, main, follows, warns, relayFailures, entries, manager, jobs, delivered, stops, asides, origin };
+	const r: Rig = { agents, registry, router: InternalUrlRouter.instance(), dir, client, main, follows, warns, relayFailures, entries, manager, jobs, delivered, stops, asides, origin, frames };
 	rigs.push(r);
 	return r;
 }
@@ -1229,5 +1236,73 @@ describe("cancel against teardown", () => {
 		expect(outcome.status).toBe("not_found");
 		expect(r.client.stops).toEqual([]);
 		expect(r.registry.get(AGENT)).toBeDefined();
+	});
+});
+
+describe("the Agent Hub's row of a cloud agent: pi-tui's own projection of it", () => {
+	const PROGRESS = "task:subagent:progress";
+	const t0 = Date.parse("2026-10-19T10:00:00Z");
+	const usage = (seq: number, turnId: number, cost: number): ThreadEvent => event(seq, { kind: "usage", turn: turnId, at: new Date(t0 + seq * 1000).toISOString(), text: JSON.stringify({ input: 100, output: 20, cacheRead: 900, cacheWrite: 30, cost, model: "m", stopReason: "toolUse", context: { tokens: 1050, window: 128_000 } }) });
+	const toolStart = (seq: number, turnId: number): ThreadEvent => event(seq, { kind: "tool_start", turn: turnId, at: new Date(t0 + seq * 1000).toISOString(), text: JSON.stringify({ id: `c${seq}`, tool: "bash", intent: "", args: '{"command":"ls"}' }) });
+
+	/** Feeds an event the way the watcher does: to the agents, then to the jobs. */
+	function feed(r: Rig, d: ThreadDetail, log: ThreadEvent[], e: ThreadEvent): void {
+		log.push(e);
+		r.agents.event(d, e);
+		r.jobs.event(d, log, e);
+	}
+
+	/** The row the hub draws for `AGENT`: pi-tui's `hubRowMetrics` over what `aggregateMetrics` caches of the ref's session, with the job's last progress frame as the Subagents observer holds it. */
+	function hubRow(r: Rig) {
+		const ref = r.registry.get(AGENT);
+		if (!ref) throw new Error("no ref");
+		const frame = r.frames.filter(([channel]) => channel === PROGRESS).at(-1)?.[1];
+		const progress = isRecord(frame) && isRecord(frame.progress) ? (frame.progress as unknown as AgentProgress) : undefined;
+		const observed: ObservableSession | undefined = progress ? { id: AGENT, kind: "subagent", label: AGENT, status: "active", lastUpdate: 0, progress } : undefined;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		const rows = [ref];
+		const observedById = new Map(observed ? [[AGENT, observed]] : []);
+		aggregateMetrics({ rows, observedById, metricsFor: (row, obs) => hubRowMetrics(row, obs, sessionMetrics), fallbackStatsSession: hubFallbackStatsSession, sessionMetrics, refreshFallback: true });
+		return { row: hubRowMetrics(ref, observed, sessionMetrics), progress, total: aggregateCost({ rows, observedById, sessionCosts: new WeakMap() }) };
+	}
+
+	test("a turn that has not ended: the row's cost is the job tile's, not the thread's metrics, which hold finished turns only", async () => {
+		const r = await rig();
+		const d = running();
+		const log: ThreadEvent[] = [];
+		r.agents.observe(d);
+		r.jobs.sync(d, []);
+		for (const e of [toolStart(1, 1), usage(2, 1, 0.5), toolStart(3, 1), usage(4, 1, 0.57)]) feed(r, d, log, e);
+
+		const { row, progress, total } = hubRow(r);
+		expect(progress?.cost).toBeCloseTo(1.07, 10);
+		expect(row).toMatchObject({ requests: 2, tools: 2 });
+		expect(row?.cost).toBeCloseTo(1.07, 10);
+		expect(row?.cost).toBe(progress?.cost);
+		expect(total).toBeCloseTo(1.07, 10);
+	});
+
+	test("the row's cost does not count a turn twice once the thread's metrics hold it, and a replay of the log changes nothing", async () => {
+		const r = await rig();
+		const d = running();
+		const log: ThreadEvent[] = [];
+		r.agents.observe(d);
+		r.jobs.sync(d, []);
+		for (const e of [toolStart(1, 1), usage(2, 1, 0.5), usage(3, 1, 0.57)]) feed(r, d, log, e);
+		for (const e of log.slice()) r.agents.event(d, e);
+		expect(hubRow(r).total).toBeCloseTo(1.07, 10);
+
+		// Turn 1 ends: the service's metrics now hold it.
+		const done = ended("done", {}, { metrics: metrics({ requests: 2, tools: 1, usage: { inputTokens: 200, outputTokens: 40, cacheReadTokens: 1800, cacheWriteTokens: 60, cost: 1.07 } }) });
+		r.agents.observe(done);
+		expect(r.registry.get(AGENT)?.status).toBe("idle");
+		expect(shimOf(r).sessionManager.getUsageStatistics().cost).toBeCloseTo(1.07, 10);
+		expect(hubRow(r).total).toBeCloseTo(1.07, 10);
+
+		// Turn 2 runs on top of it.
+		const next = second("running", {}, { metrics: done.metrics });
+		r.agents.observe(next);
+		feed(r, next, log, usage(4, 2, 0.3));
+		expect(hubRow(r).total).toBeCloseTo(1.37, 10);
 	});
 });
