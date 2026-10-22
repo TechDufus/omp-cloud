@@ -1,6 +1,7 @@
 /**
  * `/cloud login <provider>`: gives the cloud broker its own login to a provider. The OAuth flow runs
- * on the service host; this side shows the URL, takes the pasted redirect URL or code, and waits.
+ * on the service host; this side hands the sign-in link to a presenter, takes the pasted redirect
+ * URL or code, and waits.
  */
 
 import type { CloudClient } from "./api";
@@ -26,14 +27,16 @@ export function loginLines(l: Login): string[] {
 }
 
 /**
- * Runs one login to the end and reports it through `ui`. A device-code login needs no input; any
- * other asks the owner to paste the redirect URL or code the browser ended on. Returns the final
- * login; throws a {@link UserError} when the host cannot prompt or the wait runs out.
+ * Runs one login to the end and reports it through `ui`. `show` presents the sign-in link (and the
+ * device code, when there is one) once, right after the login starts, and only while it waits: the
+ * caller picks where it goes (a transcript card, or a notification). A device-code login needs no
+ * input; any other asks the owner to paste the redirect URL or code the browser ended on. Returns
+ * the final login; throws a {@link UserError} when the host cannot prompt or the wait runs out.
  */
-export async function runLogin(api: LoginApi, ui: HostUi, provider: string, opts: RunLoginOptions = {}): Promise<Login> {
+export async function runLogin(api: LoginApi, ui: HostUi, provider: string, show: (login: Login) => void, opts: RunLoginOptions = {}): Promise<Login> {
 	const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms));
 	let login = await api.startLogin(provider);
-	ui.notify(loginLines(login).join("\n"), "info");
+	if (login.state === "waiting") show(login);
 
 	if (login.state === "waiting" && login.userCode === "") {
 		if (!ui.input) {

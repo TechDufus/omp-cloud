@@ -57,6 +57,12 @@ const api = () => new CloudClient(`http://127.0.0.1:${server.port}`, "tok");
 const noSleep = async (): Promise<void> => {};
 const methods = (): string[] => calls.map(c => `${c.method} ${c.path}`);
 
+/** What a presenter was handed: a login per call to `show`. */
+function presenter(): { shown: Login[]; show: (l: Login) => void } {
+	const shown: Login[] = [];
+	return { shown, show: l => void shown.push(l) };
+}
+
 interface Prompt {
 	title: string;
 	placeholder: string | undefined;
@@ -84,8 +90,9 @@ describe("runLogin", () => {
 		};
 		const h = hostAnswering(["  http://localhost:1455/auth/callback?code=abc123  "]);
 		const sleeps: number[] = [];
+		const p = presenter();
 
-		const done = await runLogin(api(), h.host.ui, "openai-codex", {
+		const done = await runLogin(api(), h.host.ui, "openai-codex", p.show, {
 			pollMs: 7,
 			sleep: async ms => void sleeps.push(ms),
 		});
@@ -103,18 +110,14 @@ describe("runLogin", () => {
 		expect(sleeps).toEqual([7, 7]);
 		expect(done).toMatchObject({ state: "done", account: "ada@example.com" });
 
-		const first = h.notes[0];
-		expect(first?.[1]).toBe("info");
-		expect(first?.[0]).toContain("logging the cloud broker in to openai-codex");
-		expect(first?.[0]).toContain("open: https://auth.example/x");
-		expect(first?.[0]).toContain("Sign in, then paste the address the browser ends on.");
-		expect(h.notes.at(-1)).toEqual(["☁ the cloud broker is logged in to openai-codex as ada@example.com", "info"]);
+		expect(p.shown).toEqual([login({ instructions: "Sign in, then paste the address the browser ends on." })]);
+		expect(h.notes).toEqual([["☁ the cloud broker is logged in to openai-codex as ada@example.com", "info"]]);
 	});
 
 	test("a login that completes on the pasted input needs no polling", async () => {
 		script = { start: login(), input: login({ state: "done", account: "" }), polls: [login()] };
 		const h = hostAnswering(["code-1"]);
-		const done = await runLogin(api(), h.host.ui, "openai-codex", { sleep: noSleep });
+		const done = await runLogin(api(), h.host.ui, "openai-codex", presenter().show, { sleep: noSleep });
 		expect(methods()).toEqual(["POST /api/v1/logins", "POST /api/v1/logins/l1/input"]);
 		expect(done.state).toBe("done");
 		expect(h.notes.at(-1)).toEqual(["☁ the cloud broker is logged in to openai-codex", "info"]);
@@ -132,8 +135,9 @@ describe("runLogin", () => {
 			},
 		});
 		let slept = 0;
+		const p = presenter();
 
-		const done = await runLogin(api(), h.host.ui, "openai-codex", {
+		const done = await runLogin(api(), h.host.ui, "openai-codex", p.show, {
 			sleep: async () => {
 				slept++;
 			},
@@ -142,16 +146,14 @@ describe("runLogin", () => {
 		expect(methods()).toEqual(["POST /api/v1/logins", "GET /api/v1/logins/l1", "GET /api/v1/logins/l1", "GET /api/v1/logins/l1"]);
 		expect(slept).toBe(3);
 		expect(done.state).toBe("done");
-		const shown = h.notes[0]?.[0] ?? "";
-		expect(shown).toContain("open: https://auth.example/device");
-		expect(shown).toContain("enter the code: ABCD-1234");
+		expect(p.shown).toEqual([login({ userCode: "ABCD-1234", url: "https://auth.example/device" })]);
 		expect(h.notes.at(-1)).toEqual(["☁ the cloud broker is logged in to openai-codex as ada", "info"]);
 	});
 
 	test("a failed login is reported at level error with the service's reason", async () => {
 		script = { start: login({ userCode: "X" }), input: 500, polls: [login({ state: "failed", error: "access denied" })] };
 		const h = fakeHost();
-		const done = await runLogin(api(), h.host.ui, "openai-codex", { sleep: noSleep });
+		const done = await runLogin(api(), h.host.ui, "openai-codex", presenter().show, { sleep: noSleep });
 		expect(done).toMatchObject({ state: "failed", error: "access denied" });
 		expect(h.notes.at(-1)).toEqual(["☁ login to openai-codex failed: access denied", "error"]);
 		expect(h.notes.filter(([, level]) => level === "error")).toHaveLength(1);
@@ -160,7 +162,7 @@ describe("runLogin", () => {
 	test("a login that fails on the pasted input is reported at level error", async () => {
 		script = { start: login(), input: login({ state: "failed", error: "bad code" }), polls: [login()] };
 		const h = hostAnswering(["nonsense"]);
-		await runLogin(api(), h.host.ui, "openai-codex", { sleep: noSleep });
+		await runLogin(api(), h.host.ui, "openai-codex", presenter().show, { sleep: noSleep });
 		expect(methods()).toEqual(["POST /api/v1/logins", "POST /api/v1/logins/l1/input"]);
 		expect(h.notes.at(-1)).toEqual(["☁ login to openai-codex failed: bad code", "error"]);
 	});
@@ -172,7 +174,7 @@ describe("runLogin", () => {
 	])("%s cancels the login: DELETE is sent, no input is posted", async (_name, answer) => {
 		script = { start: login(), input: login(), polls: [login()] };
 		const h = hostAnswering([answer]);
-		const result = await runLogin(api(), h.host.ui, "openai-codex", { sleep: noSleep });
+		const result = await runLogin(api(), h.host.ui, "openai-codex", presenter().show, { sleep: noSleep });
 		expect(methods()).toEqual(["POST /api/v1/logins", "DELETE /api/v1/logins/l1"]);
 		expect(result.state).toBe("waiting");
 		expect(h.notes.at(-1)).toEqual(["☁ login to openai-codex cancelled", "info"]);
@@ -181,7 +183,7 @@ describe("runLogin", () => {
 	test("a cancel the service cannot deliver still ends the login quietly", async () => {
 		script = { start: login({ id: "gone" }), input: login(), polls: [login()] };
 		const h = hostAnswering([undefined]);
-		await runLogin(api(), h.host.ui, "openai-codex", { sleep: noSleep });
+		await runLogin(api(), h.host.ui, "openai-codex", presenter().show, { sleep: noSleep });
 		expect(methods()).toEqual(["POST /api/v1/logins", "DELETE /api/v1/logins/gone"]);
 		expect(h.notes.at(-1)?.[0]).toBe("☁ login to openai-codex cancelled");
 	});
@@ -189,7 +191,7 @@ describe("runLogin", () => {
 	test("409 on input (it finished while the owner typed) falls back to reading the login", async () => {
 		script = { start: login(), input: 409, polls: [login({ state: "done", account: "ada" })] };
 		const h = hostAnswering(["code-2"]);
-		const done = await runLogin(api(), h.host.ui, "openai-codex", { sleep: noSleep });
+		const done = await runLogin(api(), h.host.ui, "openai-codex", presenter().show, { sleep: noSleep });
 		expect(methods()).toEqual(["POST /api/v1/logins", "POST /api/v1/logins/l1/input", "GET /api/v1/logins/l1"]);
 		expect(done).toMatchObject({ state: "done", account: "ada" });
 		expect(h.notes.at(-1)).toEqual(["☁ the cloud broker is logged in to openai-codex as ada", "info"]);
@@ -198,7 +200,7 @@ describe("runLogin", () => {
 	test("any other failure of the input call propagates and is not mistaken for a finished login", async () => {
 		script = { start: login(), input: 500, polls: [login({ state: "done" })] };
 		const h = hostAnswering(["code-3"]);
-		const err = await runLogin(api(), h.host.ui, "openai-codex", { sleep: noSleep }).catch((e: unknown) => e);
+		const err = await runLogin(api(), h.host.ui, "openai-codex", presenter().show, { sleep: noSleep }).catch((e: unknown) => e);
 		expect(err).toBeInstanceOf(CloudError);
 		expect(err).toMatchObject({ code: "unavailable", status: 500 });
 		expect(methods()).toEqual(["POST /api/v1/logins", "POST /api/v1/logins/l1/input"]);
@@ -208,7 +210,7 @@ describe("runLogin", () => {
 		script = { start: login(), input: login(), polls: [login()] };
 		const h = fakeHost();
 		expect(h.host.ui.input).toBeUndefined();
-		const err = await runLogin(api(), h.host.ui, "openai-codex", { sleep: noSleep }).catch((e: unknown) => e);
+		const err = await runLogin(api(), h.host.ui, "openai-codex", presenter().show, { sleep: noSleep }).catch((e: unknown) => e);
 		expect(err).toBeInstanceOf(UserError);
 		expect((err as UserError).message).toBe("☁ this host cannot prompt; log in from a TUI or RPC client that can");
 		expect(methods()).toEqual(["POST /api/v1/logins", "DELETE /api/v1/logins/l1"]);
@@ -217,7 +219,7 @@ describe("runLogin", () => {
 	test("a device-code login needs no input box, so a host without one still logs in", async () => {
 		script = { start: login({ userCode: "ZZZZ" }), input: 500, polls: [login({ state: "done", account: "ada" })] };
 		const h = fakeHost();
-		const done = await runLogin(api(), h.host.ui, "openai-codex", { sleep: noSleep });
+		const done = await runLogin(api(), h.host.ui, "openai-codex", presenter().show, { sleep: noSleep });
 		expect(done.state).toBe("done");
 		expect(methods()).not.toContain("DELETE /api/v1/logins/l1");
 	});
@@ -225,7 +227,7 @@ describe("runLogin", () => {
 	test("the wait running out is a UserError, after polling", async () => {
 		script = { start: login({ userCode: "ABCD" }), input: 500, polls: [login({ userCode: "ABCD" })] };
 		const h = fakeHost();
-		const err = await runLogin(api(), h.host.ui, "openai-codex", {
+		const err = await runLogin(api(), h.host.ui, "openai-codex", presenter().show, {
 			maxMs: 30,
 			pollMs: 10,
 			sleep: async ms => void setSystemTime(new Date(Date.now() + ms)),
@@ -238,10 +240,22 @@ describe("runLogin", () => {
 
 	test("a service error on start propagates before anything is shown", async () => {
 		const h = fakeHost();
+		const p = presenter();
 		const bad = new CloudClient(`http://127.0.0.1:${server.port}/nowhere`, "tok");
-		const err = await runLogin(bad, h.host.ui, "openai-codex", { sleep: noSleep }).catch((e: unknown) => e);
+		const err = await runLogin(bad, h.host.ui, "openai-codex", p.show, { sleep: noSleep }).catch((e: unknown) => e);
 		expect(err).toBeInstanceOf(CloudError);
 		expect(err).toMatchObject({ code: "not_found", status: 404 });
+		expect(p.shown).toEqual([]);
 		expect(h.notes).toEqual([]);
+	});
+
+	test("a login that is already over at start is not shown, only reported", async () => {
+		script = { start: login({ state: "failed", error: "provider unknown" }), input: 500, polls: [login()] };
+		const h = fakeHost();
+		const p = presenter();
+		const done = await runLogin(api(), h.host.ui, "nope", p.show, { sleep: noSleep });
+		expect(done.state).toBe("failed");
+		expect(p.shown).toEqual([]);
+		expect(h.notes).toEqual([["☁ login to nope failed: provider unknown", "error"]]);
 	});
 });

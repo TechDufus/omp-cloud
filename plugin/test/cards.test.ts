@@ -18,6 +18,7 @@ import {
 	cardRenderer,
 	inventoryCard,
 	loadTui,
+	loginCard,
 	noticeCard,
 	patternProviders,
 	PlainCard,
@@ -1710,5 +1711,78 @@ describe("buttons on hand-off, result and question cards", () => {
 		const inv = await render(inventoryCard(whoami(), [], NOW));
 		expect(inv.describe?.(cx)?.p?.role).toBe("omp.cloud.list");
 		expect(await render(noticeCard("", "help", []))).not.toHaveProperty("handleNativeEvent");
+	});
+});
+
+describe("the login card", () => {
+	const URL_LONG = "https://auth.example.com/oauth/authorize?response_type=code&client_id=abc123&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fcallback&scope=openid+profile&state=xyz";
+	const login = (over: Partial<Parameters<typeof loginCard>[0]> = {}) => loginCard({ provider: "openai-codex", url: URL_LONG, userCode: "", instructions: "", ...over });
+	const cx: DescribeContext = { cols: 100, reduceMotion: false, dark: true, supports: () => true, feature: () => false };
+
+	async function tuiOf(): Promise<TuiModule> {
+		const tui = await loadTui();
+		if (!tui) throw new Error("the host pi-tui is required");
+		return tui;
+	}
+
+	test("a narrow terminal shows the whole URL: no row is wider than the terminal, the rows joined are the URL, and the link row targets it", async () => {
+		const tui = await tuiOf();
+		const width = 40;
+		expect(URL_LONG.length).toBeGreaterThan(width * 2);
+		const rows = buildRichCard(login({ instructions: "Sign in, then paste the address the page ends on." }), tui, theme, false).render(width);
+		for (const row of rows) expect(tui.visibleWidth(row)).toBeLessThanOrEqual(width);
+		const label = rows.findIndex(r => r === "URL:");
+		expect(label).toBeGreaterThan(0);
+		expect(rows.slice(label + 1).join("")).toBe(URL_LONG);
+		const link = rows.find(r => r.includes("Open the sign-in page"));
+		expect(link).toContain(`;${URL_LONG}\x07Open the sign-in page\x1b]8;;\x07`);
+		expect(link).toMatch(/^\x1b\]8;(id=[^;]*)?;https:/);
+		expect(rows.join("\n")).toContain("Sign in, then paste the address");
+	});
+
+	test("a URL that fits with its label stays on one row; a card without a URL has no link or URL rows", async () => {
+		const tui = await tuiOf();
+		const url = "https://example.com/device";
+		const rows = buildRichCard(login({ url, userCode: "ABCD-1234" }), tui, theme, false).render(80);
+		expect(rows).toContain(`URL: ${url}`);
+		expect(rows.some(r => r.includes("code") && r.includes("ABCD-1234"))).toBe(true);
+		const asked = buildRichCard(login({ url: "", instructions: "Paste the code" }), tui, theme, false);
+		const text = asked.render(80).join("\n");
+		expect(text).toContain("Paste the code");
+		expect(text).not.toContain("\x1b]8;");
+		expect(text).not.toContain("URL");
+		expect(JSON.stringify(asked.describe?.(cx))).not.toContain("href");
+	});
+
+	test("Tern: the link opens the page on click, a copy row carries the whole URL, and the node is kept per card", async () => {
+		const tui = await tuiOf();
+		const view = buildRichCard(login({ userCode: "ABCD-1234", instructions: "Enter the code" }), tui, theme, false);
+		const node = view.describe?.(cx);
+		expect(node?.k).toBe("col");
+		expect(node?.p?.role).toBe("omp.cloud.login");
+		const texts = (node?.c ?? []).filter((c): c is NativeNode => "k" in c && c.k === "text");
+		const open = texts.find(n => n.p?.href === URL_LONG && n.p?.actions?.click === "open");
+		expect(open?.p?.title).toBe("Open the sign-in page");
+		const copy = texts.find(n => n.p?.actions?.click === "copy");
+		expect(copy?.p?.href).toBe(URL_LONG);
+		expect(copy?.k === "text" ? copy.p?.spans?.map(s => s.t).join("") : undefined).toBe(`URL ${URL_LONG}`);
+		expect(JSON.stringify(node)).toContain("ABCD-1234");
+		expect(view.describe?.(cx)).toBe(node);
+	});
+
+	test("a login card reads back as a card, and one with a mistyped field is not", () => {
+		const card = login({ userCode: "ABCD-1234", instructions: "Enter the code" });
+		expect(asCard(JSON.parse(JSON.stringify(card)))).toEqual(card);
+		expect(card).toMatchObject({ kind: "login", origin: "user", thread: "", provider: "openai-codex" });
+		for (const bad of [{ ...card, url: 3 }, { ...card, url: undefined }, { ...card, provider: null }, { ...card, userCode: 1 }, { ...card, instructions: [] }]) {
+			expect(asCard(bad)).toBeUndefined();
+		}
+	});
+
+	test("the model is told a sign-in is under way, never the URL or the code; the plain text has both", () => {
+		const card = login({ userCode: "ABCD-1234", instructions: "Enter the code" });
+		expect(cardContent(card)).toBe("[cloud] The owner is signing the cloud broker in to openai-codex in a browser.");
+		expect(cardPlain(card)).toEqual(["☁ Sign the cloud broker in to openai-codex", `open: ${URL_LONG}`, "code: ABCD-1234", "Enter the code"]);
+		expect(cardPlain(login({ url: "" }))).toEqual(["☁ Sign the cloud broker in to openai-codex"]);
 	});
 });

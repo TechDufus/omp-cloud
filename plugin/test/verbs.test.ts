@@ -1,9 +1,9 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { run } from "../src/exec";
 import { Cloud } from "../src/verbs";
-import { whoami } from "./builders";
+import { login, whoami } from "./builders";
 import { cloudEnv, fakeHost, fakePi } from "./fakes";
 import { cleanup, FAST_RETRY, tmp } from "./helpers";
 
@@ -138,5 +138,72 @@ describe("/cloud status", () => {
 		const { text, type, personal } = await status({ personal: "url: [unclosed\n" });
 		expect(type).toBe("error");
 		expect(text).toContain(`${personal} is not valid YAML`);
+	});
+});
+
+describe("/cloud login", () => {
+	const URL_SHOWN = "https://auth.example/x?state=s3cr3t";
+	let broker: Bun.Server<undefined>;
+	let brokerOrigin = "";
+	/** Every request the fake service saw: `METHOD path`. */
+	let seen: string[] = [];
+
+	beforeAll(() => {
+		broker = Bun.serve({
+			port: 0,
+			fetch: req => {
+				const path = new URL(req.url).pathname;
+				seen.push(`${req.method} ${path}`);
+				if (req.method === "POST" && path === "/api/v1/logins") return Response.json(login({ url: URL_SHOWN, instructions: "Sign in, then paste the address." }), { status: 201 });
+				if (req.method === "POST" && path === "/api/v1/logins/l1/input") return Response.json(login({ state: "done", account: "ada" }));
+				return Response.json({ error: "not found" }, { status: 404 });
+			},
+		});
+		brokerOrigin = `http://127.0.0.1:${broker.port}`;
+	});
+	afterAll(() => broker.stop(true));
+	beforeEach(() => {
+		seen = [];
+	});
+
+	async function loginIn(mode: string, idle = true) {
+		const env = await cloudEnv(`url: ${brokerOrigin}\ntoken: tok\n`);
+		const host = fakeHost({ cwd: await tmp("omp-cloud-repo-"), mode, input: async () => "the-code" });
+		host.idle = idle;
+		const pi = fakePi();
+		await new Cloud(pi.pi, "/own", env, await tmp("omp-cloud-home-"), undefined, undefined, FAST_RETRY).handle("login openai-codex", { ...host.host, switchSession: async () => ({ cancelled: false }) });
+		return { host, pi };
+	}
+
+	test("in the interactive UI the sign-in link is a transcript card with the full URL, and the model never sees it", async () => {
+		const { host, pi } = await loginIn("tui");
+		expect(pi.sent).toHaveLength(1);
+		const [card] = pi.sent;
+		expect(card?.message.customType).toBe("omp-cloud");
+		expect(card?.message.display).toBe(true);
+		expect(card?.message.details).toMatchObject({ kind: "login", provider: "openai-codex", url: URL_SHOWN, userCode: "", instructions: "Sign in, then paste the address." });
+		expect(card?.message.content).not.toContain(URL_SHOWN);
+		expect(host.notes.some(([text]) => text.includes(URL_SHOWN))).toBe(false);
+		expect(host.notes.at(-1)).toEqual(["☁ the cloud broker is logged in to openai-codex as ada", "info"]);
+		expect(seen).toEqual(["POST /api/v1/logins", "POST /api/v1/logins/l1/input"]);
+	});
+
+	test("in the interactive UI while the agent is working it refuses before any login starts", async () => {
+		const { host, pi } = await loginIn("tui", false);
+		expect(host.notes).toEqual([["☁ the agent is working: run /cloud login again when it is idle, so the sign-in link can go in the transcript", "error"]]);
+		expect(pi.sent).toEqual([]);
+		expect(seen).toEqual([]);
+	});
+
+	test("without the interactive UI the link is an info notification and no card is posted", async () => {
+		for (const mode of ["rpc", "print"]) {
+			seen = [];
+			const { host, pi } = await loginIn(mode, false);
+			const shown = host.notes.find(([text]) => text.includes(URL_SHOWN));
+			expect(shown?.[1]).toBe("info");
+			expect(shown?.[0]).toContain(`open: ${URL_SHOWN}`);
+			expect(pi.sent).toEqual([]);
+			expect(seen).toContain("POST /api/v1/logins");
+		}
 	});
 });

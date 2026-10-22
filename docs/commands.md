@@ -17,7 +17,7 @@ Every `/cloud` command the plugin adds to omp, where finished turns and question
 | `/cloud pull <id> [--into <dir>]` | Fetch the result branch `omp-cloud/<id>` and save the cloud conversation as a local omp session. With `--into <dir>` a repository thread's result is checked out in a new worktree there, and a [scratch thread's](cloud-tool.md#scratch-threads) result is cloned into the new directory |
 | `/cloud resume <id>` | Check out `omp-cloud/<id>` and continue its conversation locally; needs a clean working tree |
 | `/cloud delete <id>` | After a confirmation, delete the thread, its VM and gateway client |
-| `/cloud login <provider>` | Log the cloud broker in to a provider |
+| `/cloud login <provider>` | Log the cloud broker in to a provider. The provider's sign-in link (and a device code, when it uses one) is posted in the transcript as a card to click or copy, then omp asks for the redirect URL or code the browser ended on. In omp's interactive UI the agent must be idle, so the card can appear at once |
 | `/cloud update` | Check the service for a newer omp-cloud; for the owner, when one is ready, confirm and restart the service to install it. A paired device is told what the service says |
 | `/cloud dashboard` | Print a one-time sign-in link (valid 60 s) to the dashboard, and open it in a browser from the interactive UI |
 | `/cloud pair` | On the service host, in omp's interactive UI: show a pairing code (sent to your clipboard), approve the device that uses it ([pairing](pairing.md)) |

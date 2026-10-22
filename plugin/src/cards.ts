@@ -10,6 +10,7 @@ import type * as PiTui from "@oh-my-pi/pi-tui";
 import type { Component, DescribeContext, NativeNode, NativeUiEvent, Theme } from "@oh-my-pi/pi-tui";
 import * as native from "@oh-my-pi/pi-tui/native/describe";
 import type { TspSpan } from "@oh-my-pi/pi-tui/native/node";
+import { urlHyperlinkAlways, urlLinkSpan } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { outputBlockContentWidth, renderOutputBlock } from "@oh-my-pi/pi-tui/render/output-block";
 import type { ToolUIStatus } from "@oh-my-pi/pi-tui/render/render-utils";
 import { renderStatusLine } from "@oh-my-pi/pi-tui/render/status-line";
@@ -21,7 +22,7 @@ import { eventLines, lineLabel, lineText } from "./event-lines";
 import { clip, diffstat, formatCost, formatDuration, formatTokens, phaseIcon, plural, pushedText, stateIcon, threadHeading, truncateText } from "./format";
 import { isRecord } from "./guards";
 import { repoKey, repoLabel, type RepoRef } from "./repo-key";
-import type { PendingQuestion, Question, QuestionOption, ThreadActivity, ThreadEvent, ThreadMetrics, ThreadOrigin, ThreadPhase, ThreadResult, ThreadSummary, TurnState, Whoami } from "./types";
+import type { Login, PendingQuestion, Question, QuestionOption, ThreadActivity, ThreadEvent, ThreadMetrics, ThreadOrigin, ThreadPhase, ThreadResult, ThreadSummary, TurnState, Whoami } from "./types";
 import { overflowText } from "./watch";
 
 export { CARD_TYPE };
@@ -234,9 +235,32 @@ export interface UpdateCard extends CardBase {
 	notes: string;
 }
 
-export type CardDetails = LaunchCard | TurnCard | QuestionCard | InventoryCard | NoticeCard | UpdateCard;
+export type CardDetails = LaunchCard | TurnCard | QuestionCard | InventoryCard | NoticeCard | UpdateCard | LoginCard;
 
-const KINDS: readonly string[] = ["launch", "turn", "question", "inventory", "notice", "update"];
+/** A provider sign-in that waits for the owner (`/cloud login`); the card keeps the link in the transcript. The model's `content` never carries the URL or the code. */
+export interface LoginCard extends CardBase {
+	kind: "login";
+	provider: string;
+	/** The provider's sign-in page; "" when the provider asked a question first. */
+	url: string;
+	/** The code to enter at `url` (device-code providers), "" otherwise. */
+	userCode: string;
+	/** What to do there, "" when the provider gave nothing. */
+	instructions: string;
+}
+
+/** The card of a login that waits for the owner: origin "user", thread "". */
+export function loginCard(l: Pick<Login, "provider" | "url" | "userCode" | "instructions">): LoginCard {
+	return { v: CARD_VERSION, kind: "login", origin: "user", thread: "", provider: l.provider, url: l.url, userCode: l.userCode, instructions: l.instructions };
+}
+
+const LOGIN_LINK = "Open the sign-in page";
+
+function loginTitle(d: LoginCard): string {
+	return `☁ Sign the cloud broker in to ${d.provider}`;
+}
+
+const KINDS: readonly string[] = ["launch", "turn", "question", "inventory", "notice", "update", "login"];
 
 /** The card a message carries, or undefined for a message of another shape or version (other plugin builds, other extensions); the host then renders its `content`. */
 export function asCard(details: unknown): CardDetails | undefined {
@@ -245,6 +269,10 @@ export function asCard(details: unknown): CardDetails | undefined {
 	if (details.origin !== "user" && details.origin !== "tool") return undefined;
 	if (details.kind === "notice") {
 		const ok = typeof details.thread === "string" && typeof details.title === "string" && typeof details.body === "string" && Array.isArray(details.lines) && details.lines.every(l => typeof l === "string");
+		if (!ok) return undefined;
+	}
+	if (details.kind === "login") {
+		const ok = [details.provider, details.url, details.userCode, details.instructions].every(f => typeof f === "string");
 		if (!ok) return undefined;
 	}
 	return details as unknown as CardDetails;
@@ -606,6 +634,8 @@ export function cardContent(d: CardDetails): string {
 			const body = [...d.lines, ...(d.body ? ["", truncateText(d.body, NOTICE_BODY_MAX)] : [])];
 			return [`[cloud] ${d.title}`, ...(d.thread ? cloudFence(d.thread, undefined, body) : body)].join("\n");
 		}
+		case "login":
+			return `[cloud] The owner is signing the cloud broker in to ${d.provider} in a browser.`;
 		case "update":
 			return `[cloud] omp-cloud ${d.version} is ready to install on the cloud service. The owner installs it with /cloud update or the card's Restart to update button; nothing to do unless the user asks.`;
 	}
@@ -697,6 +727,8 @@ export function cardPlain(d: CardDetails): string[] {
 		}
 		case "notice":
 			return [d.title, ...d.lines, ...(d.body ? ["", ...d.body.split("\n")] : [])];
+		case "login":
+			return [loginTitle(d), ...(d.url !== "" ? [`open: ${d.url}`] : []), ...(d.userCode !== "" ? [`code: ${d.userCode}`] : []), ...(d.instructions !== "" ? [d.instructions] : [])];
 		case "update":
 			return [`☁ omp-cloud ${d.version} is ready`, "Downloaded and verified: restarting the service installs it.", ...(d.notes ? ["", ...d.notes.split("\n")] : []), "/cloud update"];
 	}
@@ -1137,6 +1169,69 @@ class InventoryView implements Component {
 	}
 }
 
+/** The sign-in link of a login card: a clickable node for a native terminal, the whole URL as a copy row. */
+function nativeLogin(tui: DescribeKit, d: LoginCard): NativeNode {
+	const rows: NativeNode[] = [tui.text([tui.span(loginTitle(d), "accent strong")], { wrap: "word" })];
+	if (d.instructions !== "") rows.push(tui.text([tui.span(d.instructions, "muted")], { wrap: "word" }));
+	if (d.userCode !== "") rows.push(tui.text([tui.span("code ", "muted"), tui.span(d.userCode, "mono strong")], { wrap: "none" }));
+	if (d.url !== "") {
+		rows.push(
+			tui.text([urlLinkSpan(d.url, LOGIN_LINK)], { href: d.url, actions: { click: "open", menu: ["open", "copy"] }, title: LOGIN_LINK }),
+			tui.text([tui.span("URL ", "muted"), tui.span(d.url, "mono", { href: d.url })], { wrap: "char", href: d.url, actions: { click: "copy", menu: ["copy", "open"] }, title: "Copy URL" }),
+		);
+	}
+	return tui.col(rows, { role: "omp.cloud.login", gap: "xs" });
+}
+
+/** The URL as rows no wider than `width`: one row with its label when it fits, else the label, then the URL cut by character. Nothing is dropped, so the rows joined are the URL. */
+function urlRows(url: string, width: number): string[] {
+	const w = Math.max(1, Math.floor(width));
+	if (`URL: ${url}`.length <= w) return [`URL: ${url}`];
+	const rows = ["URL:"];
+	for (let i = 0; i < url.length; i += w) rows.push(url.slice(i, i + w));
+	return rows;
+}
+
+const NATIVE_LOGIN = new WeakMap<LoginCard, { dark: boolean; node: NativeNode }>();
+
+/** A login that waits for the owner: the sign-in page as an OSC 8 link plus the whole URL for copying in a terminal UI, clickable nodes in Tern. */
+class LoginView implements Component {
+	readonly #card: LoginCard;
+	readonly #tui: TuiModule;
+	readonly #theme: Theme;
+	readonly #root: InstanceType<TuiModule["Container"]>;
+
+	constructor(card: LoginCard, tui: TuiModule, theme: Theme) {
+		this.#card = card;
+		this.#tui = tui;
+		this.#theme = theme;
+		this.#root = new tui.Container();
+		this.#root.addChild(head(tui, theme, loginTitle(card), "accent"));
+		if (card.instructions !== "") this.#root.addChild(new tui.Text(theme.fg("muted", card.instructions), 0, 0));
+		if (card.userCode !== "") this.#root.addChild(new tui.Text(`${theme.fg("muted", "code ")}${theme.bold(theme.fg("accent", card.userCode))}`, 0, 0));
+	}
+
+	render(width: number): readonly string[] {
+		const rows = [...this.#root.render(width)];
+		if (this.#card.url === "") return rows;
+		rows.push(this.#theme.fg("accent", urlHyperlinkAlways(this.#card.url, LOGIN_LINK)));
+		for (const row of urlRows(this.#card.url, width)) rows.push(this.#theme.fg("muted", row));
+		return rows;
+	}
+
+	invalidate(): void {
+		this.#root.invalidate();
+	}
+
+	describe(cx: DescribeContext): NativeNode {
+		const cached = NATIVE_LOGIN.get(this.#card);
+		if (cached?.dark === cx.dark) return cached.node;
+		const node = nativeLogin(this.#tui, this.#card);
+		NATIVE_LOGIN.set(this.#card, { dark: cx.dark, node });
+		return node;
+	}
+}
+
 function buildNotice(d: NoticeCard, tui: TuiModule, theme: Theme, root: InstanceType<TuiModule["Container"]>): void {
 	root.addChild(head(tui, theme, d.title, "accent"));
 	if (d.lines.length > 0) root.addChild(new tui.Text(theme.fg("muted", d.lines.join("\n")), 0, 0));
@@ -1265,6 +1360,8 @@ export function buildRichCard(d: CardDetails, tui: TuiModule, theme: Theme, expa
 			return new ThreadFrame(d, tui, theme, expanded);
 		case "inventory":
 			return new InventoryView(d, tui, theme);
+		case "login":
+			return new LoginView(d, tui, theme);
 		case "notice": {
 			const root = new tui.Container();
 			buildNotice(d, tui, theme, root);

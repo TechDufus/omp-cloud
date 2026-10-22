@@ -10,7 +10,7 @@ import { CloudError, cloudErrorText } from "./errors";
 import { resolveParsed, resolveRef } from "./resolve";
 import { openPath } from "@oh-my-pi/pi-coding-agent/utils/open";
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { DETAILS_REPLY_MAX, inventoryCard, noticeCard, patternProviders, QUESTIONS, threadBranch, updateCard, type CardAct, type CardActions, type NoticeCard, type TuiModule } from "./cards";
+import { DETAILS_REPLY_MAX, inventoryCard, loginCard, noticeCard, patternProviders, QUESTIONS, threadBranch, updateCard, type CardAct, type CardActions, type NoticeCard, type TuiModule } from "./cards";
 import { completions, parseCommand, shortName, USAGE_CONNECT, type Command, type Completion } from "./commands";
 import { readConfig, resolveConnection, statusLines, type CloudConfig, type Connection, type DeliverMode, type Env } from "./config";
 import { runConnect } from "./connect";
@@ -26,7 +26,7 @@ import { HubComponent, type HubResult } from "./hub";
 import { Inbox } from "./inbox";
 import { ProgramStatus, type TerminalSink } from "./program-status";
 import { launchBatch, type LaunchedThread } from "./launch";
-import { runLogin } from "./login";
+import { loginLines, runLogin } from "./login";
 import { PairComponent, type PairOutcome } from "./pair";
 import { refusePairingCode } from "./pairing";
 import { applyPull, isClean, notInRepository, pullBundle, type Applied } from "./pull";
@@ -34,7 +34,7 @@ import { repoKey } from "./repo-key";
 import { syncConversation, type SyncOutcome } from "./session-sync";
 import { git, gitRaw, resolveRemote } from "./snapshot";
 import { pinnedFetch } from "./transport";
-import { UserError, type AnswerBody, type CommandHost, type Host, type IrcReceiptKind, type PairingOffer, type PiHost, type Question, type ResultHeaders, type ThreadDetail, type ThreadOrigin, type ThreadSummary, type UpdateStatus, type Whoami } from "./types";
+import { UserError, type AnswerBody, type CommandHost, type Host, type IrcReceiptKind, type Login, type PairingOffer, type PiHost, type Question, type ResultHeaders, type ThreadDetail, type ThreadOrigin, type ThreadSummary, type UpdateStatus, type Whoami } from "./types";
 import type { DelegateRequest, DelegateResult, DelegateRun, PullRequest, ToolCloud, ToolSession } from "./tool";
 import { helpLines, resultLine, WIDGET_KEY, Watcher, type WatchSink } from "./watch";
 import type { WaitOptions, WaitResult } from "./wait";
@@ -591,10 +591,15 @@ export class Cloud implements CardActions, ToolCloud {
 		if (parsed.kind === "connect") return this.#connect(ctx, parsed);
 		if (parsed.kind === "disconnect") return this.#disconnect(ctx, parsed.force);
 
+		// The TUI shows the sign-in link as a card, and a card waits for an idle agent: refuse before a login starts rather than prompt with no link on screen.
+		if (parsed.kind === "login" && ctx.mode === "tui" && !ctx.isIdle()) {
+			throw new UserError("☁ the agent is working: run /cloud login again when it is idle, so the sign-in link can go in the transcript");
+		}
 		const s = await this.#session(ctx, "quick");
 		if (parsed.kind === "update") return this.#updateCommand(ctx, s);
 		if (parsed.kind === "login") {
-			await runLogin(s.client, ctx.ui, parsed.provider);
+			const show = ctx.mode === "tui" ? (l: Login) => this.#deliver.post(ctx, loginCard(l)) : (l: Login) => ctx.ui.notify(loginLines(l).join("\n"), "info");
+			await runLogin(s.client, ctx.ui, parsed.provider, show);
 			return;
 		}
 		if (parsed.kind === "dashboard") {
