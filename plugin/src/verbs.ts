@@ -25,6 +25,8 @@ import { DashboardForwarder } from "./forwarder";
 import { HubComponent, type HubResult } from "./hub";
 import { Inbox } from "./inbox";
 import { ProgramStatus, type TerminalSink } from "./program-status";
+import { mergeCloudMemory, type MemoryTarget } from "./memory-merge";
+import { readMemorySettings } from "./mnemopi";
 import { launchBatch, modelServed, sessionModelOf, type LaunchedThread } from "./launch";
 import { loginHint, loginLines, runLogin, serverHostOf } from "./login";
 import { PairComponent, type PairOutcome } from "./pair";
@@ -53,6 +55,16 @@ interface Session {
 	root: string | undefined;
 	/** Identifies the connection: the URL, the token (hashed) and the pinned certificate. Anything that holds a client must be rebuilt when it changes. */
 	key: string;
+}
+
+/** What merges a thread's cloud memories into the local store, and where to tell the user when that fails. */
+interface MemoryRun {
+	target: MemoryTarget;
+	notify(message: string): void;
+}
+
+function memoryRun(thread: Pick<ThreadSummary, "id" | "memoryBank" | "createdAt">, ui: Pick<Host["ui"], "notify">): MemoryRun {
+	return { target: { id: thread.id, bank: thread.memoryBank, since: thread.createdAt }, notify: message => ui.notify(message, "warning") };
 }
 
 /** A client of `conn`: pinned to its certificate when it is a paired connection. */
@@ -1075,9 +1087,19 @@ export class Cloud implements CardActions, ToolCloud {
 	/**
 	 * Downloads the newest conversation export of `thread` and places it in the local omp sessions; `fork`
 	 * lets omp fork it beside a local copy that has to stay. Undefined when the thread has no conversation yet.
+	 * With `memory`, the cloud agent's memories merge into the local mnemopi store afterwards (a failure is a warning through
+	 * `memory.notify`, never an error: the conversation is saved either way).
 	 * Callers queue it on the thread's chain.
 	 */
-	async #saveConversation(client: Pick<CloudClient, "downloadConversation">, thread: string, cwd: string, current: string | undefined, fork: boolean): Promise<SyncOutcome | undefined> {
+	async #saveConversation(client: Pick<CloudClient, "downloadConversation" | "whoami" | "downloadMemory">, thread: string, cwd: string, current: string | undefined, fork: boolean, memory?: MemoryRun): Promise<SyncOutcome | undefined> {
+		try {
+			return await this.#syncConversationOf(client, thread, cwd, current, fork);
+		} finally {
+			if (memory) await this.#mergeMemory(client, memory);
+		}
+	}
+
+	async #syncConversationOf(client: Pick<CloudClient, "downloadConversation">, thread: string, cwd: string, current: string | undefined, fork: boolean): Promise<SyncOutcome | undefined> {
 		const tmp = await mkdtemp(join(tmpdir(), "omp-cloud-session-"));
 		try {
 			const archive = join(tmp, "conversation.tar");
@@ -1092,6 +1114,16 @@ export class Cloud implements CardActions, ToolCloud {
 			return await syncConversation({ archive, cwd, current, env: this.#env, fork });
 		} finally {
 			await rm(tmp, { recursive: true, force: true });
+		}
+	}
+
+	/** Merges the cloud agent's mnemopi memories into the local store; a failure is told to the user, never thrown. */
+	async #mergeMemory(client: Pick<CloudClient, "whoami" | "downloadMemory">, memory: MemoryRun): Promise<void> {
+		try {
+			const settings = await readMemorySettings(this.#pi, this.#env);
+			await mergeCloudMemory({ client, target: memory.target, settings, agentDir: this.#pi.pi.settings.getAgentDir() });
+		} catch (e) {
+			memory.notify(`☁ could not merge the cloud memories of ${memory.target.id}: ${errorText(e)}`);
 		}
 	}
 
@@ -1114,7 +1146,7 @@ export class Cloud implements CardActions, ToolCloud {
 		const current = ctx.sessionManager.getSessionFile();
 		let session: SessionOutcome;
 		try {
-			const synced = await this.#serialized(id, () => this.#saveConversation(s.client, id, cwd, current, true));
+			const synced = await this.#serialized(id, () => this.#saveConversation(s.client, id, cwd, current, true, memoryRun(detail, ctx.ui)));
 			session = synced ? { kind: "saved", ...synced } : { kind: "none" };
 		} catch (e) {
 			session = { kind: "failed", reason: errorText(e) };
@@ -1141,13 +1173,13 @@ export class Cloud implements CardActions, ToolCloud {
 		await git(root, ["switch", threadBranch(id)]);
 
 		const current = ctx.sessionManager.getSessionFile();
-		const saved = await this.#serialized(id, () => this.#saveConversation(s.client, id, root, current, true));
+		const detail = await s.client.thread(id).catch(() => undefined);
+		const saved = await this.#serialized(id, () => this.#saveConversation(s.client, id, root, current, true, detail && memoryRun(detail, ctx.ui)));
 		if (!saved) throw new UserError(`☁ ${id} has no conversation yet`);
 		if (saved.mode === "skipped") throw new Error(`resume saved no session although forking was allowed: ${saved.file}`);
 		const sw = await ctx.switchSession(saved.file);
 		if (sw.cancelled) throw new UserError(`☁ session switch was cancelled; the conversation was restored to ${saved.file}`);
 		ctx.ui.notify(`☁ resumed ${id} on branch ${threadBranch(id)}`, "info");
-		const detail = await s.client.thread(id).catch(() => undefined);
 		if (detail && (detail.phase === "starting" || detail.phase === "working" || detail.phase === "waiting")) {
 			ctx.ui.notify("☁ the cloud agent is still working; this is a snapshot", "warning");
 		}
@@ -1167,7 +1199,7 @@ export class Cloud implements CardActions, ToolCloud {
 			this.#waiting.delete(id);
 			try {
 				const cwd = await syncCwd(thread.paths.workspace, (await this.#repoRoot(latest.cwd)) ?? latest.cwd);
-				await this.#saveConversation(client, id, cwd, latest.sessionManager.getSessionFile(), false);
+				await this.#saveConversation(client, id, cwd, latest.sessionManager.getSessionFile(), false, memoryRun(thread, latest.ui));
 			} catch (e) {
 				latest.ui.notify(`☁ could not save ${id}'s conversation locally: ${errorText(e)}`, "warning");
 			}

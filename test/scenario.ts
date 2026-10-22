@@ -53,9 +53,13 @@
  *     reaches it from the VM only through the service's proxy with the VM's own token; the upstream sees its own credential and never the
  *     VM's; an MCP server at the gateway host is refused (400)
  *  AD whoami fields (service, capabilities, limits, spend, models), then the scratch thread is deleted and its inspections are 404
+ *  AE memory: a thread made with a setup tarball holding mnemopi databases (the default store and one bank, `memory: {bank}`) has the bank in
+ *     its detail and list entry, and after its turn `GET /memory` serves `memory.tar` whose `./mnemopi.db` and bank database hold those rows
+ *     (the VM's sqlite3 exported them); a malformed bank is refused (400)
  */
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
+import { Database } from "bun:sqlite";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -573,7 +577,8 @@ async function run(): Promise<void> {
 
 	await report.step("A create thread: first turn replies, omp has a pid", async () => {
 		await createThread(handoff, bundle, null);
-		const thread = await waitTurnIdle(1, 240_000);
+		// The first VM may build the template (a recipe change, such as sqlite3, is a new template): that takes minutes.
+		const thread = await waitTurnIdle(1, 900_000);
 		expectEqual("reply", text(latestOf(thread)?.reply), "TURN count=1 first=hello");
 		const vm = vmOf(thread);
 		if (typeof vm?.pid !== "number") throw new Error(`detail vm.pid is not a number: ${JSON.stringify(thread.vm)}`);
@@ -1754,7 +1759,7 @@ async function run(): Promise<void> {
 		expectEqual("service.version", service.version, pkg.version);
 		expectContains("service.version", text(service.version), ".");
 		expectEqual("service.api", service.api, API_VERSION);
-		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy"];
+		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.memory"];
 		expectEqual("capabilities", JSON.stringify((Array.isArray(who.capabilities) ? who.capabilities.map(text) : []).sort()), JSON.stringify([...expected].sort()));
 		const limits = obj(who.limits, "whoami.limits");
 		expectEqual("limits", JSON.stringify([limits.maxMessageBytes, limits.maxAnswerBytes, limits.listMax, limits.maxTurns]), JSON.stringify([32768, 4000, 200, 200]));
@@ -1781,6 +1786,68 @@ async function run(): Promise<void> {
 		await expectRefused("GET", `/threads/${scratchId}/diff`, 404, "not found");
 		await expectRefused("GET", `/threads/${scratchId}/turns/1/reply`, 404, "not found");
 		expectEqual("threads with the scratch ref after the delete", (await listThreads(`ref=${SCRATCH_REF}`)).total, 0);
+	});
+
+	await report.step("AE memory: the VM's mnemopi databases are exported after a turn as memory.tar; the create request's memory bank round-trips", async () => {
+		const bank = "scn-bank";
+		const setupDir = join(dir, "setup-ae");
+		const rowsOf = (file: string, content: string): void => {
+			// The columns of pi-mnemopi's working_memory that the memory merge and its FTS triggers read.
+			const db = new Database(file, { create: true });
+			db.run("CREATE TABLE working_memory (id TEXT PRIMARY KEY, content TEXT NOT NULL, source TEXT, session_id TEXT DEFAULT 'default', importance REAL DEFAULT 0.5, scope TEXT DEFAULT 'global', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+			db.query("INSERT INTO working_memory (id, content, source) VALUES (?, ?, 'scenario')").run(randomBytes(8).toString("hex"), content);
+			db.close();
+		};
+		await mkdir(join(setupDir, "memories", "mnemopi", "banks", bank), { recursive: true });
+		rowsOf(join(setupDir, "memories", "mnemopi", "mnemopi.db"), "the scenario default memory is BLUE-HERON");
+		rowsOf(join(setupDir, "memories", "mnemopi", "banks", bank, "mnemopi.db"), "the scenario bank memory is RED-FOX");
+		const setup = join(dir, "setup-ae.tar.gz");
+		const tar = Bun.spawn(["tar", "-czf", setup, "-C", setupDir, "memories"], { stdout: "pipe", stderr: "pipe" });
+		if ((await tar.exited) !== 0) throw new Error(`tar failed: ${await tar.stderr.text()}`);
+
+		const previous = threadId;
+		try {
+			const refused = await postThread(handoff, bundle, null, { request: { memory: { bank: "a/b" } } });
+			expectEqual("a malformed bank: status", refused.status, 400);
+			expectContains("a malformed bank: error", text(obj(await refused.json(), "refusal").error), "memory.bank");
+			const memoryId = await createThread(handoff, bundle, null, { setup, request: { memory: { bank } } });
+			await waitTurnIdle(1, 240_000);
+			expectEqual("detail memoryBank", (await detail()).memoryBank, bank);
+			const listed = (await listThreads("")).threads.find(t => t.id === memoryId);
+			expectEqual("listed memoryBank", listed?.memoryBank, bank);
+
+			// The export runs after the turn; the thread is idle once it is done, but allow a moment for the blob.
+			let res = await api("GET", `/threads/${memoryId}/memory`);
+			for (let waited = 0; res.status === 404 && waited < 30_000; waited += POLL_MS) {
+				await Bun.sleep(POLL_MS);
+				res = await api("GET", `/threads/${memoryId}/memory`);
+			}
+			if (res.status !== 200) throw new Error(`GET /memory: expected 200, got ${res.status} ${(await res.text()).slice(0, 300)}`);
+			expectEqual("memory content-type", res.headers.get("content-type"), "application/x-tar");
+			const archive = join(dir, "memory-ae.tar");
+			await writeFile(archive, new Uint8Array(await res.arrayBuffer()));
+			const listing = Bun.spawn(["tar", "-tf", archive], { stdout: "pipe", stderr: "pipe" });
+			const members = (await listing.stdout.text()).split("\n").filter(m => m !== "").sort();
+			if ((await listing.exited) !== 0) throw new Error(`tar -tf failed: ${await listing.stderr.text()}`);
+			expectEqual("memory.tar members", JSON.stringify(members), JSON.stringify(["./", "./banks/", `./banks/${bank}/`, `./banks/${bank}/mnemopi.db`, "./mnemopi.db"]));
+			const out = join(dir, "memory-ae");
+			await mkdir(out, { recursive: true });
+			const extract = Bun.spawn(["tar", "-xf", archive, "-C", out], { stdout: "pipe", stderr: "pipe" });
+			if ((await extract.exited) !== 0) throw new Error(`tar -xf failed: ${await extract.stderr.text()}`);
+			const contents = (file: string): string[] => {
+				const db = new Database(file, { readonly: true });
+				try {
+					return db.query<{ content: string }, []>("SELECT content FROM working_memory").all().map(r => r.content);
+				} finally {
+					db.close();
+				}
+			};
+			expectEqual("./mnemopi.db rows", JSON.stringify(contents(join(out, "mnemopi.db"))), JSON.stringify(["the scenario default memory is BLUE-HERON"]));
+			expectEqual("bank rows", JSON.stringify(contents(join(out, "banks", bank, "mnemopi.db"))), JSON.stringify(["the scenario bank memory is RED-FOX"]));
+			await waitGone(memoryId);
+		} finally {
+			threadId = previous;
+		}
 	});
 }
 

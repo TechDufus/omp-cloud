@@ -53,6 +53,16 @@ The service's secrets and MCP support ([Secrets and MCP servers](secrets-and-mcp
 - **OAuth logins are the service's, not a thread's.** A login made for a URL is used for every thread that ships that exact URL without its own `Authorization` header, as the model login serves every thread. Remove it by deleting the rows from `mcp_credentials` (there is no route yet) or revoke the grant at the MCP server.
 - **What the settings filter does not do.** The plugin drops a fixed list of settings that hold credentials, paths or commands ([the list](secrets-and-mcp.md#settings-that-stay-on-your-machine)) and warns. It is not a scanner: a credential in another key, in an `AGENTS.md`, a skill or a rule, or in an `mcp.json` stdio `args` ships unchanged.
 
+## Cloud memories
+
+Memory parity ([Memory](commands.md#memory)) moves memory in both directions, and each direction has its own trust question:
+
+- **Out: your memory goes to a VM.** A handoff ships `~/.omp/agent/memories/mnemopi`, as it always did, so the cloud agent can recall what you retained. The agent, and anything it reads or runs in the VM, can read all of it, every bank and not only the project's. If something is in your Mnemopi store that a repository's agent must not see, keep it out of the store or do not hand that repository off.
+- **In: cloud memories enter your local recall.** What the cloud agent retains is merged into your local Mnemopi store, the one your omp recalls from in later sessions. A cloud agent working on an untrusted repository, or one that read a hostile page, can therefore write memories (text, not code) that your local agent later recalls as if you had retained them. Rows from the cloud are ordinary memory rows and nothing marks them as coming from the cloud. Treat what a cloud agent remembered as you treat its replies, and delete a row you do not trust from your store.
+- **The VM's database is untrusted input.** The service exports it with `VACUUM INTO` and stores and serves the tar without reading it. Your plugin checks the archive before it extracts anything: only the members `./`, `./mnemopi.db`, `./banks/`, `./banks/<name>/` and `./banks/<name>/mnemopi.db` (a `<name>` of 1 to 64 letters, digits, `_` and `-`) are accepted, and any other member rejects the whole archive with `unexpected entry <name>`; a database that is not a plain file, or has more than one hard link, is refused. The VM's database is then attached to yours with `trusted_schema` off, so a view, trigger or default in its schema cannot call SQL functions, and only the columns both databases have, of `working_memory` and `annotations`, are copied, in one transaction per database that a failure rolls back. A failed merge is reported as `☁ could not merge the cloud memories of <id>: <reason>`, never as a failed pull.
+- **Limits of that.** The check keeps the VM from choosing files on your machine and from running SQL through its schema, and the merge copies only values. It cannot judge the text of a memory. When your machine has no database yet for the default store or the project bank, the VM's file is copied into place as it is, so its schema and its rows (every one, not only those created after the thread began) become yours; this happens only the first time, before your own memory exists. The export is capped at 64 MiB.
+- **Who can read it.** `GET /api/v1/threads/{id}/memory` serves the export to the owner and to a paired device, like the conversation and the result. It is in the [backups](operations.md) with the thread's other files.
+
 ## Where the details are
 
 - [Pairing](pairing.md): what crosses the network, who may connect, the firewall, backups and identity.
@@ -60,4 +70,5 @@ The service's secrets and MCP support ([Secrets and MCP servers](secrets-and-mcp
 - [Configuration](configuration.md): `service.json` (`listen` must be loopback), `remote`, git credentials.
 - [GitHub](github.md): the App, installation tokens, the signing key, Verified commits and pull requests.
 - [Secrets and MCP servers](secrets-and-mcp.md): secrets and their scoping, the MCP proxy, MCP logins and the settings that stay home.
+- [Memory](commands.md#memory): what a handoff ships of your Mnemopi memory and what merges back; the trust question is [Cloud memories](#cloud-memories).
 

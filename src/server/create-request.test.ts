@@ -636,6 +636,7 @@ describe("a full request", () => {
 				secretFiles: [".env", "config/key.pem"],
 				secretEnv: ["API_URL", "NPM_TOKEN"],
 				configOverlays: [],
+				memoryBank: "",
 				mcpServers: [],
 				ompVersion: "",
 				policy: {},
@@ -668,6 +669,7 @@ describe("a full request", () => {
 			secretFiles: [],
 			secretEnv: [],
 			configOverlays: [],
+			memoryBank: "",
 			mcpServers: [],
 			ompVersion: "",
 			policy: {},
@@ -754,6 +756,28 @@ describe("repo.scratch", () => {
 		rejected(scratch({}, { prompt: "" }));
 		rejected(scratch({ name: "n\nm" }));
 		rejected(scratch({}, { model: "no-provider" }));
+	});
+});
+
+describe("memory", () => {
+	test("absent, null bank and an empty bank mean none; a valid bank is kept", () => {
+		for (const over of [{}, { memory: {} }, { memory: { bank: "" } }, { memory: { bank: null } }]) {
+			expect(parseCreateRequest(request(over)).thread.memoryBank).toBe("");
+		}
+		expect(parseCreateRequest(request({ memory: { bank: "project-ab12_X" } })).thread.memoryBank).toBe("project-ab12_X");
+		expect(parseCreateRequest(request({ memory: { bank: "a".repeat(64) } })).thread.memoryBank).toBe("a".repeat(64));
+	});
+
+	test.each<[string, Body]>([
+		["a bank over 64 characters", { memory: { bank: "a".repeat(65) } }],
+		["a bank with a dot", { memory: { bank: "a.b" } }],
+		["a bank with a slash", { memory: { bank: "a/b" } }],
+		["a bank with a space", { memory: { bank: "a b" } }],
+		["a bank that is not text", { memory: { bank: 7 } }],
+		["memory that is not an object", { memory: "main" }],
+		["memory that is an array", { memory: ["main"] }],
+	])("%s is a 400", (_label, over) => {
+		expect(rejected(request(over)).message).toStartWith("memory");
 	});
 });
 

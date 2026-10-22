@@ -14,8 +14,8 @@ Every `/cloud` command the plugin adds to omp, where finished turns and question
 | `/cloud send <id> <message>` | Follow-up message; also follows the thread |
 | `/cloud answer <id> [text]` | Answer the agent's question; without text, omp's ask dialog |
 | `/cloud stop <id>` | Stop the running turn, cancel queued ones. Cancelling the thread's job in omp's jobs panel, `/jobs` or `proc://<id>/kill` stops the turn too; omp's own cleanup on `/clear`, a switch or a branch does not ([jobs](jobs.md#cancelling)) |
-| `/cloud pull <id> [--into <dir>]` | Fetch the result branch `omp-cloud/<id>` and save the cloud conversation as a local omp session. With `--into <dir>` a repository thread's result is checked out in a new worktree there, and a [scratch thread's](cloud-tool.md#scratch-threads) result is cloned into the new directory |
-| `/cloud resume <id>` | Check out `omp-cloud/<id>` and continue its conversation locally; needs a clean working tree |
+| `/cloud pull <id> [--into <dir>]` | Fetch the result branch `omp-cloud/<id>` and save the cloud conversation as a local omp session. With `--into <dir>` a repository thread's result is checked out in a new worktree there, and a [scratch thread's](cloud-tool.md#scratch-threads) result is cloned into the new directory. It also [merges the cloud agent's new memories](#memory) into your Mnemopi store |
+| `/cloud resume <id>` | Check out `omp-cloud/<id>` and continue its conversation locally; needs a clean working tree. It also [merges the cloud agent's new memories](#memory) |
 | `/cloud delete <id>` | After a confirmation, delete the thread, its VM and gateway client |
 | `/cloud login <provider>` | Log the cloud broker in to a provider (the server machine's owner connection only). The provider's sign-in link (and a device code, when it uses one) is posted in the transcript as a card to click or copy, then omp asks for the redirect URL or code the browser ended on. In omp's interactive UI the agent must be idle, so the card can appear at once. A paired device is refused before any request and told to run `omp-cloud login <provider>` on the server (over ssh: `ssh -t <user>@<host> '~/.local/bin/omp-cloud login <provider>'`); the same pointer replaces `/cloud login` in a handoff refused for a provider the cloud cannot run, in `/cloud status` and in the hub. `/cloud login mcp:<https url>` logs the service in to an MCP server's OAuth instead of a provider ([Secrets and MCP servers](secrets-and-mcp.md#logging-the-service-in-to-an-mcp-server)) |
 | `/cloud update` | Check the service for a newer omp-cloud; for the owner, when one is ready, confirm and restart the service to install it. A paired device is told what the service says |
@@ -39,6 +39,22 @@ A reference that matches several threads at one step is refused with up to 10 ca
 `/cloud <task>` and a provider the cloud cannot run: when the model is one of a provider the cloud has no login for, and you are on the server machine's owner connection in omp's interactive UI with the agent idle, omp asks `Log the cloud in?` (`The cloud cannot run <provider> models yet. Log the cloud broker in to <provider> now?`). Yes runs the same sign-in as `/cloud login <provider>` and then hands the task off; any other answer, a paired device, a non-interactive mode or a busy agent keeps the refusal that names `/cloud login <provider>` (the `cloud` tool never asks).
 
 `/cloud <task>` also ships the MCP servers of your `~/.omp/agent/mcp.json` when the service has an MCP proxy. The launch card has an `mcp` row, `<name> (via the service)` for an http server and `<name> (in the VM)` for a stdio one, and a warning for each server or setting that stayed on your machine (`<name> points at this machine and is not shipped`, `<file>: <key> stays on this machine`, `<name> may need a cloud login: /cloud login mcp:<url>`): [Secrets and MCP servers](secrets-and-mcp.md).
+
+## Memory
+
+If you use omp's Mnemopi memory, the cloud agent starts with it and what it remembers comes back. You do not run anything for this.
+
+**Going out.** A handoff ships your Mnemopi memory (`~/.omp/agent/memories/mnemopi`) with the rest of your omp setup. omp keeps one memory bank per project, named from the project's directory, and the cloud agent works in another directory (`/home/user/work`), so omp there would look for a bank by a different name. When your session writes a per-project bank of the default store, the plugin renames the shipped bank to the name omp derives for the VM's directory, and the cloud agent's recall finds your project's memories. Your own store is not touched.
+
+**Coming back.** After every turn the service snapshots the agent's memory databases. Your plugin downloads the newest snapshot and merges new memories into your local store at the same three moments that save the conversation: after each finished turn of a thread you follow, on `/cloud pull <id>` and on `/cloud resume <id>`. It adds the working memories the cloud agent wrote since the thread began that your store does not hold yet (by id or content), with their annotations, to your default store and to the project bank the handoff renamed, and skips the rest. Running the same merge twice adds nothing, so a repeat is harmless. Your omp makes them searchable by text at once and embeds them the next time it opens the store. A thread nobody follows, pulls or resumes keeps its memory on the service until you do.
+
+When it works, with no setting for it:
+
+- Your `memory.backend` is `mnemopi`, and `mnemopi.dbPath` is not set. Another backend (Hindsight) or a custom database path is left alone: nothing is merged.
+- The service is new enough to report the capability `threads.memory`; an older one gets no bank rename and returns no memory, without a message.
+- The bank is renamed only when `mnemopi.scoping` is `per-project` or `per-project-tagged` (omp's default is `per-project`). With another scoping the shipped memory keeps its names, and the cloud agent may not find it; the default store still merges back.
+
+A failed merge is a warning, `☁ could not merge the cloud memories of <id>: <reason>`, and never fails the pull: the conversation and the branch are saved either way. What it does not do (deletions and edits in the VM, other banks, embeddings) is under [Known limitations](architecture.md#known-limitations), and what trusting the cloud's memories means is in [Cloud memories](security.md#cloud-memories). The contract is [Cloud memories](api.md#cloud-memories) in the API.
 
 ## Where results go
 

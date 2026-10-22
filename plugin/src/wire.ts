@@ -166,6 +166,7 @@ export function parseWhoami(json: unknown): Whoami {
 		gitHosts: strings(o, "gitHosts"),
 		mcpProxy: bool(o, "mcpProxy"),
 		mcpLogins: strings(o, "mcpLogins"),
+		vmWorkspace: str(o, "vmWorkspace"),
 		vms: { running: num(vms, "running"), paused: num(vms, "paused") },
 		threads: {
 			starting: num(threads, "starting"),
@@ -370,6 +371,7 @@ function parseSummaryFields(o: Obj): Omit<ThreadSummary, "turns" | "warnings" | 
 		session: str(o, "session"),
 		scratch: bool(o, "scratch"),
 		pr: parsePullRequest(o.pr),
+		memoryBank: str(o, "memoryBank"),
 	};
 }
 

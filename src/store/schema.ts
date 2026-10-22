@@ -284,4 +284,8 @@ export const MIGRATIONS: readonly string[] = [
 	ALTER TABLE threads ADD COLUMN mcp_token_sha256 TEXT NOT NULL DEFAULT '';
 	CREATE INDEX threads_mcp_token ON threads (mcp_token_sha256) WHERE mcp_token_sha256 <> '';
 	`,
+	// 14: the memory bank the thread's laptop used for the project (`memory_bank`, '' for none), so the plugin can merge the VM's bank back into it.
+	`
+	ALTER TABLE threads ADD COLUMN memory_bank TEXT NOT NULL DEFAULT '';
+	`,
 ];

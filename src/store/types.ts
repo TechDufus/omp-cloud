@@ -97,6 +97,7 @@ export const BLOB_NAMES = [
 	"session-export.tar",
 	"setup.tar.gz",
 	"secrets.json",
+	"memory.tar",
 ] as const;
 export type BlobName = (typeof BLOB_NAMES)[number];
 
@@ -370,6 +371,8 @@ export interface Thread {
 	pr: { number: number; url: string } | null;
 	/** Names of the MCP servers the thread ships (their entries live in the `secrets.json` blob); empty for none. */
 	mcpServers: string[];
+	/** The memory bank the thread's laptop used for the project, so the cloud memories merge back into it; "" for none. */
+	memoryBank: string;
 }
 
 /** A validated create request: everything `Store.createThread` needs besides the id. */
@@ -405,6 +408,8 @@ export interface NewThread {
 	idempotency?: { key: string; fingerprint: string };
 	/** Names of the MCP servers the create request ships; absent means none. */
 	mcpServers?: string[];
+	/** The laptop's memory bank for the project; absent means none. */
+	memoryBank?: string;
 }
 
 export type ThreadOrigin = "tool" | "user";

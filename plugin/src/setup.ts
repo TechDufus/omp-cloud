@@ -1,9 +1,10 @@
 import type { Database as BunDatabase } from "bun:sqlite";
-import { copyFile, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 import { run } from "./exec";
 import type { ShippedExtension } from "./extensions";
 import { isLocalHost, isRecord } from "./guards";
+import type { MemoryBankPlan } from "./mnemopi";
 import { mb } from "./snapshot";
 import { UserError } from "./types";
 
@@ -29,6 +30,8 @@ export interface SetupOptions {
 	overlays: readonly string[];
 	/** Scratch directory for staging and the archive. */
 	tmpDir: string;
+	/** Renames the project bank of the shipped memory, so the cloud agent (which works in another directory) finds it: `from` is this machine's bank, `to` the VM's. */
+	memoryBank?: MemoryBankPlan;
 }
 
 export interface SetupResult {
@@ -39,7 +42,7 @@ export interface SetupResult {
 	configOverlays: string[];
 }
 
-type DatabaseCtor = new (path: string, options?: { readonly?: boolean }) => BunDatabase;
+export type DatabaseCtor = new (path: string, options?: { readonly?: boolean }) => BunDatabase;
 
 async function exists(p: string): Promise<boolean> {
 	try {
@@ -209,7 +212,7 @@ async function stageSettings(src: string, dest: string, warnings: string[]): Pro
 
 // bun:sqlite exists only under Bun and an extension host may not expose it; a static
 // import would fail the whole extension at load time, so load it lazily and fall back.
-async function loadDatabase(): Promise<DatabaseCtor | undefined> {
+export async function loadDatabase(): Promise<DatabaseCtor | undefined> {
 	try {
 		const mod = (await import("bun:sqlite")) as { Database: DatabaseCtor };
 		return mod.Database;
@@ -307,6 +310,23 @@ async function stageOverlays(agentDir: string, stage: string, overlays: readonly
 }
 
 /**
+ * Moves the shipped project bank `from` to `to` inside the staged mnemopi tree. A bank directory the VM already has under `to`
+ * (the two directories hash alike) is never overwritten, and nothing happens when `from` is not there.
+ */
+async function renameBank(memory: string, plan: MemoryBankPlan): Promise<void> {
+	if (plan.from === plan.to) return;
+	const from = join(memory, "banks", plan.from);
+	const to = join(memory, "banks", plan.to);
+	if (!(await exists(from)) || (await exists(to))) return;
+	await rename(from, to);
+}
+
+/** The `tar` of this machine: the system bsdtar on Windows, because a Git or MSYS GNU tar on PATH reads `C:\…` as a remote host. */
+export function tarCommand(): string {
+	return process.platform === "win32" ? win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
+}
+
+/**
  * Packs the user's omp setup into `<tmpDir>/setup.tar.gz`: the {@link SETUP_FILES} and
  * {@link SETUP_DIRS} of the agent dir, the planned extensions, Mnemopi memory, and the session's
  * `--config` overlays.
@@ -325,15 +345,17 @@ export async function buildSetup(opts: SetupOptions): Promise<SetupResult> {
 	for (const ext of opts.extensions) await stageTree(ext.source, join(stage, ext.dest));
 
 	const mem = join(dir, "memories", "mnemopi");
-	if (await exists(mem)) await stageMemory(mem, join(stage, "memories", "mnemopi"), await loadDatabase(), warnings);
+	if (await exists(mem)) {
+		const staged = join(stage, "memories", "mnemopi");
+		await stageMemory(mem, staged, await loadDatabase(), warnings);
+		if (opts.memoryBank) await renameBank(staged, opts.memoryBank);
+	}
 
 	const configOverlays = await stageOverlays(dir, stage, opts.overlays, warnings);
 
-	// `tar`, not `Bun.Archive`: Bun 1.4.3's writes every member as 0644, so an executable skill script would lose its bit. On Windows the
-	// system bsdtar, because a Git or MSYS GNU tar on PATH reads `C:\…` as a remote host.
+	// `tar`, not `Bun.Archive`: Bun 1.4.3's writes every member as 0644, so an executable skill script would lose its bit.
 	const out = join(opts.tmpDir, "setup.tar.gz");
-	const tar = process.platform === "win32" ? win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
-	const r = await run(tar, ["-czf", out, "-C", stage, "."]);
+	const r = await run(tarCommand(), ["-czf", out, "-C", stage, "."]);
 	if (r.code !== 0) throw new Error(`cannot pack the omp setup: ${r.stderr.trim().slice(0, 300) || `tar exit ${r.code}`}`);
 	const bytes = (await stat(out)).size;
 	if (bytes > MAX_SETUP_BYTES) {

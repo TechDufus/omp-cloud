@@ -51,6 +51,7 @@ import { ChildTracker } from "./children";
 import { TurnClock } from "./clock";
 import { sandboxExec, shellQuote } from "./exec";
 import { adoptSigned, finalizeTurn, type TurnGit } from "./git";
+import { exportMemory } from "./memory-export";
 import { formatDuration } from "./omp-config";
 import { ompAlive, OmpProcess } from "./omp-process";
 import { dropStaleSockets } from "./stale-sockets";
@@ -147,6 +148,10 @@ export async function loseVm(env: ThreadEnv, threadId: string): Promise<void> {
 const BUNDLE_PATH = "/tmp/omp-cloud-result.bundle";
 const SIGNED_BUNDLE_PATH = "/tmp/omp-cloud-signed.bundle";
 const EXPORT_PATH = "/tmp/omp-cloud-session-export.tar";
+const MEMORY_EXPORT_PATH = "/tmp/omp-cloud-memory.tar";
+const MEMORY_WORK_PATH = "/tmp/omp-cloud-memory";
+/** The most a thread's exported memories may weigh. */
+const MAX_MEMORY_BYTES = 64 * 1024 * 1024;
 /** Poll `get_state` this often while a turn runs, in case omp's frames were lost. */
 const POLL_MS = 30_000;
 /** After a built-in command's answer, check this often whether omp finished what the command left running. */
@@ -591,6 +596,7 @@ export class ThreadRunner {
 			if (end.kind !== "stopped") {
 				git = await this.#finalizeGit(thread, turn, local ? "" : reply);
 				await this.#exportConversation(turn);
+				await this.#exportMemory(turn);
 				// A command that never reached the model made no result of its own: the next model turn pushes whatever it changed.
 				if (!local) {
 					const record = await this.#push(rt, thread, turn, outcome, git.head, reply);
@@ -1109,6 +1115,23 @@ export class ThreadRunner {
 			await this.#packConversation(sandbox, reported);
 		} catch (error) {
 			if (!isMissingThread(error)) this.#event("notice", `the conversation could not be exported: ${describe(error)}`, turn.id);
+		}
+	}
+
+	/**
+	 * Stores the VM's mnemopi memories as `memory.tar`, replacing the previous export. A VM without memories, or built from a
+	 * template without `sqlite3`, exports nothing; failures become a notice, never a failed turn.
+	 */
+	async #exportMemory(turn: Turn): Promise<void> {
+		const sandbox = this.#sandbox;
+		if (sandbox === null) return;
+		const exec = sandboxExec(sandbox);
+		try {
+			if (!(await exportMemory(exec, { work: MEMORY_WORK_PATH, tarPath: MEMORY_EXPORT_PATH }))) return;
+			await downloadBlob(sandbox, MEMORY_EXPORT_PATH, this.env.store, this.id, "memory.tar", MAX_MEMORY_BYTES);
+			await exec(`rm -f ${shellQuote(MEMORY_EXPORT_PATH)}`).catch(() => undefined);
+		} catch (error) {
+			if (!isMissingThread(error)) this.#event("notice", `the memory could not be saved: ${describe(error)}`, turn.id);
 		}
 	}
 

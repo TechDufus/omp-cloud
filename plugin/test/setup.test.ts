@@ -337,6 +337,48 @@ describe("buildSetup", () => {
 		expect(await readFile(join(dir, "memories/mnemopi/broken.db"), "utf8")).toBe("this is not sqlite, just bytes that are longer than a header");
 	});
 
+	describe("the project bank rename", () => {
+		const bankDb = async (agentDir: string, bank: string, text: string): Promise<void> => {
+			await put(join(agentDir, "memories", "mnemopi", "banks", bank, "mnemopi.db"), text);
+		};
+
+		test("the bank of this machine ships under the name the VM looks for, with its content", async () => {
+			const l = await layout();
+			const db = join(l.agentDir, "memories", "mnemopi", "banks", "app-laptop", "mnemopi.db");
+			await mkdir(join(db, ".."), { recursive: true });
+			const store = new Database(db);
+			store.run("CREATE TABLE memories(id INTEGER PRIMARY KEY, text TEXT)");
+			store.run("INSERT INTO memories(text) VALUES ('laptop memory')");
+			store.close();
+			await bankDb(l.agentDir, "other-bank", "kept as it is");
+			const dir = await extract((await buildSetup({ ...l.opts, memoryBank: { from: "app-laptop", to: "work-vm" } })).path);
+			const files = await listAll(dir);
+			expect(files).toContain("memories/mnemopi/banks/work-vm/mnemopi.db");
+			expect(files).toContain("memories/mnemopi/banks/other-bank/mnemopi.db");
+			expect(files.filter(f => f.includes("app-laptop"))).toEqual([]);
+			const copy = new Database(join(dir, "memories/mnemopi/banks/work-vm/mnemopi.db"), { readonly: true });
+			expect(copy.query("SELECT text FROM memories").all()).toEqual([{ text: "laptop memory" }]);
+			copy.close();
+		});
+
+		test("without a plan nothing is renamed", async () => {
+			const l = await layout();
+			await bankDb(l.agentDir, "app-laptop", "x");
+			expect(await listAll(await extract((await buildSetup(l.opts)).path))).toContain("memories/mnemopi/banks/app-laptop/mnemopi.db");
+		});
+
+		test("a bank that is not there is skipped, and a bank already under the new name is not overwritten", async () => {
+			const l = await layout();
+			await bankDb(l.agentDir, "work-vm", "already named");
+			const absent = await extract((await buildSetup({ ...l.opts, memoryBank: { from: "app-laptop", to: "work-vm" } })).path);
+			expect(await readFile(join(absent, "memories/mnemopi/banks/work-vm/mnemopi.db"), "utf8")).toBe("already named");
+			await bankDb(l.agentDir, "app-laptop", "laptop text");
+			const both = await extract((await buildSetup({ ...l.opts, memoryBank: { from: "app-laptop", to: "work-vm" } })).path);
+			expect(await readFile(join(both, "memories/mnemopi/banks/work-vm/mnemopi.db"), "utf8")).toBe("already named");
+			expect(await readFile(join(both, "memories/mnemopi/banks/app-laptop/mnemopi.db"), "utf8")).toBe("laptop text");
+		});
+	});
+
 	test("an archive over the cap is an error naming the remedies", async () => {
 		const l = await layout();
 		// Incompressible content beyond 64 MiB.

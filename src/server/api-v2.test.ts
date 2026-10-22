@@ -143,6 +143,7 @@ describe("whoami (1.1)", () => {
 			"threads.pr",
 			"secrets.store",
 			"mcp.proxy",
+			"threads.memory",
 		]);
 		expect(body.limits).toEqual({ maxMessageBytes: 32768, maxAnswerBytes: 4000, maxUploadBytes: MAX_SOURCE_BYTES, listMax: 200, maxTurns: 200 });
 		expect(body.models).toEqual([{ id: "anthropic/claude-a" }, { id: "fake/fake-model" }]);

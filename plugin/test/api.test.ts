@@ -137,6 +137,7 @@ describe("whoami", () => {
 			gitHosts: ["git.example.test:8443", "github.com"],
 			mcpProxy: true,
 			mcpLogins: ["https://mcp.example.test/mcp"],
+			vmWorkspace: "/home/user/work",
 			vms: { running: 2, paused: 1 },
 			threads: { starting: 1, working: 2, waiting: 3, idle: 4, failed: 5 },
 			service: { version: "0.4.0", api: 2 },
@@ -160,6 +161,7 @@ describe("whoami", () => {
 			gitHosts: ["github.com"],
 			mcpProxy: false,
 			mcpLogins: [],
+			vmWorkspace: "",
 			vms: { running: 0, paused: 0 },
 			threads: { starting: 0, working: 0, waiting: 0, idle: 4, failed: 0 },
 			device: null,
@@ -490,6 +492,18 @@ describe("downloads", () => {
 		const err = await failed(client().downloadConversation("k3x9fa2m7q1z", dest));
 		expect(err.code).toBe("not_found");
 		expect(err.message).toBe("no conversation yet");
+	});
+
+	test("downloadMemory streams the archive byte for byte; no memory yet is a not_found error", async () => {
+		const bytes = new Uint8Array([0, 1, 2, 250, 251, 252, 255, 10, 13]);
+		reply = () => new Response(bytes, { headers: { "Content-Type": "application/x-tar" } });
+		const dest = join(await tmp(), "m.tar");
+		await client().downloadMemory("k3x9fa2m7q1z", dest);
+		expect(last().path).toBe("/api/v1/threads/k3x9fa2m7q1z/memory");
+		expect(new Uint8Array(await readFile(dest))).toEqual(bytes);
+		reply = () => Response.json({ error: "no memory yet" }, { status: 404 });
+		const err = await failed(client().downloadMemory("k3x9fa2m7q1z", join(await tmp(), "none.tar")));
+		expect(err).toMatchObject({ code: "not_found", message: "no memory yet" });
 	});
 });
 

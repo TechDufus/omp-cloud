@@ -1347,6 +1347,42 @@ describe("migration 13", () => {
 	});
 });
 
+describe("migration 14", () => {
+	test("a version 13 database gains memory_bank, empty for its threads", async () => {
+		store.close();
+		await rm(dir, { recursive: true, force: true });
+		await mkdir(join(dir, "threads"), { recursive: true });
+		const raw = new Database(join(dir, "omp-cloud.db"));
+		for (const migration of MIGRATIONS.slice(0, 13)) raw.run(migration);
+		raw.run("PRAGMA user_version = 13");
+		raw
+			.query(
+				`INSERT INTO threads (id, owner, phase, title, model, thinking, repo_name, repo_remote_url, repo_base_ref, repo_base_commit,
+					repo_handoff_commit, repo_local_branch, home, workspace, author_name, author_email, secret_files, secret_env, created_at, last_activity_at)
+				VALUES (?, 'owner', 'idle', 'old', 'm', '', 'repo', '', '', '', 'def', '', '', '', '', '', '[]', '[]', ?, ?)`,
+			)
+			.run(ID, iso(0), iso(0));
+		raw.close();
+
+		store = open();
+		expect(store.getThread(ID)?.memoryBank).toBe("");
+		store.close();
+
+		const check = new Database(join(dir, "omp-cloud.db"), { readonly: true });
+		expect(check.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(MIGRATIONS.length);
+		expect(MIGRATIONS.length).toBeGreaterThanOrEqual(14);
+		expect(check.query<{ name: string }, []>("SELECT name FROM pragma_table_info('threads')").all().map((row) => row.name)).toContain("memory_bank");
+		check.close();
+		store = open();
+	});
+
+	test("a thread keeps the memory bank it was created with", () => {
+		expect(store.createThread(ID, newThread({ memoryBank: "project-abc" })).thread.memoryBank).toBe("project-abc");
+		expect(store.createThread("bbbbbbbbbbbb", newThread()).thread.memoryBank).toBe("");
+		expect(store.getThread(ID)?.memoryBank).toBe("project-abc");
+	});
+});
+
 describe("secrets and MCP", () => {
 	test("secrets are listed without values, in name order; a put replaces and stamps the clock and actor", () => {
 		store.putSecret({ name: "B_TOKEN", value: "!op read x", repos: ["*"] }, "owner");
