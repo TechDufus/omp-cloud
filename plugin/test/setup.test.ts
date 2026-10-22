@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { chmod, lstat, mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { run } from "../src/exec";
-import { buildSetup, MEMORY_WARNING, sanitizeSettings, type SetupOptions } from "../src/setup";
+import { buildSetup, sanitizeSettings, type SetupOptions } from "../src/setup";
 import { UserError } from "../src/types";
 import { cleanup, tmp } from "./helpers";
 
@@ -62,7 +61,7 @@ async function layout(over: Partial<SetupOptions> = {}): Promise<Layout> {
 	await put(join(elsewhere, "ext-dir", "index.ts"), "// linked dir\n");
 	await symlink(join(elsewhere, "ext-dir"), join(agentDir, "extensions", "ext-dir"));
 	const shippable = ["keep.ts", "linked-ext.ts", "ext-dir"];
-	await put(join(agentDir, "memories", "mnemopi", "notes.txt"), "plain file\n");
+	await put(join(agentDir, "memories", "mnemopi", "notes.txt"), "never shipped: memory stays home\n");
 	// never shipped
 	for (const name of ["agent.db", "agent.db-wal", "agent.db-shm", "history.db", "history.db-wal", "models.db", "models.db-shm", "skill-descriptions.db"]) {
 		await put(join(agentDir, name), "never shipped: logins and history");
@@ -104,7 +103,6 @@ describe("buildSetup", () => {
 			"extensions/keep.ts",
 			"extensions/linked-ext.ts",
 			"lsp.json",
-			"memories/mnemopi/notes.txt",
 			"skills/demo/SKILL.md",
 			"skills/demo/refs/deep/note.md",
 			"skills/linked/SKILL.md",
@@ -231,15 +229,9 @@ describe("buildSetup", () => {
 				"  broker:",
 				"    url: http://127.0.0.1:4000",
 				"    token: broker-secret",
-				"hindsight:",
-				"  apiUrl: http://localhost:8888",
-				"  apiToken: hs-secret",
 				"searxng:",
-				"  endpoint: https://search.example.test",
-				"mnemopi:",
-				"  llmApiKey: '!op read op://v/i/key'",
-				"  embeddingApiUrl: http://[::1]:11434",
-				"  scoping: per-project",
+				"  endpoint: http://localhost:8080",
+				"  token: s-secret",
 				'"browser.cdpUrl": http://127.0.0.1:9222',
 				"modelRoles:",
 				"  default: a/b",
@@ -251,14 +243,12 @@ describe("buildSetup", () => {
 		);
 		const r = await buildSetup({ agentDir, extensions: [], overlays: [], tmpDir: await tmp("omp-cloud-out-") });
 		const config = Bun.YAML.parse(await readFile(join(await extract(r.path), "config.yml"), "utf8"));
-		expect(config).toEqual({ theme: "dark", searxng: { endpoint: "https://search.example.test" }, mnemopi: { scoping: "per-project" }, modelRoles: { default: "a/b" } });
+		expect(config).toEqual({ theme: "dark", modelRoles: { default: "a/b" } });
 		expect(r.warnings.sort()).toEqual(
 			[
 				"config.yml: auth.broker stays on this machine",
-				"config.yml: hindsight.apiUrl stays on this machine",
-				"config.yml: hindsight.apiToken stays on this machine",
-				"config.yml: mnemopi.llmApiKey stays on this machine",
-				"config.yml: mnemopi.embeddingApiUrl stays on this machine",
+				"config.yml: searxng.endpoint stays on this machine",
+				"config.yml: searxng.token stays on this machine",
 				"config.yml: browser.cdpUrl stays on this machine",
 				"config.yml: modelRoles.smol stays on this machine",
 			].sort(),
@@ -267,10 +257,28 @@ describe("buildSetup", () => {
 
 	test("a settings file with nothing to keep home ships byte for byte, with no warning", async () => {
 		const agentDir = await tmp("omp-cloud-cfg-");
-		const text = "# comment\nhindsight:\n  apiUrl: https://hindsight.example.test\ntheme: dark\n";
+		const text = "# comment\nsearxng:\n  endpoint: https://search.example.test\ntheme: dark\n";
 		await put(join(agentDir, "config.yml"), text);
 		const r = await buildSetup({ agentDir, extensions: [], overlays: [], tmpDir: await tmp("omp-cloud-out-") });
 		expect(await readFile(join(await extract(r.path), "config.yml"), "utf8")).toBe(text);
+		expect(r.warnings).toEqual([]);
+	});
+
+	test("memory, mnemopi and hindsight settings never ship, in config.yml or an overlay, nested or dotted, and none is a warning", async () => {
+		const agentDir = await tmp("omp-cloud-cfg-");
+		await put(
+			join(agentDir, "config.yml"),
+			["theme: dark", "memory:", "  backend: mnemopi", "mnemopi:", "  scoping: per-project-tagged", "  llmApiKey: x", "hindsight:", "  apiUrl: http://localhost:8888", '"memory.autoRecall": true', '"mnemopi.bank": mine', ""].join("\n"),
+		);
+		const overlay = join(await tmp("omp-cloud-else-"), "team.yml");
+		await put(overlay, ["team: yes", "hindsight:", "  apiToken: hs", '"memory.backend": hindsight', ""].join("\n"));
+		const r = await buildSetup({ agentDir, extensions: [], overlays: [overlay], tmpDir: await tmp("omp-cloud-out-") });
+		const dir = await extract(r.path);
+		const shipped = await readFile(join(dir, "config.yml"), "utf8");
+		expect(Bun.YAML.parse(shipped)).toEqual({ theme: "dark" });
+		const shippedOverlay = await readFile(join(dir, r.configOverlays[0] ?? ""), "utf8");
+		expect(Bun.YAML.parse(shippedOverlay)).toEqual({ team: "yes" });
+		for (const text of [shipped, shippedOverlay]) expect(text).not.toMatch(/memory|mnemopi|hindsight/);
 		expect(r.warnings).toEqual([]);
 	});
 
@@ -291,92 +299,16 @@ describe("buildSetup", () => {
 		expect((err as UserError).message).toContain(`${join(agentDir, "config.yml")} is not valid YAML`);
 	});
 
-	test("a Mnemopi SQLite database round-trips through serialize, including uncheckpointed WAL writes; sidecars are skipped", async () => {
+	test("a memories directory in the agent dir never ships, databases and sidecars included", async () => {
 		const l = await layout();
 		const dbPath = join(l.agentDir, "memories", "mnemopi", "mnemopi.db");
-		const bankDb = join(l.agentDir, "memories", "mnemopi", "banks", "global", "bank.db");
-		await mkdir(join(bankDb, ".."), { recursive: true });
-		const dbs: Database[] = [];
-		for (const p of [dbPath, bankDb]) {
-			const db = new Database(p);
-			db.run("PRAGMA journal_mode=WAL");
-			db.run("PRAGMA wal_autocheckpoint=0");
-			db.run("CREATE TABLE memories(id INTEGER PRIMARY KEY, text TEXT)");
-			db.run("INSERT INTO memories(text) VALUES ('omp-cloud scratch codeword is plover'), ('second')");
-			dbs.push(db);
-		}
-		// The writes live in the -wal files, which are still open.
-		expect((await lstat(`${dbPath}-wal`)).size).toBeGreaterThan(0);
-
+		await put(dbPath, "database bytes");
+		await put(`${dbPath}-wal`, "wal bytes");
+		await put(join(l.agentDir, "memories", "mnemopi", "banks", "app-laptop", "mnemopi.db"), "bank bytes");
 		const r = await buildSetup(l.opts);
-		for (const db of dbs) db.close();
 		expect(r.warnings).toEqual([]);
-
-		const dir = await extract(r.path);
-		const files = await listAll(dir);
-		expect(files).toContain("memories/mnemopi/mnemopi.db");
-		expect(files).toContain("memories/mnemopi/banks/global/bank.db");
-		expect(files).toContain("memories/mnemopi/notes.txt");
-		expect(files.filter(f => /-(wal|shm)$/.test(f))).toEqual([]);
-		for (const rel of ["memories/mnemopi/mnemopi.db", "memories/mnemopi/banks/global/bank.db"]) {
-			const copy = new Database(join(dir, rel), { readonly: true });
-			expect(copy.query("SELECT text FROM memories ORDER BY id").all()).toEqual([
-				{ text: "omp-cloud scratch codeword is plover" },
-				{ text: "second" },
-			]);
-			copy.close();
-		}
-	});
-
-	test("a memory .db that is not a readable database is copied as it is and warned about", async () => {
-		const l = await layout();
-		await put(join(l.agentDir, "memories", "mnemopi", "broken.db"), "this is not sqlite, just bytes that are longer than a header");
-		const r = await buildSetup(l.opts);
-		expect(r.warnings).toEqual([MEMORY_WARNING]);
-		const dir = await extract(r.path);
-		expect(await readFile(join(dir, "memories/mnemopi/broken.db"), "utf8")).toBe("this is not sqlite, just bytes that are longer than a header");
-	});
-
-	describe("the project bank rename", () => {
-		const bankDb = async (agentDir: string, bank: string, text: string): Promise<void> => {
-			await put(join(agentDir, "memories", "mnemopi", "banks", bank, "mnemopi.db"), text);
-		};
-
-		test("the bank of this machine ships under the name the VM looks for, with its content", async () => {
-			const l = await layout();
-			const db = join(l.agentDir, "memories", "mnemopi", "banks", "app-laptop", "mnemopi.db");
-			await mkdir(join(db, ".."), { recursive: true });
-			const store = new Database(db);
-			store.run("CREATE TABLE memories(id INTEGER PRIMARY KEY, text TEXT)");
-			store.run("INSERT INTO memories(text) VALUES ('laptop memory')");
-			store.close();
-			await bankDb(l.agentDir, "other-bank", "kept as it is");
-			const dir = await extract((await buildSetup({ ...l.opts, memoryBank: { from: "app-laptop", to: "work-vm" } })).path);
-			const files = await listAll(dir);
-			expect(files).toContain("memories/mnemopi/banks/work-vm/mnemopi.db");
-			expect(files).toContain("memories/mnemopi/banks/other-bank/mnemopi.db");
-			expect(files.filter(f => f.includes("app-laptop"))).toEqual([]);
-			const copy = new Database(join(dir, "memories/mnemopi/banks/work-vm/mnemopi.db"), { readonly: true });
-			expect(copy.query("SELECT text FROM memories").all()).toEqual([{ text: "laptop memory" }]);
-			copy.close();
-		});
-
-		test("without a plan nothing is renamed", async () => {
-			const l = await layout();
-			await bankDb(l.agentDir, "app-laptop", "x");
-			expect(await listAll(await extract((await buildSetup(l.opts)).path))).toContain("memories/mnemopi/banks/app-laptop/mnemopi.db");
-		});
-
-		test("a bank that is not there is skipped, and a bank already under the new name is not overwritten", async () => {
-			const l = await layout();
-			await bankDb(l.agentDir, "work-vm", "already named");
-			const absent = await extract((await buildSetup({ ...l.opts, memoryBank: { from: "app-laptop", to: "work-vm" } })).path);
-			expect(await readFile(join(absent, "memories/mnemopi/banks/work-vm/mnemopi.db"), "utf8")).toBe("already named");
-			await bankDb(l.agentDir, "app-laptop", "laptop text");
-			const both = await extract((await buildSetup({ ...l.opts, memoryBank: { from: "app-laptop", to: "work-vm" } })).path);
-			expect(await readFile(join(both, "memories/mnemopi/banks/work-vm/mnemopi.db"), "utf8")).toBe("already named");
-			expect(await readFile(join(both, "memories/mnemopi/banks/app-laptop/mnemopi.db"), "utf8")).toBe("laptop text");
-		});
+		const files = await listAll(await extract(r.path));
+		expect(files.filter(f => f.includes("memories") || f.endsWith(".db") || /-(wal|shm)$/.test(f))).toEqual([]);
 	});
 
 	test("an archive over the cap is an error naming the remedies", async () => {
@@ -398,9 +330,22 @@ describe("sanitizeSettings", () => {
 	});
 
 	test("dotted top-level keys match like nested ones", () => {
-		const out = sanitizeSettings({ "auth.broker.url": "http://x", "hindsight.apiUrl": "http://127.1.2.3/x", "searxng.endpoint": "http://0.0.0.0:8080", other: 1 });
+		const out = sanitizeSettings({ "auth.broker.url": "http://x", "searxng.endpoint": "http://127.1.2.3/x", "compaction.remoteEndpoint": "http://0.0.0.0:8080", other: 1 });
 		expect(out.doc).toEqual({ other: 1 });
-		expect(out.dropped).toEqual(["auth.broker.url", "hindsight.apiUrl", "searxng.endpoint"]);
+		expect(out.dropped).toEqual(["auth.broker.url", "searxng.endpoint", "compaction.remoteEndpoint"]);
+	});
+
+	test("the memory settings go silently, nested and dotted, wherever their values point", () => {
+		const input = {
+			theme: "dark",
+			memory: { backend: "mnemopi" },
+			mnemopi: { scoping: "per-project-tagged", llmApiKey: "x", dbPath: "/home/me/m.db", embeddingApiUrl: "http://localhost:11434" },
+			hindsight: { apiUrl: "https://hindsight.example.test", apiToken: "!pass show hs" },
+			"memory.autoRecall": true,
+			"mnemopi.bank": "mine",
+			"hindsight.bankId": "b",
+		};
+		expect(sanitizeSettings(input)).toEqual({ doc: { theme: "dark" }, dropped: [], changed: true });
 	});
 
 	test("a command is dropped at any depth, in a list too; a mapping the removal empties goes with it", () => {
@@ -410,12 +355,12 @@ describe("sanitizeSettings", () => {
 	});
 
 	test("endpoints are kept when they are not this machine", () => {
-		const doc = { hindsight: { apiUrl: "https://h.example.test" }, compaction: { remoteEndpoint: "http://10.0.0.5:9000" }, mnemopi: { llmBaseUrl: "not a url" } };
+		const doc = { searxng: { endpoint: "https://s.example.test" }, compaction: { remoteEndpoint: "http://10.0.0.5:9000" } };
 		expect(sanitizeSettings(doc)).toEqual({ doc, dropped: [], changed: false });
 	});
 
 	test("every listed credential and host path is dropped", () => {
-		const keys = ["images.urls.credentials", "dev.autoqaPush.token", "mnemopi.embeddingApiKey", "mnemopi.dbPath", "shellMinimizer.settingsPath", "plan.autosaveDir", "browser.screenshotDir", "browser.relayUrl", "skills.customDirectories", "workspace.additionalDirectories", "ida.installDir", "images.urls.command", "images.urls.sshTarget", "images.urls.bindHost", "images.urls.publicBaseUrl", "searxng.token", "searxng.basicPassword", "compaction.remoteEndpoint"];
+		const keys = ["images.urls.credentials", "dev.autoqaPush.token", "shellMinimizer.settingsPath", "plan.autosaveDir", "browser.screenshotDir", "browser.relayUrl", "skills.customDirectories", "workspace.additionalDirectories", "ida.installDir", "images.urls.command", "images.urls.sshTarget", "images.urls.bindHost", "images.urls.publicBaseUrl", "searxng.token", "searxng.basicPassword", "compaction.remoteEndpoint"];
 		const doc: Record<string, unknown> = {};
 		for (const k of keys) doc[k] = k === "compaction.remoteEndpoint" ? "http://localhost:1" : ["x"];
 		const out = sanitizeSettings(doc);

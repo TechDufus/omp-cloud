@@ -12,7 +12,6 @@ import { generateName, type TitleGenerator } from "./naming";
 import { sessionOverlays } from "./overlays";
 import { refusePairingCode } from "./pairing";
 import { type McpPlan, type McpSummary, planMcp } from "./mcp";
-import { planMemoryBank, readMemorySettings } from "./mnemopi";
 import { buildSetup, type SetupResult } from "./setup";
 import { gitRaw, readAuthor, readSecretEnv, type Snapshot, takeSnapshot } from "./snapshot";
 import { UserError, type Host, type HandoffRequest, type PiHost, type CreatedThread, type ScratchHandoffRequest, type ThreadOrigin, type ThreadSummary, type Whoami } from "./types";
@@ -134,7 +133,7 @@ export interface LaunchedThread {
 	workspace: Workspace;
 	/** The idempotency key the create carried. */
 	key: string;
-	/** Local warnings (conversation too large, memory copied without a snapshot) and the service's. */
+	/** Local warnings (conversation too large, config keys that stay home) and the service's. */
 	warnings: string[];
 	summary: HandoffSummary;
 }
@@ -321,9 +320,6 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 	const meta = who.capabilities.includes("threads.meta");
 	const idempotent = who.capabilities.includes("threads.idempotency");
 	const setupSupported = who.capabilities.includes("threads.setup");
-	// The project bank the VM will look for: a per-project bank of this machine's default mnemopi store, renamed at handoff
-	// (the VM works in another directory, which omp hashes into the bank name).
-	const memoryBank = who.capabilities.includes("threads.memory") ? planMemoryBank(await readMemorySettings(input.pi, input.env), host.cwd, who.vmWorkspace) : undefined;
 	const sessionModel = sessionModelOf(host);
 	const level = input.pi.getThinkingLevel();
 	const sessionThinking = level !== undefined && THINKING_LEVELS.includes(level) ? level : "";
@@ -388,17 +384,16 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 
 		const setups = new Map<string, Promise<SetupResult>>();
 		const setupFor = (workspace: Workspace, repoRoot: string): Promise<SetupResult> => {
-			const key = `${workspace}:${memoryBank?.from ?? ""}`;
-			let made = setups.get(key);
+			let made = setups.get(workspace);
 			if (!made) {
 				made = (async () => {
 					const extensions = await planExtensions({ settings: input.pi.pi.settings, cwd: host.cwd, agentDir: input.agentDir, repoRoot, ownRoot: input.ownRoot, exclude: cfg.excludeExtensions });
 					const dir = join(tmp, `setup-${workspace}`);
 					await mkdir(dir, { recursive: true });
-					const setup = await buildSetup({ agentDir: input.agentDir, extensions: extensions.ship, overlays: sessionOverlays(input.pi, { env: input.env }), tmpDir: dir, memoryBank });
+					const setup = await buildSetup({ agentDir: input.agentDir, extensions: extensions.ship, overlays: sessionOverlays(input.pi, { env: input.env }), tmpDir: dir });
 					return { ...setup, warnings: [...extensions.warnings, ...setup.warnings] };
 				})();
-				setups.set(key, made);
+				setups.set(workspace, made);
 			}
 			return made;
 		};
@@ -441,7 +436,6 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 					...(name ? { name } : {}),
 					...(Object.keys(plan.policy).length > 0 ? { policy: plan.policy } : {}),
 					...(shippedMcp.servers.length > 0 ? { mcp: shippedMcp.servers } : {}),
-					...(memoryBank ? { memory: { bank: memoryBank.from } } : {}),
 					...(meta ? { origin: input.origin, ...(input.sessionId !== "" ? { session: input.sessionId } : {}), ...(task.ref !== undefined ? { ref: task.ref } : {}) } : {}),
 				};
 				const build = (s: Snapshot | undefined): HandoffParts => {

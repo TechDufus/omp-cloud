@@ -72,7 +72,6 @@ describe("summaryView", () => {
 		scratch: false,
 		pr: null,
 		mcpServers: [],
-		memoryBank: "",
 		setup: null,
 	};
 

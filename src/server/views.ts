@@ -162,8 +162,6 @@ export interface ThreadSummaryView {
 	archivedAt: string | null;
 	/** The pull request the thread's pushes opened; null before any. */
 	pr: { number: number; url: string } | null;
-	/** The memory bank the thread's laptop used for the project, which the cloud memories merge back into; `""` for none. */
-	memoryBank: string;
 	/** What the thread's turns add up to. `context.window` 0 means the window is unknown. */
 	metrics: ThreadMetrics;
 	/** The running turn's latest tool call or assistant message; null when no turn runs. */
@@ -352,7 +350,6 @@ export function summaryView(thread: Thread, stats: ThreadStats, questionTimeoutS
 		lastActivityAt: thread.lastActivityAt,
 		archivedAt: thread.archivedAt,
 		pr: thread.pr === null ? null : { ...thread.pr },
-		memoryBank: thread.memoryBank,
 		metrics: metricsView(stats.metrics),
 		activity: stats.activity === null ? null : { ...stats.activity },
 	};

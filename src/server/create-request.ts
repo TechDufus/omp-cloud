@@ -41,7 +41,6 @@ const MAX_MCP_ARGS = 256;
 /** The JSON of every shipped MCP server together. */
 const MAX_MCP_BYTES = 262144;
 const MCP_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
-const MEMORY_BANK_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 /** An stdio server's env value: a reference (`${NAME}` or `${NAME:-default}`) to the VM's own environment, so no literal secret travels in a request. */
 const MCP_ENV_REFERENCE = /^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}$/;
@@ -306,18 +305,6 @@ function parseMcp(body: Record<string, unknown>, selfHosts: readonly string[]): 
 	return servers;
 }
 
-/** Validates `memory`: absent, or `{bank}` with a bank that is empty or 1 to 64 characters of letters, digits, `_` or `-`. Returns the bank, `""` for none. */
-function parseMemory(body: Record<string, unknown>): string {
-	const raw = body.memory;
-	if (raw === undefined) return "";
-	if (!isRecord(raw)) throw bad("memory must be an object");
-	const bank = raw.bank ?? "";
-	if (typeof bank !== "string" || (bank !== "" && !MEMORY_BANK_PATTERN.test(bank))) {
-		throw bad("memory.bank must be empty or 1 to 64 characters of letters, digits, _ or -");
-	}
-	return bank;
-}
-
 /**
  * Validates `setup`: absent or null is none, else `{run, cacheFiles?}` with a script of 1 to 16384 characters and at
  * most 32 clean relative repository paths whose contents key the cached environment (`DEFAULT_SETUP_CACHE_FILES` when
@@ -511,7 +498,6 @@ export function parseCreateRequest(raw: unknown, selfHosts: readonly string[] = 
 	const ref = parseRef(raw);
 	const session = parseSession(raw);
 	const name = parseName(raw);
-	const memoryBank = parseMemory(raw);
 	const setup = parseSetup(raw);
 
 	return {
@@ -534,7 +520,6 @@ export function parseCreateRequest(raw: unknown, selfHosts: readonly string[] = 
 			session,
 			scratch,
 			mcpServers: mcp.map(server => server.name),
-			memoryBank,
 			setup,
 		},
 		secrets,

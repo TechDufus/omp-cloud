@@ -137,12 +137,6 @@ describe("listThreadsPage", () => {
 		expect(parseThreadSummary({ ...summary(), pr: { number: 0, url: "" } }).pr).toBeNull();
 	});
 
-	test("the memory bank of a thread is parsed; a thread without one has an empty bank", () => {
-		expect(parseThreadSummary({ ...summary(), memoryBank: "app-1x2y3z" }).memoryBank).toBe("app-1x2y3z");
-		expect(parseThreadSummary(summary()).memoryBank).toBe("");
-		expect(parseThreadSummary({ ...summary(), memoryBank: 7 }).memoryBank).toBe("");
-	});
-
 	test("listThreads is the newest page's threads", async () => {
 		const { client } = service(() => Response.json({ threads: [summary({ id: "aaaaaaaaaaaa" })], next: "c", total: 9 }));
 		expect((await client.listThreads()).map(t => t.id)).toEqual(["aaaaaaaaaaaa"]);

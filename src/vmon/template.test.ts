@@ -101,8 +101,8 @@ describe("agentTemplate", () => {
 	test("installs the recipe's packages after the runner's own and before omp, and runs the setup lines last as root under set -eux", async () => {
 		const json = await steps(recipeFrom(["ripgrep"], ["echo one", "echo two"]));
 		const at = (text: string) => json.indexOf(text);
-		expect(at("sqlite3")).toBeGreaterThan(-1);
-		expect(at("ripgrep")).toBeGreaterThan(at("sqlite3"));
+		expect(at("procps")).toBeGreaterThan(-1);
+		expect(at("ripgrep")).toBeGreaterThan(at("procps"));
 		expect(at("linux-x86_64")).toBeGreaterThan(at("ripgrep"));
 		expect(at("set -eux\\necho one\\necho two")).toBeGreaterThan(at("linux-x86_64"));
 	});
@@ -111,7 +111,8 @@ describe("agentTemplate", () => {
 		const parsed: { steps: { type: string; args: string[] }[] } = JSON.parse(await steps(recipeFrom([], [])));
 		const runs = parsed.steps.filter(step => step.type === "RUN").map(step => step.args[0] ?? "");
 		expect(runs).toHaveLength(2);
-		expect(runs[0]).toContain("sqlite3");
+		expect(runs[0]).toContain("procps");
+		expect(runs[0]).not.toContain("sqlite3");
 		expect(runs[1]).toContain("linux-x86_64");
 		expect(await steps(recipeFrom([], []))).not.toContain("ripgrep");
 	});

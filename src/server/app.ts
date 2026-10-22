@@ -7,7 +7,6 @@ import { canonicalAddress } from "../pairing/cidr";
 import { SourceLimiter } from "../pairing/limiter";
 import type { RemoteSettings } from "../pairing/remote";
 import { utcDay } from "../runner/spend";
-import { VM_WORKSPACE } from "../runner/vm-layout";
 import { ServiceSecrets } from "../secrets/store";
 import type { Settings } from "../settings";
 import type { Store } from "../store";
@@ -131,7 +130,6 @@ const CAPABILITIES: readonly string[] = [
 	"threads.pr",
 	"secrets.store",
 	"mcp.proxy",
-	"threads.memory",
 	"threads.preview",
 	"threads.setup",
 ];
@@ -143,7 +141,7 @@ const MAX_ANSWER_BODY_BYTES = MAX_QUESTION_TEXT_BYTES + MAX_OPTIONS * (MAX_OPTIO
 
 /** A route under `/api/v1/threads/{id}`; `answer` also carries the turn and question ids. */
 type ThreadRoute =
-	| { name: "get" | "delete" | "events" | "messages" | "irc" | "stop" | "result" | "conversation" | "memory" | "diff" | "tree"; id: string }
+	| { name: "get" | "delete" | "events" | "messages" | "irc" | "stop" | "result" | "conversation" | "diff" | "tree"; id: string }
 	| { name: "answer"; id: string; turn: number; question: number }
 	| { name: "reply"; id: string; turn: number }
 	| { name: "files"; id: string; path: string }
@@ -191,7 +189,7 @@ function matchRoute(method: string, pathname: string): Route | null {
 	}
 	if (rest.length === 3) {
 		const leaf = rest[2];
-		if (method === "GET" && (leaf === "events" || leaf === "result" || leaf === "conversation" || leaf === "memory" || leaf === "diff" || leaf === "tree")) {
+		if (method === "GET" && (leaf === "events" || leaf === "result" || leaf === "conversation" || leaf === "diff" || leaf === "tree")) {
 			return { name: leaf, id };
 		}
 		if (method === "POST" && (leaf === "messages" || leaf === "stop" || leaf === "irc")) return { name: leaf, id };
@@ -282,10 +280,9 @@ export function createApp(options: AppOptions): App {
 	const aborts = new DeviceAborts();
 	const pairing = new PairingRoutes({ store, remote, limiter: new SourceLimiter(), aborts });
 
-	async function download(thread: Thread, route: "result" | "conversation" | "memory", caller: Caller, req: Request): Promise<Response> {
+	async function download(thread: Thread, route: "result" | "conversation", caller: Caller, req: Request): Promise<Response> {
 		let file: Bun.BunFile | null;
 		if (route === "result") file = await store.blob(thread.id, "result.bundle");
-		else if (route === "memory") file = await store.blob(thread.id, "memory.tar");
 		else file = (await store.blob(thread.id, "session-export.tar")) ?? (await store.blob(thread.id, "session.tar"));
 		if (file === null) throw new ApiError(404, `no ${route} yet`);
 		const headers: Record<string, string> = {
@@ -361,7 +358,6 @@ export function createApp(options: AppOptions): App {
 				return json(200, store.stopThread(thread.id, actorOf(caller)));
 			case "result":
 			case "conversation":
-			case "memory":
 				return download(thread, route.name, caller, req);
 			case "port": {
 				requireNoUpgrade(req);
@@ -438,7 +434,6 @@ export function createApp(options: AppOptions): App {
 					modelPatterns: modelPatterns(models),
 					ompVersion,
 					gitHosts: git.hosts(),
-					vmWorkspace: VM_WORKSPACE,
 					github: { app: github?.app.info()?.slug ?? null, signing: github !== undefined && github.signingKey.exists() && settings.get("git.sign") === "ssh" },
 					mcpProxy: options.mcp?.proxy ?? false,
 					mcpLogins: store.mcpCredentialUrls(),

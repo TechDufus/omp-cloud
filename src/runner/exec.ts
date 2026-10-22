@@ -19,13 +19,6 @@ export class ExecError extends Error {
 	}
 }
 
-/** A failed command as one line for a notice: the exit code and the last line of its stderr (the command text says nothing about why). */
-export function execFailure(error: unknown): string {
-	if (!(error instanceof ExecError)) return error instanceof Error ? error.message : String(error);
-	const last = error.stderr.split("\n").map(line => line.trim()).filter(line => line !== "").at(-1);
-	return last === undefined ? `exit ${error.exitCode}, no error output` : `exit ${error.exitCode}: ${last.slice(0, MAX_COMMAND_CHARS)}`;
-}
-
 /** Runs a shell command and returns its stdout; throws `ExecError` on a non-zero exit. */
 export type Exec = (command: string, options?: { cwd?: string; timeoutMs?: number }) => Promise<string>;
 

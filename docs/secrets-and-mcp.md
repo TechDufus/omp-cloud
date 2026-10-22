@@ -104,12 +104,12 @@ If the server's OAuth cannot complete (it advertises no endpoints: `the MCP serv
 
 Your omp settings (`~/.omp/agent/config.yml` and the `--config` overlays the session loaded) ship to the VM, but not all of them can work there or should be there. The plugin removes these keys from the copy it ships, at any depth and also as dotted top-level keys (`"auth.broker.url"`), and the launch card warns `<file name>: <key> stays on this machine`:
 
-- **Silently:** `cloud` and `extensions` (top level).
+- **Silently:** `cloud`, `extensions`, and the memory settings `memory`, `mnemopi` and `hindsight` (top level, whole subtrees: cloud agents run without memory, whatever your omp's backend is).
 - **The broker login:** the `auth.broker` subtree.
-- **Credentials:** `images.urls.credentials`, `hindsight.apiToken`, `mnemopi.embeddingApiKey`, `mnemopi.llmApiKey`, `dev.autoqaPush.token`, `searxng.token`, `searxng.basicPassword`.
-- **Host paths and settings of this machine:** `mnemopi.dbPath`, `shellPath`, `shellMinimizer.settingsPath`, `plan.autosaveDir`, `browser.screenshotDir`, `browser.cdpUrl`, `browser.relayUrl`, `skills.customDirectories`, `workspace.additionalDirectories`, `ida.installDir`, `images.urls.command`, `images.urls.sshTarget`, `images.urls.bindHost`, `images.urls.publicBaseUrl`.
+- **Credentials:** `images.urls.credentials`, `dev.autoqaPush.token`, `searxng.token`, `searxng.basicPassword`.
+- **Host paths and settings of this machine:** `shellPath`, `shellMinimizer.settingsPath`, `plan.autosaveDir`, `browser.screenshotDir`, `browser.cdpUrl`, `browser.relayUrl`, `skills.customDirectories`, `workspace.additionalDirectories`, `ida.installDir`, `images.urls.command`, `images.urls.sshTarget`, `images.urls.bindHost`, `images.urls.publicBaseUrl`.
 - **Commands:** any string value, at any depth, that starts with `!` (omp runs it as a shell command on the machine it is configured on).
-- **Local endpoints:** `hindsight.apiUrl`, `searxng.endpoint`, `mnemopi.embeddingApiUrl`, `mnemopi.llmBaseUrl` and `compaction.remoteEndpoint` when the URL's host is `localhost`, `127.*`, `[::1]` or `0.0.0.0`.
+- **Local endpoints:** `searxng.endpoint` and `compaction.remoteEndpoint` when the URL's host is `localhost`, `127.*`, `[::1]` or `0.0.0.0`.
 
 A mapping that the removal empties is dropped too. The file is rewritten only when something was removed, and your own files are never changed. If a setting that stayed home is one the agent needs, provide it the cloud's way: a [Secret](#secrets) for a token, a public endpoint instead of a local one.
 

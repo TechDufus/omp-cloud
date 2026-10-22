@@ -16,7 +16,7 @@ const BUILD_SIZE = { cpuCount: 2, memoryMB: 4096 };
 export function agentTemplate(version: string, recipe: Recipe) {
 	const template = Template()
 		.fromImage("debian:trixie-slim")
-		.aptInstall(["ca-certificates", "curl", "git", "jq", "procps", "sqlite3"]);
+		.aptInstall(["ca-certificates", "curl", "git", "jq", "procps"]);
 	const withPackages = recipe.packages.length === 0 ? template : template.aptInstall(recipe.packages);
 	const withOmp = withPackages.runCmd(installOmp(version), { user: "root" });
 	return recipe.setup.length === 0 ? withOmp : withOmp.runCmd(["set -eux", ...recipe.setup].join("\n"), { user: "root" });

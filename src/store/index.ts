@@ -285,8 +285,8 @@ export class Store {
 						`INSERT INTO threads (id, owner, phase, title, name, model, thinking, repo_name, repo_remote_url, repo_base_ref,
 							repo_base_commit, repo_handoff_commit, repo_local_branch, home, workspace, author_name, author_email,
 							secret_files, secret_env, config_overlays, omp_version, policy, created_at, last_activity_at,
-							origin, ref, session, scratch, idempotency_key, idempotency_fingerprint, mcp_names, memory_bank, setup_run, setup_cache_files)
-						VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+							origin, ref, session, scratch, idempotency_key, idempotency_fingerprint, mcp_names, setup_run, setup_cache_files)
+						VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 					)
 					.run(
 						id,
@@ -319,7 +319,6 @@ export class Store {
 						input.idempotency?.key ?? null,
 						input.idempotency?.fingerprint ?? "",
 						JSON.stringify(input.mcpServers ?? []),
-						input.memoryBank ?? "",
 						input.setup?.run ?? "",
 						JSON.stringify(input.setup?.cacheFiles ?? []),
 					);

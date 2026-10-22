@@ -75,8 +75,6 @@ export interface Whoami {
 	mcpProxy: boolean;
 	/** The MCP server URLs the service holds a login for (`/cloud login mcp:<url>`); `[]` when it reports none. */
 	mcpLogins: string[];
-	/** Where the cloud agent works in the VM (`/home/user/work`); `""` when the service reports none (an older service): then no memory bank is renamed. */
-	vmWorkspace: string;
 	vms: { running: number; paused: number };
 	threads: { starting: number; working: number; waiting: number; idle: number; failed: number };
 	/** The paired device this request was made with; null for the owner token. */
@@ -254,8 +252,6 @@ export interface ThreadSummary {
 	scratch: boolean;
 	/** The pull request the service keeps for the thread's branch; null when it has none. */
 	pr: { number: number; url: string } | null;
-	/** The local project bank the thread's memories were handed off from; `""` when it has none. */
-	memoryBank: string;
 }
 
 export interface TurnUsage {
@@ -582,8 +578,6 @@ export interface HandoffRequest {
 	policy?: Record<string, unknown>;
 	/** The MCP servers of `~/.omp/agent/mcp.json` the cloud agent gets (the service validates them); sent only to a service with `mcp.proxy`. */
 	mcp?: McpShip[];
-	/** The local project bank the handoff renamed for the VM (`threads.memory`); the service records it and the plugin merges the cloud's memories back into it. */
-	memory?: { bank: string };
 	/** The repository's environment setup from `.omp-cloud.yml` (`threads.setup`): `run` once per environment, cached by the contents of `cacheFiles` (absent: the service's default lockfiles). Repository handoffs only. */
 	setup?: { run: string; cacheFiles?: string[] };
 	/** The short human name generated for the task (2-6 words, at most 60 characters). Absent when none could be generated: the service then shows the title. */

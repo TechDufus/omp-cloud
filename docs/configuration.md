@@ -83,7 +83,7 @@ What every VM contains is two run-time settings, not `service.json` keys: `vm.pa
 
 | Setting | Rules |
 |---|---|
-| `vm.packages` | A list of Debian package names: lower-case letters, digits and `+ . -`, starting with a letter or digit, at most 100 characters each, at most 200 entries. The runner's own tools (`ca-certificates`, `curl`, `git`, `jq`, `procps`, `sqlite3`) are always installed and need not be listed |
+| `vm.packages` | A list of Debian package names: lower-case letters, digits and `+ . -`, starting with a letter or digit, at most 100 characters each, at most 200 entries. The runner's own tools (`ca-certificates`, `curl`, `git`, `jq`, `procps`) are always installed and need not be listed |
 | `vm.setup` | A list of shell lines, at most 16384 characters in all |
 
 Changing either builds a new template, named `omp-agent:<omp version>-<hash>`, the next time a thread (or the service's own prebuild at start) needs a VM; the first thread after the change waits for the build. The order of packages does not matter. VMs that already exist keep the template they were made from, and the [repository environments](environments.md#per-repository-environments) built on the old template are retired. A package Debian does not have, or a line that fails, fails the build, and with it every thread that needs the template, until the setting is fixed. The rules, the build order and what they do to threads are explained in [Environments](environments.md#the-vm-toolchain), and the contract in [API](api.md#settings).

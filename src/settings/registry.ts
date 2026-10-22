@@ -419,7 +419,7 @@ export const REGISTRY: Registry = {
 		key: "vm.packages",
 		type: "string[]",
 		default: [...DEFAULT_VM_PACKAGES],
-		doc: `The Debian packages installed in the VM template, besides the ones the runner needs (ca-certificates, curl, git, jq, procps, sqlite3). Changing the list builds a new template on the next thread. Each entry is a package name; at most ${MAX_VM_PACKAGES} entries.`,
+		doc: `The Debian packages installed in the VM template, besides the ones the runner needs (ca-certificates, curl, git, jq, procps). Changing the list builds a new template on the next thread. Each entry is a package name; at most ${MAX_VM_PACKAGES} entries.`,
 		parse(raw) {
 			if (!Array.isArray(raw) || !raw.every((item): item is string => typeof item === "string")) {
 				throw new SettingError("vm.packages must be a list of strings");

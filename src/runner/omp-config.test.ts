@@ -125,6 +125,11 @@ modelRoles:
 		expect(overlay).not.toHaveProperty("secrets");
 	});
 
+	test("turns omp's memory off, whatever the user's shipped settings say", () => {
+		expect(parse(overlayConfigYaml(base)).memory).toEqual({ backend: "off" });
+		expect(parse(overlayConfigYaml({ ...base, configYamls: ["memory:\n  backend: mnemopi\n"] })).memory).toEqual({ backend: "off" });
+	});
+
 	test("turns omp's secret masking on only when the VM holds secrets", () => {
 		expect(parse(overlayConfigYaml({ ...base, maskSecrets: true })).secrets).toEqual({ enabled: true });
 		expect(parse(overlayConfigYaml(base))).not.toHaveProperty("secrets");

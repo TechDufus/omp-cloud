@@ -1,22 +1,19 @@
-import type { Database as BunDatabase } from "bun:sqlite";
-import { copyFile, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 import { run } from "./exec";
 import type { ShippedExtension } from "./extensions";
 import { isLocalHost, isRecord } from "./guards";
-import type { MemoryBankPlan } from "./mnemopi";
 import { mb } from "./snapshot";
 import { UserError } from "./types";
 
 export const MAX_SETUP_BYTES = 64 * 1024 * 1024;
-export const MEMORY_WARNING = "memory copied without a snapshot; it may miss the last few writes";
 /** The service accepts at most this many `configOverlays`. */
 export const MAX_OVERLAYS = 8;
 
 /**
  * Everything the cloud receives of `~/.omp/agent`, as an allowlist: instructions and rules, skills
  * and subagents, the settings file (without its `cloud` block, which earlier versions kept the service token in), LSP
- * configuration, extensions and Mnemopi memory. Anything else (`agent.db*` logins, sessions,
+ * configuration and extensions. Anything else (`agent.db*` logins, sessions, `memories/`,
  * history/model/skill-description databases, caches, `secret-placeholder.key`, `mcp.json`) never ships.
  */
 export const SETUP_FILES = ["AGENTS.md", "RULES.md", "WATCHDOG.md", "config.yml", "lsp.json"] as const;
@@ -30,8 +27,6 @@ export interface SetupOptions {
 	overlays: readonly string[];
 	/** Scratch directory for staging and the archive. */
 	tmpDir: string;
-	/** Renames the project bank of the shipped memory, so the cloud agent (which works in another directory) finds it: `from` is this machine's bank, `to` the VM's. */
-	memoryBank?: MemoryBankPlan;
 }
 
 export interface SetupResult {
@@ -41,8 +36,6 @@ export interface SetupResult {
 	/** The overlays' paths inside the archive, relative to the agent dir, in load order. */
 	configOverlays: string[];
 }
-
-export type DatabaseCtor = new (path: string, options?: { readonly?: boolean }) => BunDatabase;
 
 async function exists(p: string): Promise<boolean> {
 	try {
@@ -74,20 +67,16 @@ async function stageTree(src: string, dest: string, ancestors: readonly string[]
 	return true;
 }
 
-/** Top-level keys that stay home without a word: `cloud` held the service token in earlier versions, `extensions` lists paths on this machine (every shipped extension already sits in the setup's `extensions/` directory). */
-const SILENT_KEYS = new Set(["cloud", "extensions"]);
+/** Top-level keys that stay home without a word: `cloud` held the service token in earlier versions, `extensions` lists paths on this machine (every shipped extension already sits in the setup's `extensions/` directory), and `memory`, `mnemopi` and `hindsight` are the memory settings: cloud agents run without memory. */
+const SILENT_KEYS = new Set(["cloud", "extensions", "memory", "mnemopi", "hindsight"]);
 /** Subtrees that stay home: the broker login. */
 const HOME_SUBTREES = ["auth.broker"];
 /** Credentials, host paths and settings of this machine. */
 const HOME_KEYS = new Set([
 	"images.urls.credentials",
-	"hindsight.apiToken",
-	"mnemopi.embeddingApiKey",
-	"mnemopi.llmApiKey",
 	"dev.autoqaPush.token",
 	"searxng.token",
 	"searxng.basicPassword",
-	"mnemopi.dbPath",
 	"shellPath",
 	"shellMinimizer.settingsPath",
 	"plan.autosaveDir",
@@ -103,7 +92,7 @@ const HOME_KEYS = new Set([
 	"images.urls.publicBaseUrl",
 ]);
 /** Endpoints that stay home when they point at this machine. */
-const LOCAL_URL_KEYS = new Set(["hindsight.apiUrl", "searxng.endpoint", "mnemopi.embeddingApiUrl", "mnemopi.llmBaseUrl", "compaction.remoteEndpoint"]);
+const LOCAL_URL_KEYS = new Set(["searxng.endpoint", "compaction.remoteEndpoint"]);
 
 function pointsAtThisMachine(value: unknown): boolean {
 	if (typeof value !== "string") return false;
@@ -126,13 +115,13 @@ export interface Sanitized {
 	doc: Record<string, unknown>;
 	/** The dotted keys removed with a warning: they stay on this machine. */
 	dropped: string[];
-	/** Whether anything was removed, `cloud` and `extensions` included. */
+	/** Whether anything was removed, the silent keys (`cloud`, `extensions`, the memory settings) included. */
 	changed: boolean;
 }
 
 /**
- * A settings document (`config.yml` or a `--config` overlay) as the cloud may have it. `cloud` and `extensions` (top level)
- * go silently. Everything else that must stay on this machine goes with its dotted path in `dropped`: the `auth.broker`
+ * A settings document (`config.yml` or a `--config` overlay) as the cloud may have it. `cloud`, `extensions` and the
+ * memory settings `memory`, `mnemopi` and `hindsight` (top level, whole subtrees) go silently. Everything else that must stay on this machine goes with its dotted path in `dropped`: the `auth.broker`
  * subtree, credentials, host paths and settings of this machine, any string value that starts with `!` (a command), and
  * the endpoints that point at this machine. Keys match nested (`auth: {broker: …}`) and dotted (`"auth.broker.url"`),
  * at any depth; a mapping the removal empties goes too. The input is not modified.
@@ -210,62 +199,6 @@ async function stageSettings(src: string, dest: string, warnings: string[]): Pro
 	return true;
 }
 
-// bun:sqlite exists only under Bun and an extension host may not expose it; a static
-// import would fail the whole extension at load time, so load it lazily and fall back.
-export async function loadDatabase(): Promise<DatabaseCtor | undefined> {
-	try {
-		const mod = (await import("bun:sqlite")) as { Database: DatabaseCtor };
-		return mod.Database;
-	} catch {
-		return undefined;
-	}
-}
-
-const SIDECAR_RE = /\.db-(wal|shm)$|-(wal|shm)$/;
-
-/**
- * Copies a memory tree, writing each SQLite database as a consistent
- * snapshot (`serialize`) and skipping the -wal/-shm sidecars. Without a usable
- * bun:sqlite the database and its sidecars are copied as they are.
- */
-async function stageMemory(src: string, dest: string, Database: DatabaseCtor | undefined, warnings: string[]): Promise<void> {
-	await mkdir(dest, { recursive: true });
-	for (const entry of await readdir(src, { withFileTypes: true })) {
-		const from = join(src, entry.name);
-		const to = join(dest, entry.name);
-		const isDir = entry.isDirectory() || (entry.isSymbolicLink() && (await stat(from)).isDirectory());
-		if (isDir) {
-			await stageMemory(from, to, Database, warnings);
-			continue;
-		}
-		if (entry.name.endsWith(".db")) {
-			if (Database) {
-				let db: BunDatabase | undefined;
-				try {
-					db = new Database(from, { readonly: true });
-					await writeFile(to, db.serialize());
-					continue;
-				} catch {
-					// fall through to the plain copy
-				} finally {
-					db?.close();
-				}
-			}
-			if (!warnings.includes(MEMORY_WARNING)) warnings.push(MEMORY_WARNING);
-			await copyFile(from, to);
-			for (const side of ["-wal", "-shm"]) {
-				if (await exists(from + side)) await copyFile(from + side, to + side);
-			}
-			continue;
-		}
-		if (SIDECAR_RE.test(entry.name)) {
-			// Copied alongside its database only in the fallback above.
-			continue;
-		}
-		await copyFile(from, to);
-	}
-}
-
 /** What the API accepts of an overlay path: segments of `[A-Za-z0-9._-]`, none of them `.` or `..`. */
 function cleanSegments(rel: string): boolean {
 	return rel.split("/").every(s => /^[A-Za-z0-9._-]+$/.test(s) && s !== "." && s !== "..");
@@ -309,26 +242,14 @@ async function stageOverlays(agentDir: string, stage: string, overlays: readonly
 	return out;
 }
 
-/**
- * Moves the shipped project bank `from` to `to` inside the staged mnemopi tree. A bank directory the VM already has under `to`
- * (the two directories hash alike) is never overwritten, and nothing happens when `from` is not there.
- */
-async function renameBank(memory: string, plan: MemoryBankPlan): Promise<void> {
-	if (plan.from === plan.to) return;
-	const from = join(memory, "banks", plan.from);
-	const to = join(memory, "banks", plan.to);
-	if (!(await exists(from)) || (await exists(to))) return;
-	await rename(from, to);
-}
-
 /** The `tar` of this machine: the system bsdtar on Windows, because a Git or MSYS GNU tar on PATH reads `C:\…` as a remote host. */
-export function tarCommand(): string {
+function tarCommand(): string {
 	return process.platform === "win32" ? win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
 }
 
 /**
  * Packs the user's omp setup into `<tmpDir>/setup.tar.gz`: the {@link SETUP_FILES} and
- * {@link SETUP_DIRS} of the agent dir, the planned extensions, Mnemopi memory, and the session's
+ * {@link SETUP_DIRS} of the agent dir, the planned extensions, and the session's
  * `--config` overlays.
  */
 export async function buildSetup(opts: SetupOptions): Promise<SetupResult> {
@@ -343,13 +264,6 @@ export async function buildSetup(opts: SetupOptions): Promise<SetupResult> {
 	}
 
 	for (const ext of opts.extensions) await stageTree(ext.source, join(stage, ext.dest));
-
-	const mem = join(dir, "memories", "mnemopi");
-	if (await exists(mem)) {
-		const staged = join(stage, "memories", "mnemopi");
-		await stageMemory(mem, staged, await loadDatabase(), warnings);
-		if (opts.memoryBank) await renameBank(staged, opts.memoryBank);
-	}
 
 	const configOverlays = await stageOverlays(dir, stage, opts.overlays, warnings);
 

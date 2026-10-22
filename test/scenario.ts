@@ -17,6 +17,7 @@
  *  I  a conversation that does not unpack fails its thread, leaving no sandbox and no gateway client
  *  J  whoami lists the model patterns and the omp version; a model the cloud cannot run is refused (409)
  *  K  the owner's overlays reach omp's arguments before the service's own; a missing overlay fails the thread
+ *  K2 no memory: a shipped `config.yml` that sets `memory.backend: mnemopi` still leaves the model's requests without the memory device lines (`xd://recall`): the service's overlay wins
  *  L  delta handoff from an authenticated git remote (`git.hosts`): the base history is in the VM, the result bundle is thin
  *  M  `git.push` ask: the result waits for a `Push` answer, then the branch lands on the remote
  *  N  `git.push` auto: no question, the remote branch follows the new head
@@ -53,9 +54,6 @@
  *     reaches it from the VM only through the service's proxy with the VM's own token; the upstream sees its own credential and never the
  *     VM's; an MCP server at the gateway host is refused (400)
  *  AD whoami fields (service, capabilities, limits, spend, models), then the scratch thread is deleted and its inspections are 404
- *  AE memory: a thread made with a setup tarball holding mnemopi databases (the default store and one bank, `memory: {bank}`) has the bank in
- *     its detail and list entry, and after its turn `GET /memory` serves `memory.tar` whose `./mnemopi.db` and bank database hold those rows
- *     (the VM's sqlite3 exported them); a malformed bank is refused (400)
  *  AF environment: a thread whose request has `setup` prepares the repository environment in a build sandbox (`preparing the repository environment`,
  *     then `environment ready`) and its VM starts from the snapshot, so a file the setup wrote into an ignored directory is there; a second
  *     thread of the same repo uses the cached environment (`using the cached environment`, the same stamp) and, started from the snapshot,
@@ -583,7 +581,7 @@ async function run(): Promise<void> {
 
 	await report.step("A create thread: first turn replies, omp has a pid", async () => {
 		await createThread(handoff, bundle, null);
-		// The first VM may build the template (a recipe change, such as sqlite3, is a new template): that takes minutes.
+		// The first VM may build the template (any recipe change is a new template): that takes minutes.
 		const thread = await waitTurnIdle(1, 900_000);
 		expectEqual("reply", text(latestOf(thread)?.reply), "TURN count=1 first=hello");
 		const vm = vmOf(thread);
@@ -677,8 +675,6 @@ async function run(): Promise<void> {
 		const kinds = new Set(events.map(e => e.kind));
 		const missing = ["vm", "assistant", "tool", "turn_done", "question_asked"].filter(kind => !kinds.has(kind));
 		if (missing.length > 0) throw new Error(`missing kinds ${missing.join(", ")}; saw ${[...kinds].join(", ")}`);
-		const memoryNotices = events.filter(e => e.kind === "notice" && e.text.startsWith("the memory could not be saved"));
-		if (memoryNotices.length > 0) throw new Error(`the memory export failed on a thread without memories: ${JSON.stringify(memoryNotices.map(e => e.text))}`);
 		return events.length;
 	}, count => `${count} events`);
 
@@ -773,6 +769,33 @@ async function run(): Promise<void> {
 		const failed = await waitFor("the thread to fail", 90_000, t => t.phase === "failed");
 		expectContains("thread error", text(failed.error), "the overlay overlays/missing.yml is not in the shipped setup");
 		await waitGone(missing);
+	});
+
+	await report.step("K2 no memory: a config.yml that turns memory on (the plugin never ships one) still gives the model no memory device", async () => {
+		// The needle is a device line omp's system prompt lists only with a memory backend on. Control run on omp 18.12.6 with the overlay's
+		// `memory.backend: off` line removed: all 3 requests of this step contained it; with the line, none.
+		const needle = "xd://recall";
+		const setupDir = join(dir, "setup-k2");
+		await mkdir(setupDir, { recursive: true });
+		await writeFile(join(setupDir, "config.yml"), "memory:\n  backend: mnemopi\nmnemopi:\n  scoping: per-project-tagged\n");
+		const setup = join(dir, "setup-k2.tar.gz");
+		const tar = Bun.spawn(["tar", "-czf", setup, "-C", setupDir, "config.yml"], { stdout: "pipe", stderr: "pipe" });
+		if ((await tar.exited) !== 0) throw new Error(`tar failed: ${await tar.stderr.text()}`);
+
+		provider?.watch(needle);
+		const before = provider?.count ?? 0;
+		const memoryless = await createThread(handoff, bundle, null, { setup });
+		await waitTurnIdle(1, 240_000);
+		const turn = await sendMessage("BASH: echo no-memory");
+		await waitTurnIdle(turn, 180_000);
+		const requests = (provider?.count ?? 0) - before;
+		if (requests < 3) throw new Error(`the two turns made ${requests} model request(s); expected the greeting and the bash call with its result`);
+		const found = provider?.seen(needle) ?? 0;
+		if (found > 0) {
+			const last = (provider?.recentTurns ?? []).map(describeRequest).join("\n  --\n");
+			throw new Error(`${found} of ${requests} model request(s) listed ${needle}: the VM's omp ran with memory on\nthe fake model's last turn requests (oldest first):\n${last}`);
+		}
+		await waitGone(memoryless);
 	});
 
 	let delta = "";
@@ -1475,8 +1498,6 @@ async function run(): Promise<void> {
 		};
 		const everything = await collect("", 500);
 		if (everything.length <= 7) throw new Error(`only ${everything.length} events; the paging below needs more than 7`);
-		const scratchMemoryNotices = everything.filter(e => e.kind === "notice" && String(e.text).startsWith("the memory could not be saved"));
-		if (scratchMemoryNotices.length > 0) throw new Error(`the memory export failed on a scratch thread: ${JSON.stringify(scratchMemoryNotices.map(e => e.text))}`);
 		for (const event of everything) {
 			if (typeof event.seq !== "number" || typeof event.kind !== "string" || event.kind === "" || typeof event.text !== "string") throw new Error(`a malformed event: ${JSON.stringify(event)}`);
 			if (event.turn !== null && typeof event.turn !== "number") throw new Error(`an event turn is neither a number nor null: ${JSON.stringify(event)}`);
@@ -1770,7 +1791,7 @@ async function run(): Promise<void> {
 		expectEqual("service.version", service.version, pkg.version);
 		expectContains("service.version", text(service.version), ".");
 		expectEqual("service.api", service.api, API_VERSION);
-		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.memory", "threads.preview", "threads.setup"];
+		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.preview", "threads.setup"];
 		expectEqual("capabilities", JSON.stringify((Array.isArray(who.capabilities) ? who.capabilities.map(text) : []).sort()), JSON.stringify([...expected].sort()));
 		const limits = obj(who.limits, "whoami.limits");
 		expectEqual("limits", JSON.stringify([limits.maxMessageBytes, limits.maxAnswerBytes, limits.listMax, limits.maxTurns]), JSON.stringify([32768, 4000, 200, 200]));
@@ -1792,73 +1813,13 @@ async function run(): Promise<void> {
 		expectEqual("whoami.defaultModel", who.defaultModel, "fake/fake-model");
 		expectEqual("whoami.device", who.device, null);
 		expectEqual("whoami.remote", who.remote, null);
+		expectEqual("whoami.vmWorkspace", who.vmWorkspace, undefined);
+		await expectRefused("GET", `/threads/${scratchId}/memory`, 404, "not found");
 
 		await waitGone(scratchId);
 		await expectRefused("GET", `/threads/${scratchId}/diff`, 404, "not found");
 		await expectRefused("GET", `/threads/${scratchId}/turns/1/reply`, 404, "not found");
 		expectEqual("threads with the scratch ref after the delete", (await listThreads(`ref=${SCRATCH_REF}`)).total, 0);
-	});
-
-	await report.step("AE memory: the VM's mnemopi databases are exported after a turn as memory.tar; the create request's memory bank round-trips", async () => {
-		const bank = "scn-bank";
-		const setupDir = join(dir, "setup-ae");
-		const rowsOf = (file: string, content: string): void => {
-			// The columns of pi-mnemopi's working_memory that the memory merge and its FTS triggers read.
-			const db = new Database(file, { create: true });
-			db.run("CREATE TABLE working_memory (id TEXT PRIMARY KEY, content TEXT NOT NULL, source TEXT, session_id TEXT DEFAULT 'default', importance REAL DEFAULT 0.5, scope TEXT DEFAULT 'global', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
-			db.query("INSERT INTO working_memory (id, content, source) VALUES (?, ?, 'scenario')").run(randomBytes(8).toString("hex"), content);
-			db.close();
-		};
-		await mkdir(join(setupDir, "memories", "mnemopi", "banks", bank), { recursive: true });
-		rowsOf(join(setupDir, "memories", "mnemopi", "mnemopi.db"), "the scenario default memory is BLUE-HERON");
-		rowsOf(join(setupDir, "memories", "mnemopi", "banks", bank, "mnemopi.db"), "the scenario bank memory is RED-FOX");
-		const setup = join(dir, "setup-ae.tar.gz");
-		const tar = Bun.spawn(["tar", "-czf", setup, "-C", setupDir, "memories"], { stdout: "pipe", stderr: "pipe" });
-		if ((await tar.exited) !== 0) throw new Error(`tar failed: ${await tar.stderr.text()}`);
-
-		const previous = threadId;
-		try {
-			const refused = await postThread(handoff, bundle, null, { request: { memory: { bank: "a/b" } } });
-			expectEqual("a malformed bank: status", refused.status, 400);
-			expectContains("a malformed bank: error", text(obj(await refused.json(), "refusal").error), "memory.bank");
-			const memoryId = await createThread(handoff, bundle, null, { setup, request: { memory: { bank } } });
-			await waitTurnIdle(1, 240_000);
-			expectEqual("detail memoryBank", (await detail()).memoryBank, bank);
-			const listed = (await listThreads("")).threads.find(t => t.id === memoryId);
-			expectEqual("listed memoryBank", listed?.memoryBank, bank);
-
-			// The export runs after the turn; the thread is idle once it is done, but allow a moment for the blob.
-			let res = await api("GET", `/threads/${memoryId}/memory`);
-			for (let waited = 0; res.status === 404 && waited < 30_000; waited += POLL_MS) {
-				await Bun.sleep(POLL_MS);
-				res = await api("GET", `/threads/${memoryId}/memory`);
-			}
-			if (res.status !== 200) throw new Error(`GET /memory: expected 200, got ${res.status} ${(await res.text()).slice(0, 300)}`);
-			expectEqual("memory content-type", res.headers.get("content-type"), "application/x-tar");
-			const archive = join(dir, "memory-ae.tar");
-			await writeFile(archive, new Uint8Array(await res.arrayBuffer()));
-			const listing = Bun.spawn(["tar", "-tf", archive], { stdout: "pipe", stderr: "pipe" });
-			const members = (await listing.stdout.text()).split("\n").filter(m => m !== "").sort();
-			if ((await listing.exited) !== 0) throw new Error(`tar -tf failed: ${await listing.stderr.text()}`);
-			expectEqual("memory.tar members", JSON.stringify(members), JSON.stringify(["./", "./banks/", `./banks/${bank}/`, `./banks/${bank}/mnemopi.db`, "./mnemopi.db"]));
-			const out = join(dir, "memory-ae");
-			await mkdir(out, { recursive: true });
-			const extract = Bun.spawn(["tar", "-xf", archive, "-C", out], { stdout: "pipe", stderr: "pipe" });
-			if ((await extract.exited) !== 0) throw new Error(`tar -xf failed: ${await extract.stderr.text()}`);
-			const contents = (file: string): string[] => {
-				const db = new Database(file, { readonly: true });
-				try {
-					return db.query<{ content: string }, []>("SELECT content FROM working_memory").all().map(r => r.content);
-				} finally {
-					db.close();
-				}
-			};
-			expectEqual("./mnemopi.db rows", JSON.stringify(contents(join(out, "mnemopi.db"))), JSON.stringify(["the scenario default memory is BLUE-HERON"]));
-			expectEqual("bank rows", JSON.stringify(contents(join(out, "banks", bank, "mnemopi.db"))), JSON.stringify(["the scenario bank memory is RED-FOX"]));
-			await waitGone(memoryId);
-		} finally {
-			threadId = previous;
-		}
 	});
 
 	await report.step("AF environment: setup runs once per repository state, its snapshot starts the VMs (egress still applies), a changed lockfile prepares again", async () => {

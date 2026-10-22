@@ -157,6 +157,8 @@ export function overlayConfigYaml(input: {
 	overlay.computer = { enabled: false };
 	if (input.maskSecrets) overlay.secrets = { enabled: true };
 	overlay.collab = { autoStart: "off" };
+	// Cloud agents carry no memory: nothing of the laptop's is shipped, and nothing a VM would learn comes back.
+	overlay.memory = { backend: "off" };
 	overlay.marketplace = { autoUpdate: "off" };
 	// The first request after a long pause can fail with ECONNRESET on a stale keep-alive connection to the gateway: omp's own retry covers it.
 	overlay.retry = { enabled: true };

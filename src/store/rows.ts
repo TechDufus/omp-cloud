@@ -64,7 +64,6 @@ export interface ThreadRow {
 	pr_number: number;
 	pr_url: string;
 	mcp_names: string;
-	memory_bank: string;
 	setup_run: string;
 	setup_cache_files: string;
 }
@@ -201,7 +200,6 @@ export function threadFromRow(row: ThreadRow): Thread {
 		pr: row.pr_number === 0 ? null : { number: row.pr_number, url: row.pr_url },
 		mcpServers: JSON.parse(row.mcp_names) as string[],
 		setup: row.setup_run === "" ? null : { run: row.setup_run, cacheFiles: JSON.parse(row.setup_cache_files) as string[] },
-		memoryBank: row.memory_bank,
 	};
 }
 

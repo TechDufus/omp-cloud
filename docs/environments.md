@@ -10,7 +10,7 @@ What it needs: nothing beyond the service. The setup of a repository needs the p
 
 Every VM is created from a template that the service builds once per omp version and recipe, in this order:
 
-1. The tools the runner itself needs: `ca-certificates`, `curl`, `git`, `jq`, `procps` and `sqlite3`. They are always installed.
+1. The tools the runner itself needs: `ca-certificates`, `curl`, `git`, `jq` and `procps`. They are always installed.
 2. The Debian packages of [`vm.packages`](api.md#settings), default `build-essential`, `python3`, `python3-venv`, `python3-pip`, `nodejs`, `npm`, `unzip` and `ripgrep`.
 3. omp, from omp's build service, at the version your omp runs.
 4. The lines of [`vm.setup`](api.md#settings), default none, run as **root** under `set -eux` in one script. Use it for what a package alone does not do, such as `npm install -g pnpm` or adding the VM user to a group.

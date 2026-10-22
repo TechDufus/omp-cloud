@@ -143,7 +143,6 @@ describe("whoami (1.1)", () => {
 			"threads.pr",
 			"secrets.store",
 			"mcp.proxy",
-			"threads.memory",
 			"threads.preview",
 			"threads.setup",
 		]);

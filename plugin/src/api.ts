@@ -604,11 +604,6 @@ export class CloudClient {
 		await this.#download(`/api/v1/threads/${encodeURIComponent(id)}/conversation`, dest, opts);
 	}
 
-	/** Streams the cloud agent's mnemopi memory (a tar of consistent database snapshots) to `dest`; a `not_found` CloudError (404) when there is none yet. */
-	async downloadMemory(id: string, dest: string, opts: CallOptions = {}): Promise<void> {
-		await this.#download(`/api/v1/threads/${encodeURIComponent(id)}/memory`, dest, opts);
-	}
-
 	async startLogin(provider: string, opts: CallOptions = {}): Promise<Login> {
 		return this.#call("POST", "/api/v1/logins", parseLogin, { ...opts, json: { provider } });
 	}

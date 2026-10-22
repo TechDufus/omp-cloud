@@ -329,7 +329,6 @@ describe("whoami", () => {
 				"threads.pr",
 				"secrets.store",
 				"mcp.proxy",
-				"threads.memory",
 				"threads.preview",
 				"threads.setup",
 			],
@@ -341,7 +340,6 @@ describe("whoami", () => {
 			modelPatterns: ["anthropic/*", "fake/*"],
 			ompVersion: OMP_VERSION,
 			gitHosts: ["git.example.test:8443", "github.com"],
-			vmWorkspace: "/home/user/work",
 			github: { app: null, signing: false },
 			mcpProxy: false,
 			mcpLogins: [],
@@ -418,7 +416,7 @@ describe("listing", () => {
 
 const SUMMARY_KEYS = sorted(
 	"id", "title", "name", "owner", "phase", "error", "turns", "queued", "model", "thinking", "ompVersion", "latest", "question", "result", "createdAt", "lastActivityAt",
-	"repo", "workspace", "archivedAt", "pr", "memoryBank", "metrics", "activity", "origin", "ref", "session", "scratch",
+	"repo", "workspace", "archivedAt", "pr", "metrics", "activity", "origin", "ref", "session", "scratch",
 );
 const TURN_KEYS = sorted(
 	"id", "state", "text", "by", "origin", "ircFrom", "ircId", "ircReplyTo", "queuedAt", "startedAt", "completedAt", "reply", "title", "error", "usage", "head", "filesChanged",
@@ -1186,31 +1184,11 @@ describe("result and conversation", () => {
 		expect(await (await call("GET", `${threadPath()}/conversation`)).text()).toBe("TAR-BYTES");
 	});
 
-	test("the memory is 404 until the runner stores it, then served as a tar; another owner's thread is 404", async () => {
+	test("there is no memory route: cloud agents carry no memory", async () => {
 		seed();
-		await expectError(await call("GET", `${threadPath()}/memory`), 404, "no memory yet");
-		await store.putBlob(ID, "memory.tar", new TextEncoder().encode("MEMORY-BYTES"), 1000);
-		const res = await call("GET", `${threadPath()}/memory`);
-		expect(res.status).toBe(200);
-		expect(res.headers.get("content-type")).toBe("application/x-tar");
-		expect(res.headers.get("accept-ranges")).toBe("bytes");
-		expect(res.headers.has("x-omp-branch")).toBe(false);
-		expect(await res.text()).toBe("MEMORY-BYTES");
-		const other = id(9);
-		seed(other, { owner: "someone-else" });
-		await store.putBlob(other, "memory.tar", new TextEncoder().encode("THEIRS"), 1000);
-		await expectError(await call("GET", `${threadPath(other)}/memory`), 404);
-		expect((await call("POST", `${threadPath()}/memory`)).status).toBe(404);
-	});
-
-	test("the summary and the detail name the memory bank, empty for none", async () => {
-		seed(ID, { memoryBank: "proj-ab12" });
-		seed(id(8));
-		expect(at(await jsonOf(await call("GET", threadPath())), "memoryBank")).toBe("proj-ab12");
-		expect(at(await jsonOf(await call("GET", threadPath(id(8)))), "memoryBank")).toBe("");
-		const list = await jsonOf(await call("GET", "/api/v1/threads"));
-		const banks = [at(list, "threads", 0, "memoryBank"), at(list, "threads", 1, "memoryBank")];
-		expect(banks.sort()).toEqual(["", "proj-ab12"]);
+		await expectError(await call("GET", `${threadPath()}/memory`), 404);
+		const detail = await jsonOf(await call("GET", threadPath()));
+		expect(detail).not.toHaveProperty("memoryBank");
 	});
 
 	test("X-Omp-Head names the newest recorded head; X-Omp-Base is empty for a full-history thread", async () => {

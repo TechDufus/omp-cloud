@@ -1036,23 +1036,6 @@ describe("requests that are already running when the device is revoked", () => {
 		expect(beyond.status).toBe(416);
 		expect(beyond.headers.get("content-range")).toBe("bytes */12");
 	});
-
-	test("a device downloads the thread's memory with ranges", async () => {
-		const device = await pair();
-		seedRunning(THREAD);
-		const get = (range?: string): Promise<Response> =>
-			remote("GET", `/api/v1/threads/${THREAD}/memory`, { token: device.token, headers: range === undefined ? {} : { Range: range } });
-		expect((await get()).status).toBe(404);
-		await store.putBlob(THREAD, "memory.tar", new TextEncoder().encode("MEMORY-BYTES"), 100);
-		const whole = await get();
-		expect(whole.status).toBe(200);
-		expect(whole.headers.get("content-type")).toBe("application/x-tar");
-		expect(whole.headers.get("x-omp-branch")).toBeNull();
-		expect(await whole.text()).toBe("MEMORY-BYTES");
-		const partial = await get("bytes=0-5");
-		expect(partial.status).toBe(206);
-		expect(await partial.text()).toBe("MEMORY");
-	});
 });
 
 describe("a real TLS listener", () => {

@@ -304,13 +304,10 @@ describe("success", () => {
 		expect((error as ApiError).message).toBe("mcp server self may not point at the service host");
 	});
 
-	test("the memory bank is stored on the thread, and an invalid one refuses the upload", async () => {
+	test("a memory field of the request is ignored: the thread is made and carries no bank", async () => {
 		const thread = await createThreadFromUpload(store, withRequest(full({ memory: { bank: "proj-ab12" } }), [["source", bytes("src")]]), OWNER, options());
-		expect(thread.memoryBank).toBe("proj-ab12");
-		expect(store.getThread(thread.id)?.memoryBank).toBe("proj-ab12");
-		const error = await createThreadFromUpload(store, withRequest(full({ memory: { bank: "../x" } }), [["source", bytes("src")]]), OWNER, options()).catch((caught: unknown) => caught);
-		expect(error).toBeInstanceOf(ApiError);
-		expect((error as ApiError).status).toBe(400);
+		expect(thread).not.toHaveProperty("memoryBank");
+		expect(store.getThread(thread.id)).not.toHaveProperty("memoryBank");
 	});
 
 	test("the repository setup is stored on the thread with the default cache files, and an invalid one refuses the upload", async () => {

@@ -12,7 +12,6 @@ import { launchBatch, type LaunchBatchInput, type LaunchedThread, type LaunchOut
 import type { TitleGenerator } from "../src/naming";
 import { git } from "../src/snapshot";
 import type { HandoffRequest, Whoami } from "../src/types";
-import { projectBankName } from "../src/mnemopi";
 import { summary, whoami } from "./builders";
 import { fakeHost, fakePi, fakeSettings, type FakeHost, type FakePiOptions } from "./fakes";
 import { cleanup, commitFile, configureRepo, isolateOmp, ompHome, syncInto, tmp } from "./helpers";
@@ -569,49 +568,6 @@ describe("the handoff request", () => {
 		const { result } = await launch({ withSession: false });
 		expect(only().keys).toEqual(["request", "source", "setup"]);
 		expect(result.summary.conversation).toBe("none");
-	});
-});
-
-describe("the memory bank of a handoff", () => {
-	const VM = "/home/user/work";
-
-	/** A setup whose omp uses mnemopi with a project bank for the repository, and a service that reports `who`. */
-	async function memoryLaunch(who: Partial<Whoami>): Promise<{ from: string; to: string; names: string[] }> {
-		const s = await setup();
-		const from = projectBankName(s.repo, undefined);
-		await mkdir(join(s.agentDir, "memories", "mnemopi", "banks", from), { recursive: true });
-		await writeFile(join(s.agentDir, "memories", "mnemopi", "banks", from, "mnemopi.db"), "bank bytes");
-		const settings = await fakeSettings({ agentDir: s.agentDir, cwd: s.repo, configFiles: [s.outside, s.inside], global: "memory:\n  backend: mnemopi\n" });
-		const real = realClient();
-		const client: LaunchClient = { whoami: async () => whoami({ modelPatterns: patterns, ...who }), createThread: (p, o) => real.createThread(p, o) };
-		await launchHandoff(input(s, { settings, withSession: false }, client).input);
-		const archive = await saved(only().files.setup as File, "setup.tar.gz");
-		const names = (await run("tar", ["-tzf", archive])).stdout.split("\n").map(n => n.replace(/^\.\//, ""));
-		return { from, to: projectBankName(VM, undefined), names };
-	}
-
-	test("the request names the local bank, and the shipped bank carries the name the VM derives for its workspace", async () => {
-		const { from, to, names } = await memoryLaunch({ capabilities: ["threads.memory"], vmWorkspace: VM });
-		expect(only().request.memory).toEqual({ bank: from });
-		expect(names).toContain(`memories/mnemopi/banks/${to}/mnemopi.db`);
-		expect(names.filter(n => n.includes(`banks/${from}`))).toEqual([]);
-	});
-
-	test("a service without threads.memory gets no memory field and the bank keeps its name", async () => {
-		const { from, names } = await memoryLaunch({ capabilities: [], vmWorkspace: VM });
-		expect(only().request.memory).toBeUndefined();
-		expect(names).toContain(`memories/mnemopi/banks/${from}/mnemopi.db`);
-	});
-
-	test("a service that reports no VM workspace gets no memory field either", async () => {
-		const { from, names } = await memoryLaunch({ capabilities: ["threads.memory"], vmWorkspace: "" });
-		expect(only().request.memory).toBeUndefined();
-		expect(names).toContain(`memories/mnemopi/banks/${from}/mnemopi.db`);
-	});
-
-	test("without the mnemopi backend nothing is sent", async () => {
-		await launch({ withSession: false });
-		expect(only().request.memory).toBeUndefined();
 	});
 });
 

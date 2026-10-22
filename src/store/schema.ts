@@ -302,4 +302,8 @@ export const MIGRATIONS: readonly string[] = [
 		last_used_at TEXT NOT NULL
 	);
 	`,
+	// 16: cloud agents carry no memory, so the memory bank migration 14 added goes (SQLite DROP COLUMN).
+	`
+	ALTER TABLE threads DROP COLUMN memory_bank;
+	`,
 ];

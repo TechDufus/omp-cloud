@@ -1348,7 +1348,7 @@ describe("migration 13", () => {
 });
 
 describe("migration 14", () => {
-	test("a version 13 database gains memory_bank, empty for its threads", async () => {
+	test("a version 13 database gains memory_bank, empty for its threads (applied raw: migration 16 drops the column again)", async () => {
 		store.close();
 		await rm(dir, { recursive: true, force: true });
 		await mkdir(join(dir, "threads"), { recursive: true });
@@ -1362,24 +1362,46 @@ describe("migration 14", () => {
 				VALUES (?, 'owner', 'idle', 'old', 'm', '', 'repo', '', '', '', 'def', '', '', '', '', '', '[]', '[]', ?, ?)`,
 			)
 			.run(ID, iso(0), iso(0));
+		raw.run(MIGRATIONS[13] as string);
+		raw.run("PRAGMA user_version = 14");
+		expect(raw.query<{ memory_bank: string }, []>("SELECT memory_bank FROM threads").all()).toEqual([{ memory_bank: "" }]);
 		raw.close();
 
 		store = open();
-		expect(store.getThread(ID)?.memoryBank).toBe("");
+		expect(store.getThread(ID)?.title).toBe("old");
+		store.close();
+		store = open();
+	});
+});
+
+describe("migration 16", () => {
+	test("a version 15 database loses memory_bank and keeps its threads", async () => {
+		store.close();
+		await rm(dir, { recursive: true, force: true });
+		await mkdir(join(dir, "threads"), { recursive: true });
+		const raw = new Database(join(dir, "omp-cloud.db"));
+		for (const migration of MIGRATIONS.slice(0, 15)) raw.run(migration);
+		raw.run("PRAGMA user_version = 15");
+		raw
+			.query(
+				`INSERT INTO threads (id, owner, phase, title, model, thinking, repo_name, repo_remote_url, repo_base_ref, repo_base_commit,
+					repo_handoff_commit, repo_local_branch, home, workspace, author_name, author_email, secret_files, secret_env, memory_bank, created_at, last_activity_at)
+				VALUES (?, 'owner', 'idle', 'old', 'm', '', 'repo', '', '', '', 'def', '', '', '', '', '', '[]', '[]', 'proj-abc', ?, ?)`,
+			)
+			.run(ID, iso(0), iso(0));
+		raw.close();
+
+		store = open();
+		expect(store.getThread(ID)?.title).toBe("old");
 		store.close();
 
 		const check = new Database(join(dir, "omp-cloud.db"), { readonly: true });
 		expect(check.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(MIGRATIONS.length);
-		expect(MIGRATIONS.length).toBeGreaterThanOrEqual(14);
-		expect(check.query<{ name: string }, []>("SELECT name FROM pragma_table_info('threads')").all().map((row) => row.name)).toContain("memory_bank");
+		expect(MIGRATIONS.length).toBeGreaterThanOrEqual(16);
+		expect(check.query<{ name: string }, []>("SELECT name FROM pragma_table_info('threads')").all().map((row) => row.name)).not.toContain("memory_bank");
+		expect(check.query<{ n: number }, []>("SELECT count(*) AS n FROM threads").get()?.n).toBe(1);
 		check.close();
 		store = open();
-	});
-
-	test("a thread keeps the memory bank it was created with", () => {
-		expect(store.createThread(ID, newThread({ memoryBank: "project-abc" })).thread.memoryBank).toBe("project-abc");
-		expect(store.createThread("bbbbbbbbbbbb", newThread()).thread.memoryBank).toBe("");
-		expect(store.getThread(ID)?.memoryBank).toBe("project-abc");
 	});
 });
 
