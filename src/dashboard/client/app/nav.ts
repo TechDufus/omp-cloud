@@ -1,4 +1,4 @@
-import { Coins, KeyRound, LayoutGrid, type LucideIcon, MessagesSquare, Server, Settings, Smartphone } from "lucide-react";
+import { Coins, GitBranch, KeyRound, LayoutGrid, type LucideIcon, MessagesSquare, Server, Settings, Smartphone } from "lucide-react";
 import type { PageId } from "./route";
 
 export interface NavItem {
@@ -31,6 +31,7 @@ export const NAV: readonly NavGroup[] = [
 		items: [
 			{ id: "devices", label: "Devices", icon: Smartphone, hash: "#/devices", hotkey: "d" },
 			{ id: "logins", label: "Logins", icon: KeyRound, hash: "#/logins", hotkey: "l" },
+			{ id: "github", label: "GitHub", icon: GitBranch, hash: "#/github", hotkey: "g" },
 		],
 	},
 	{

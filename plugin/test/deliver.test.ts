@@ -159,6 +159,15 @@ describe("delivery by origin", () => {
 		expect(card.kind === "turn" && card.reply.length).toBe(4000);
 	});
 
+	test("the turn card carries the thread's pull request URL, empty when it has none", () => {
+		const { pi, host, d } = setup("user", true);
+		d.turn(host.host, { ...thread(), pr: { number: 7, url: "https://github.com/o/r/pull/7" } }, done(), []);
+		d.turn(host.host, thread(), done(), []);
+		const [withPr, without] = pi.sent.map(m => m.message.details as CardDetails);
+		expect(withPr?.kind === "turn" && withPr.prUrl).toBe("https://github.com/o/r/pull/7");
+		expect(without?.kind === "turn" && without.prUrl).toBe("");
+	});
+
 	test("a failed turn carries its error", () => {
 		const { pi, host, d } = setup("user", true);
 		d.turn(host.host, thread(), done({ state: "failed", error: "stopped by owner", reply: "" }), []);

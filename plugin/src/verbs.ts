@@ -25,7 +25,7 @@ import { DashboardForwarder } from "./forwarder";
 import { HubComponent, type HubResult } from "./hub";
 import { Inbox } from "./inbox";
 import { ProgramStatus, type TerminalSink } from "./program-status";
-import { launchBatch, type LaunchedThread } from "./launch";
+import { launchBatch, modelServed, sessionModelOf, type LaunchedThread } from "./launch";
 import { loginHint, loginLines, runLogin, serverHostOf } from "./login";
 import { PairComponent, type PairOutcome } from "./pair";
 import { refusePairingCode } from "./pairing";
@@ -594,15 +594,7 @@ export class Cloud implements CardActions, ToolCloud {
 		const s = await this.#session(ctx, "quick");
 		if (parsed.kind === "update") return this.#updateCommand(ctx, s);
 		if (parsed.kind === "login") {
-			// A paired device is refused before any service call: every login route is owner-token only.
-			const serverHost = serverHostOf(s.conn.paired);
-			if (serverHost !== undefined) throw new UserError(`☁ a paired device cannot log the cloud in: ${loginHint(parsed.provider, serverHost)}`);
-			// The TUI shows the sign-in link as a card, and a card waits for an idle agent: refuse before a login starts rather than prompt with no link on screen.
-			if (ctx.mode === "tui" && !ctx.isIdle()) {
-				throw new UserError("☁ the agent is working: run /cloud login again when it is idle, so the sign-in link can go in the transcript");
-			}
-			const show = ctx.mode === "tui" ? (l: Login) => this.#deliver.post(ctx, loginCard(l)) : (l: Login) => ctx.ui.notify(loginLines(l).join("\n"), "info");
-			await runLogin(s.client, ctx.ui, parsed.provider, show);
+			await this.#loginFlow(ctx, s, parsed.provider);
 			return;
 		}
 		if (parsed.kind === "dashboard") {
@@ -1252,6 +1244,32 @@ export class Cloud implements CardActions, ToolCloud {
 	}
 
 	/**
+	 * When the cloud cannot run this session's model yet and the user can fix that here (the TUI, an idle agent, an owner
+	 * connection), asks to log the cloud in to the model's provider and does so. Every other case, and a refusal, change nothing:
+	 * the launch then fails with the usual "cannot run" error.
+	 */
+	async #offerLogin(ctx: Host, s: Session): Promise<void> {
+		const model = sessionModelOf(ctx);
+		if (model === "" || serverHostOf(s.conn.paired) !== undefined || ctx.mode !== "tui" || !ctx.isIdle()) return;
+		if (modelServed((await s.client.whoami()).modelPatterns, model)) return;
+		const provider = model.split("/")[0] ?? model;
+		if (await ctx.ui.confirm("Log the cloud in?", `The cloud cannot run ${provider} models yet. Log the cloud broker in to ${provider} now?`)) await this.#loginFlow(ctx, s, provider);
+	}
+
+	/** `/cloud login <provider>`: the owner signs the cloud's broker in. The TUI shows the sign-in link as a card, the other modes as a notice. */
+	async #loginFlow(ctx: Host, s: Session, provider: string): Promise<void> {
+		// A paired device is refused before any service call: every login route is owner-token only.
+		const serverHost = serverHostOf(s.conn.paired);
+		if (serverHost !== undefined) throw new UserError(`☁ a paired device cannot log the cloud in: ${loginHint(provider, serverHost)}`);
+		// The TUI shows the sign-in link as a card, and a card waits for an idle agent: refuse before a login starts rather than prompt with no link on screen.
+		if (ctx.mode === "tui" && !ctx.isIdle()) {
+			throw new UserError("☁ the agent is working: run /cloud login again when it is idle, so the sign-in link can go in the transcript");
+		}
+		const show = ctx.mode === "tui" ? (l: Login) => this.#deliver.post(ctx, loginCard(l)) : (l: Login) => ctx.ui.notify(loginLines(l).join("\n"), "info");
+		await runLogin(s.client, ctx.ui, provider, show);
+	}
+
+	/**
 	 * `/cloud <task>`: hands the current conversation and repository to the cloud, posts the launch card and follows the thread
 	 * for the user. A failure is thrown.
 	 */
@@ -1259,6 +1277,7 @@ export class Cloud implements CardActions, ToolCloud {
 		refusePairingCode(task);
 		this.#ctx = ctx;
 		const s = await this.#session(ctx, "quick");
+		await this.#offerLogin(ctx, s);
 		return this.#serialized(s.root ?? ctx.cwd, async () => {
 			const batch = await launchBatch({
 				host: ctx,

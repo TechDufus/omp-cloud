@@ -444,6 +444,11 @@ export class Store {
 			.run(context.tokens, context.window, context.at, threadId);
 	}
 
+	/** Records the pull request the thread's pushes opened. No event, `lastActivityAt` does not move; a no-op for an unknown or deleted thread. */
+	setThreadPullRequest(threadId: string, pr: { number: number; url: string }): void {
+		this.db.query("UPDATE threads SET pr_number = ?, pr_url = ? WHERE id = ? AND deleted_at IS NULL").run(pr.number, pr.url, threadId);
+	}
+
 	/**
 	 * One transaction marks the thread deleted (the row stays as a tombstone with phase `deleted`) and deletes its turns,
 	 * questions and events; then it calls `deleted()` on its listeners and removes its blobs. A failed blob removal is

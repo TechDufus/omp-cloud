@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Exec, ExecError, localExec, shellQuote } from "./exec";
-import { applyResultBundle, finalizeTurn, restoreRepo } from "./git";
+import { adoptSigned, applyResultBundle, finalizeTurn, restoreRepo } from "./git";
 
 const BRANCH = "omp-cloud/aaaaaaaaaaaa";
 const NO_HOOKS_IDENTITY = "-c user.name=owner -c user.email=owner@example.com -c commit.gpgsign=false";
@@ -285,5 +285,54 @@ describe("applyResultBundle", () => {
 		await restore({ workspace: fresh });
 
 		await expect(apply({ branch: "omp-cloud/missing" })).rejects.toBeInstanceOf(ExecError);
+	});
+});
+
+describe("adoptSigned", () => {
+	let bundlePath: string;
+	let head: string;
+
+	/** A turn that adds c.txt, then a bundle of the same branch rewritten onto a commit with `tree` (the turn's own by default). */
+	async function signedBundle(tree?: string): Promise<{ bundle: string; signed: string }> {
+		await restore();
+		await writeFile(join(workspace, "c.txt"), "c\n");
+		head = (await finalizeTurn(exec, { workspace, branch: BRANCH, baseCommit: "", message: "turn one", uploadedHead: handoff, bundlePath })).head;
+		const service = join(dir, "service");
+		await exec(`git clone -q --bare ${q(workspace)} ${q(service)}`);
+		const turnTree = tree ?? (await git(service, `rev-parse ${head}^{tree}`));
+		const signed = await git(service, `-c user.name=svc -c user.email=svc@example.com commit-tree ${turnTree} -p ${handoff} -m ${q("turn one (signed)")}`);
+		await git(service, `update-ref refs/heads/${BRANCH} ${signed}`);
+		const bundle = join(dir, "signed.bundle");
+		await git(service, `bundle create ${q(bundle)} refs/heads/${BRANCH} ^${handoff}`);
+		return { bundle, signed };
+	}
+
+	beforeEach(() => {
+		bundlePath = join(dir, "result.bundle");
+	});
+
+	test("moves the branch and HEAD onto the signed commits and keeps the files", async () => {
+		const { bundle, signed } = await signedBundle();
+
+		await adoptSigned(exec, { workspace, bundlePath: bundle, branch: BRANCH, head: signed });
+
+		expect(signed).not.toBe(head);
+		expect(await git(workspace, "rev-parse HEAD")).toBe(signed);
+		expect(await git(workspace, `rev-parse refs/heads/${BRANCH}`)).toBe(signed);
+		expect(await git(workspace, "symbolic-ref --short HEAD")).toBe(BRANCH);
+		expect(await git(workspace, "status --porcelain")).toBe("");
+		expect(await Bun.file(join(workspace, "c.txt")).text()).toBe("c\n");
+		expect(await exec(`git -C ${q(workspace)} for-each-ref refs/omp-cloud/signed`)).toBe("");
+	});
+
+	test("throws when the signed tree is not the workspace's, and moves nothing", async () => {
+		const handoffTree = await git(source, `rev-parse ${handoff}^{tree}`);
+		const { bundle, signed } = await signedBundle(handoffTree);
+
+		await expect(adoptSigned(exec, { workspace, bundlePath: bundle, branch: BRANCH, head: signed })).rejects.toThrow("the signed result does not match the workspace");
+
+		expect(await git(workspace, "rev-parse HEAD")).toBe(head);
+		expect(await git(workspace, `rev-parse refs/heads/${BRANCH}`)).toBe(head);
+		expect(await exec(`git -C ${q(workspace)} for-each-ref refs/omp-cloud/signed`)).toBe("");
 	});
 });

@@ -17,6 +17,7 @@ import {
 	pushQuestion,
 	PushStep,
 	pushTarget,
+	type PullRequests,
 	type PushFacts,
 	type PushRecord,
 } from "./push";
@@ -153,6 +154,11 @@ describe("PushStep", () => {
 	/** Called when the step pauses the clock, i.e. once its question is open. */
 	let onPause: () => void = () => {};
 	let unsubscribe: () => void;
+	/** Every event with its kind. */
+	let log: { kind: string; text: string }[];
+	/** What `PullRequests` the step gets; null: none. */
+	let pulls: PullRequests | null;
+	let appConnected: boolean;
 	let step: PushStep;
 
 	const newThread = (): NewThread => ({
@@ -184,9 +190,12 @@ describe("PushStep", () => {
 		thread = found;
 		pushes = [];
 		refusal = null;
-		outcome = { pushed: true, error: "" };
+		outcome = { pushed: true, error: "", defaultBranch: "main" };
 		events = [];
 		clockCalls = [];
+		log = [];
+		pulls = null;
+		appConnected = false;
 		step = makeStep(1800);
 		// The runner calls `recheck` on every answer and expiry of the thread.
 		unsubscribe = store.subscribe(ID, {
@@ -216,6 +225,8 @@ describe("PushStep", () => {
 					},
 				},
 				settings,
+				pulls,
+				github: { connected: () => appConnected },
 				questionTimeoutSeconds,
 				clock: {
 					pause: () => {
@@ -224,15 +235,18 @@ describe("PushStep", () => {
 					},
 					resume: () => clockCalls.push("resume"),
 				},
-				event: text => events.push(text),
+				event: (text, kind = "push") => {
+					events.push(text);
+					log.push({ kind, text });
+				},
 			},
 			thread,
 			turn,
 		);
 	}
 
-	const run = (over: Partial<{ outcome: "completed" | "failed"; stopped: boolean; head: string }> = {}) =>
-		step.run({ outcome: "completed", stopped: false, head: HEAD, ...over });
+	const run = (over: Partial<{ outcome: "completed" | "failed"; stopped: boolean; head: string; reply: string }> = {}) =>
+		step.run({ outcome: "completed", stopped: false, head: HEAD, reply: "I did the work.", ...over });
 
 	/** The service's push question: a model `ask` may reuse the key, but only the service posts one without omp's request id. */
 	const pushQuestionOf = (): Question | undefined => store.turns(ID)[0]?.questions.find(q => q.key === PUSH_QUESTION_KEY && q.requestId === null);
@@ -294,7 +308,7 @@ describe("PushStep", () => {
 
 	test("a failed push keeps git's reason and no ref", async () => {
 		settings.apply({ "git.push": "auto" }, "owner");
-		outcome = { pushed: false, error: `omp-cloud/${ID} on ${REMOTE} has commits the result lacks; not force-pushing` };
+		outcome = { pushed: false, error: `omp-cloud/${ID} on ${REMOTE} has commits the result lacks; not force-pushing`, defaultBranch: "main" };
 		expect(await run()).toEqual({ pushed: false, pushError: outcome.error, pushRef: "" });
 		expect(events).toEqual([`push failed: ${outcome.error}`]);
 	});
@@ -318,6 +332,147 @@ describe("PushStep", () => {
 		expect(await run()).toEqual(NOT_PUSHED);
 		expect(pushes).toEqual([]);
 		expect(await run({ head: "4444444444444444444444444444444444444444" })).toMatchObject({ pushed: true });
+	});
+
+	describe("pull requests", () => {
+		type Open = Parameters<PullRequests["open"]>[0];
+		const GITHUB = "https://github.com/acme/app";
+		const URL_7 = "https://github.com/acme/app/pull/7";
+		let opened: Open[];
+		let verifiedCalls: string[];
+		let action: "opened" | "updated" | "unchanged" | "closed";
+		let openError: Error | null;
+		let verdict: { verified: boolean; reason: string } | Error;
+
+		beforeEach(() => {
+			settings.apply({ "git.push": "auto" }, "owner");
+			opened = [];
+			verifiedCalls = [];
+			action = "opened";
+			openError = null;
+			verdict = { verified: true, reason: "valid" };
+			pulls = {
+				open: async input => {
+					opened.push(input);
+					if (openError !== null) throw openError;
+					return { number: 7, url: URL_7, action };
+				},
+				verified: async (owner, repo, sha) => {
+					verifiedCalls.push(`${owner}/${repo}@${sha}`);
+					if (verdict instanceof Error) throw verdict;
+					return verdict;
+				},
+			};
+			appConnected = true;
+			thread = { ...thread, repo: { ...thread.repo, remoteURL: GITHUB } };
+			step = makeStep(1800);
+		});
+
+		const prEvents = () => log.filter(entry => entry.kind === "pr");
+
+		test("opens a draft pull request into the thread's base branch after the push, and remembers it", async () => {
+			const record = await run();
+			expect(record).toEqual({ pushed: true, pushError: "", pushRef: `omp-cloud/${ID}` });
+			expect(opened).toHaveLength(1);
+			expect(opened[0]).toMatchObject({ owner: "acme", repo: "app", head: `omp-cloud/${ID}`, base: "main", title: "t", draft: true });
+			expect(opened[0]?.section).toStartWith("<!-- omp-cloud:begin -->");
+			expect(opened[0]?.section).toContain(`thread \`${ID}\``);
+			expect(opened[0]?.section).toContain("I did the work.");
+			expect(opened[0]?.section).toEndWith("<!-- omp-cloud:end -->");
+			expect(prEvents()).toEqual([{ kind: "pr", text: `opened draft pull request #7 ${URL_7}` }]);
+			expect(store.getThread(ID)?.pr).toEqual({ number: 7, url: URL_7 });
+		});
+
+		test("git.pr ready opens a ready pull request, and the name titles it when the thread has one", async () => {
+			settings.apply({ "git.pr": "ready" }, "owner");
+			thread = { ...thread, name: "Fix the login" };
+			step = makeStep(1800);
+			await run();
+			expect(opened[0]).toMatchObject({ draft: false, title: "Fix the login" });
+			expect(prEvents()).toEqual([{ kind: "pr", text: `opened pull request #7 ${URL_7}` }]);
+		});
+
+		test("a thread without a base ref uses the remote's default branch", async () => {
+			outcome = { pushed: true, error: "", defaultBranch: "trunk" };
+			thread = { ...thread, repo: { ...thread.repo, baseRef: "" } };
+			step = makeStep(1800);
+			await run();
+			expect(opened[0]?.base).toBe("trunk");
+		});
+
+		test("git.pr off opens none", async () => {
+			settings.apply({ "git.pr": "off" }, "owner");
+			expect(await run()).toMatchObject({ pushed: true });
+			expect(opened).toEqual([]);
+			expect(prEvents()).toEqual([]);
+			expect(store.getThread(ID)?.pr).toBeNull();
+		});
+
+		test.each<[string, () => void]>([
+			["the push failed", () => (outcome = { pushed: false, error: "no", defaultBranch: "main" })],
+			["the remote is not github.com", () => (thread = { ...thread, repo: { ...thread.repo, remoteURL: REMOTE } })],
+			["the App is not connected", () => (appConnected = false)],
+			["there is no pull request client", () => (pulls = null)],
+		])("no pull request when %s", async (_label, change) => {
+			change();
+			step = makeStep(1800);
+			await run();
+			expect(opened).toEqual([]);
+			expect(verifiedCalls).toEqual([]);
+			expect(prEvents()).toEqual([]);
+		});
+
+		test("an updated pull request is reported, an unchanged one is only remembered", async () => {
+			action = "updated";
+			await run();
+			expect(prEvents()).toEqual([{ kind: "pr", text: `updated pull request #7 ${URL_7}` }]);
+			expect(store.getThread(ID)?.pr).toEqual({ number: 7, url: URL_7 });
+
+			log = [];
+			action = "unchanged";
+			await run();
+			expect(prEvents()).toEqual([]);
+		});
+
+		test("a pull request the owner closed is not replaced and not remembered", async () => {
+			action = "closed";
+			expect(await run()).toMatchObject({ pushed: true });
+			expect(prEvents()).toEqual([{ kind: "pr", text: "pull request #7 was closed; not opening another" }]);
+			expect(store.getThread(ID)?.pr).toBeNull();
+		});
+
+		test("a pull request failure is an event and the push stays pushed", async () => {
+			openError = new Error("GitHub answered 502");
+			expect(await run()).toEqual({ pushed: true, pushError: "", pushRef: `omp-cloud/${ID}` });
+			expect(prEvents()).toEqual([{ kind: "pr", text: "pull request failed: GitHub answered 502" }]);
+			expect(store.getThread(ID)?.pr).toBeNull();
+		});
+
+		test("with git.sign ssh the head is checked and reported, and a failed check says nothing", async () => {
+			settings.apply({ "git.sign": "ssh" }, "owner");
+			await run();
+			expect(verifiedCalls).toEqual([`acme/app@${HEAD}`]);
+			expect(log.filter(entry => entry.kind === "sign")).toEqual([{ kind: "sign", text: `GitHub shows ${HEAD.slice(0, 8)} as Verified` }]);
+
+			log = [];
+			verdict = { verified: false, reason: "unknown_key" };
+			await run();
+			expect(log.filter(entry => entry.kind === "sign")).toEqual([{ kind: "sign", text: `GitHub does not verify ${HEAD.slice(0, 8)}: unknown_key` }]);
+
+			log = [];
+			verdict = new Error("offline");
+			await run();
+			expect(log.filter(entry => entry.kind === "sign")).toEqual([]);
+		});
+
+		test("git.sign off asks GitHub nothing about the signature, even with git.pr off", async () => {
+			settings.apply({ "git.pr": "off" }, "owner");
+			await run();
+			expect(verifiedCalls).toEqual([]);
+			settings.apply({ "git.sign": "ssh" }, "owner");
+			await run();
+			expect(verifiedCalls).toEqual([`acme/app@${HEAD}`]);
+		});
 	});
 
 	describe("ask", () => {

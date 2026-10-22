@@ -366,6 +366,8 @@ export interface Thread {
 	session: string;
 	/** A thread without a repository: its base is an empty repository the service synthesized, and it never pushes. */
 	scratch: boolean;
+	/** The pull request the thread's pushes opened; null before any. */
+	pr: { number: number; url: string } | null;
 }
 
 /** A validated create request: everything `Store.createThread` needs besides the id. */

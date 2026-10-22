@@ -360,6 +360,7 @@ export async function status(env: Env): Promise<OpOutput> {
 		if (include.includes("result")) {
 			lines.push(result ? `result: ${result.branch} @ ${result.head.slice(0, 8)} (${diffstat(result)}; ${result.pushed ? pushedText(result) : result.pushError ? "push failed" : "not pushed"})` : "result: none yet");
 		}
+		if (d.pr) lines.push(`pr: ${d.pr.url}`);
 		if (d.question) lines.push(`question: ${d.question.kind}${d.question.expiresAt ? `, expires ${d.question.expiresAt}` : ", no timeout"}`);
 		lines.push(`next: ${nextStep(d, follow)}`);
 		details.push({

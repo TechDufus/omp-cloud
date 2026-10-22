@@ -537,6 +537,20 @@ describe("the shipped extensions", () => {
 		expect(warnings).toEqual(["plugin demo-plugin is enabled here but not shipped; the cloud agent runs without it"]);
 		expect((await shippedNames()).filter(n => n.includes("demo-plugin") || n.includes("ext.ts"))).toEqual([]);
 	});
+
+	test("a handoff commit that could not be signed is named in the launch warnings, and the handoff goes on", async () => {
+		const s = await setup();
+		const prog = join(await tmp("omp-cloud-gpg-"), "fake-gpg");
+		await writeFile(prog, "#!/bin/sh\ncat >/dev/null\nexit 2\n", { mode: 0o755 });
+		await git(s.repo, ["config", "commit.gpgsign", "true"]);
+		await git(s.repo, ["config", "gpg.program", prog]);
+		await writeFile(join(s.repo, "dirty.txt"), "uncommitted\n");
+
+		const { warnings } = await launchHandoff(input(s, { withSession: false }, realClient()).input);
+
+		expect(warnings.filter(w => w.startsWith("the handoff commit is unsigned: "))).toHaveLength(1);
+		expect(uploads).toHaveLength(1);
+	});
 });
 
 // ---------------------------------------------------------------------------

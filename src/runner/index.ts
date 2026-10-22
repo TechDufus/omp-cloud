@@ -7,6 +7,9 @@ import type { Config } from "../config";
 import type { GatewayClients } from "../gateway/clients";
 import type { GatewayModels } from "../gateway/models";
 import type { GitService } from "../git";
+import type { SigningKey } from "../git/signing-key";
+import type { GitHubApi } from "../github/api";
+import type { GitHubApp } from "../github/app";
 import type { Settings } from "../settings";
 import type { Store } from "../store";
 import type { Vmon } from "../vmon";
@@ -29,6 +32,12 @@ export interface RunnerOptions {
 	settings: Settings;
 	/** Completes delta handoffs to the full history each VM restores from. */
 	git: GitService;
+	/** The service's SSH signing key for `git.sign`. */
+	signingKey: SigningKey;
+	/** The connected GitHub App. */
+	github: GitHubApp;
+	/** GitHub's REST client, for pull requests. */
+	githubApi: GitHubApi;
 	/** The service host's omp version. */
 	ompVersion: string;
 }

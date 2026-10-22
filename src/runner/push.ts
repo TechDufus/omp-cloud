@@ -4,6 +4,11 @@
  * pushes. The step runs after the turn's git work and before the turn completes, so the outcome lands on the turn.
  */
 import type { GitService } from "../git";
+import type { GitHubApi } from "../github/api";
+import type { GitHubApp } from "../github/app";
+import { pullRequestSection, upsertPullRequest } from "../github/pulls";
+import { githubRepoOf } from "../github/repo";
+import { isRecord } from "../guards";
 import type { Settings } from "../settings";
 import { THREAD_PLACEHOLDER } from "../settings/registry";
 import type { Store } from "../store";
@@ -114,12 +119,46 @@ export interface PushDeps {
 	store: Store;
 	git: Pick<GitService, "normalize" | "pushRefusal" | "push">;
 	settings: Pick<Settings, "get">;
+	/** The GitHub pull requests of the pushed branch; null when no GitHub App is connected. */
+	pulls: PullRequests | null;
+	github: Pick<GitHubApp, "connected">;
 	/** `runner.questionTimeoutSeconds` */
 	questionTimeoutSeconds: number;
 	/** The turn's clock: it stands still while the question is open. */
 	clock: { pause(): void; resume(): void };
-	/** Appends an event of kind `push` to the turn. */
-	event(text: string): void;
+	/** Appends an event to the turn: kind `push` unless `kind` says `pr` or `sign`. */
+	event(text: string, kind?: "push" | "pr" | "sign"): void;
+}
+
+/** What the push step needs of GitHub's pull requests. */
+export interface PullRequests {
+	open(input: {
+		owner: string;
+		repo: string;
+		head: string;
+		base: string;
+		title: string;
+		section: string;
+		draft: boolean;
+	}): Promise<{ number: number; url: string; action: "opened" | "updated" | "unchanged" | "closed"; draft?: boolean }>;
+	/** Whether GitHub shows `sha` as Verified, and the reason it gives. */
+	verified(owner: string, repo: string, sha: string): Promise<{ verified: boolean; reason: string }>;
+}
+
+/** The pull requests of a connected GitHub App: calls authenticate with a token the App mints for the repository. */
+export function pullRequestsOf(github: Pick<GitHubApp, "tokenFor">, api: GitHubApi): PullRequests {
+	return {
+		async open(input) {
+			return upsertPullRequest(api, await github.tokenFor(input.owner, input.repo), input);
+		},
+		async verified(owner, repo, sha) {
+			const token = await github.tokenFor(owner, repo);
+			const { json } = await api.request<unknown>("GET", `/repos/${owner}/${repo}/commits/${sha}`, { kind: "bearer", value: token });
+			const verification = isRecord(json) && isRecord(json.commit) ? json.commit.verification : undefined;
+			if (!isRecord(verification) || typeof verification.verified !== "boolean") throw new Error("GitHub gave no verification");
+			return { verified: verification.verified, reason: typeof verification.reason === "string" ? verification.reason : "" };
+		},
+	};
 }
 
 /** The facts of the turn's end that the step cannot read from the store. */
@@ -129,6 +168,8 @@ export interface PushRun {
 	stopped: boolean;
 	/** The turn's head after git finalize. */
 	head: string;
+	/** The turn's reply: what a pull request's omp-cloud section quotes. */
+	reply: string;
 }
 
 function isMissingThread(error: unknown): boolean {
@@ -223,7 +264,50 @@ export class PushStep {
 		});
 		if (!outcome.pushed) return this.#failed(outcome.error);
 		this.deps.event(`pushed ${target} to ${remote}`);
+		await this.#afterPush({ remote, target, head: input.head, reply: input.reply, defaultBranch: outcome.defaultBranch });
 		return { pushed: true, pushError: "", pushRef: target };
+	}
+
+	/**
+	 * Opens or updates the pull request of the pushed branch and reports whether GitHub shows the head as Verified. It
+	 * only adds events and the thread's `pr`: a failure here never touches the push's record.
+	 */
+	async #afterPush(input: { remote: string; target: string; head: string; reply: string; defaultBranch: string }): Promise<void> {
+		const { store, settings, pulls, github, event } = this.deps;
+		const { thread } = this;
+		const repo = githubRepoOf(input.remote);
+		if (repo === null || pulls === null || !github.connected()) return;
+		const mode = settings.get("git.pr");
+		if (mode !== "off") {
+			try {
+				const base = thread.repo.baseRef || input.defaultBranch;
+				if (base === "") throw new Error("the base branch is unknown");
+				const pr = await pulls.open({
+					...repo,
+					head: input.target,
+					base,
+					title: thread.name || thread.title,
+					section: pullRequestSection({ threadId: thread.id, name: thread.name || thread.title, model: thread.model || "default", reply: input.reply }),
+					draft: mode === "draft",
+				});
+				if (pr.action === "closed") event(`pull request #${pr.number} was closed; not opening another`, "pr");
+				else {
+					store.setThreadPullRequest(thread.id, { number: pr.number, url: pr.url });
+					if (pr.action === "opened") event(`opened ${(pr.draft ?? mode === "draft") ? "draft " : ""}pull request #${pr.number} ${pr.url}`, "pr");
+					else if (pr.action === "updated") event(`updated pull request #${pr.number} ${pr.url}`, "pr");
+				}
+			} catch (error) {
+				event(`pull request failed: ${error instanceof Error ? error.message : String(error)}`, "pr");
+			}
+		}
+		if (settings.get("git.sign") !== "ssh") return;
+		try {
+			const verdict = await pulls.verified(repo.owner, repo.repo, input.head);
+			const short = input.head.slice(0, 8);
+			event(verdict.verified ? `GitHub shows ${short} as Verified` : `GitHub does not verify ${short}: ${verdict.reason}`, "sign");
+		} catch {
+			// GitHub may not have the commit yet or may not answer: nothing to report.
+		}
 	}
 
 	#failed(error: string): PushRecord {

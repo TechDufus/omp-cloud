@@ -207,3 +207,85 @@ describe("/cloud login", () => {
 		}
 	});
 });
+
+describe("the login offer on /cloud <task>", () => {
+	let service: Bun.Server<undefined>;
+	let serviceOrigin = "";
+	let loggedIn = false;
+	/** Every request the fake service saw: `METHOD path`. */
+	let seen: string[] = [];
+
+	beforeAll(() => {
+		service = Bun.serve({
+			port: 0,
+			fetch: req => {
+				const path = new URL(req.url).pathname;
+				seen.push(`${req.method} ${path}`);
+				if (path === "/api/v1/whoami") return Response.json(whoami({ modelPatterns: loggedIn ? ["anthropic/*"] : ["openai/*"] }));
+				if (req.method === "POST" && path === "/api/v1/logins") return Response.json(login({ url: "https://auth.example/x" }), { status: 201 });
+				if (req.method === "POST" && path === "/api/v1/logins/l1/input") {
+					loggedIn = true;
+					return Response.json(login({ state: "done", account: "ada" }));
+				}
+				return Response.json({ error: "not found" }, { status: 404 });
+			},
+		});
+		serviceOrigin = `http://127.0.0.1:${service.port}`;
+	});
+	afterAll(() => service.stop(true));
+	beforeEach(() => {
+		seen = [];
+		loggedIn = false;
+	});
+
+	/** Runs `/cloud do it` and waits for the detached launch to report; `confirm` answers the offer. */
+	async function launch(o: { mode?: string; idle?: boolean; confirm: boolean }) {
+		const env = await cloudEnv(`url: ${serviceOrigin}\ntoken: tok\n`);
+		const host = fakeHost({ cwd: await tmp("omp-cloud-repo-"), mode: o.mode ?? "tui", input: async () => "the-code" });
+		host.idle = o.idle ?? true;
+		const asked: [string, string][] = [];
+		host.host.ui.confirm = async (title, message) => {
+			asked.push([title, message]);
+			return o.confirm;
+		};
+		// The launch is detached; its failure is the notification this resolves on.
+		const { promise: reported, resolve } = Promise.withResolvers<void>();
+		const record = host.host.ui.notify;
+		host.host.ui.notify = (message, type) => {
+			record(message, type);
+			if (type === "error") resolve();
+		};
+		const pi = fakePi();
+		await new Cloud(pi.pi, "/own", env, await tmp("omp-cloud-home-"), undefined, undefined, FAST_RETRY).handle("do it", { ...host.host, switchSession: async () => ({ cancelled: false }) });
+		for (const run of host.timeouts) run();
+		await reported;
+		return { host, asked, pi };
+	}
+
+	test("yes logs the cloud in, then the launch goes on with the refreshed whoami", async () => {
+		const { host, asked, pi } = await launch({ confirm: true });
+		expect(asked).toEqual([["Log the cloud in?", "The cloud cannot run anthropic models yet. Log the cloud broker in to anthropic now?"]]);
+		expect(seen).toEqual(["GET /api/v1/whoami", "POST /api/v1/logins", "POST /api/v1/logins/l1/input", "GET /api/v1/whoami"]);
+		expect(pi.sent).toHaveLength(1);
+		expect(pi.sent[0]?.message.details).toMatchObject({ kind: "login", url: "https://auth.example/x" });
+		// The model is served now: the launch got past the model check (the directory is no repository, which is its next complaint).
+		const [error = ""] = host.notes.find(([, type]) => type === "error") ?? [];
+		expect(error).not.toContain("cannot run");
+	});
+
+	test("no keeps today's error and starts no login", async () => {
+		const { host, asked } = await launch({ confirm: false });
+		expect(asked).toHaveLength(1);
+		expect(host.notes.find(([, type]) => type === "error")).toEqual(["☁ handoff failed: the cloud cannot run anthropic models yet: /cloud login anthropic", "error"]);
+		expect(seen).not.toContain("POST /api/v1/logins");
+	});
+
+	test("outside the interactive UI, or while the agent works, there is no offer: today's error", async () => {
+		for (const o of [{ mode: "rpc" }, { idle: false }]) {
+			const { host, asked } = await launch({ confirm: true, ...o });
+			expect(asked).toEqual([]);
+			expect(host.notes.find(([, type]) => type === "error")?.[0]).toBe("☁ handoff failed: the cloud cannot run anthropic models yet: /cloud login anthropic");
+		}
+		expect(seen).not.toContain("POST /api/v1/logins");
+	});
+});

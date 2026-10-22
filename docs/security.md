@@ -31,9 +31,20 @@ A cloud agent can be messaged from your omp and can message it back, the way omp
 - **Child jobs are display-only.** There is no remote cancel for them; to stop the work, stop the thread ([Cancelling](jobs.md#cancelling)).
 - **Not verified.** These are descriptions of what the code does, checked by unit tests and the plugin scenario, not an audit; no test tries to break out through the extension or to inject hostile message text into a local session.
 
+## GitHub App and signing key
+
+Connecting GitHub ([GitHub](github.md)) puts two secrets on the service host and nothing in any VM:
+
+- **The App's private key** (`<dataDir>/github/app.pem`) and **the signing key** (`<dataDir>/signing/ed25519.pem`) live under the data directory, each in a 0700 directory with mode 0600 files, written as a temporary file and renamed. The service refuses to use a key with group or other permission bits. They are in the [backups](operations.md), so the archive is as sensitive as the data directory. Disconnecting the App deletes its files, and deleting the signing key deletes its file; delete the App on GitHub as well to revoke it there.
+- **Tokens never enter a VM.** The key signs a short JWT (10 minutes) that the service trades for an installation token scoped to one repository, valid for one hour. Git gets it for a single command and the service scrubs it from every error it records. A VM holds only the per-thread gateway client token, as before; a VM that is compromised cannot push, open a pull request or sign anything. Signing happens on the service, over the commits a VM made, so a VM controls the content of its own commits, as it always did, and not the key.
+- **What the App may do.** It is created with Contents (write), Pull requests (write) and Metadata (read), no webhook and no events, private to the owner's account. It reaches only the repositories you install it on. It has **no Workflows permission**, so GitHub refuses a push that adds or changes `.github/workflows/*`: a cloud agent cannot rewrite your CI to reach repository secrets. The push policy applies unchanged: never forced, never a protected branch or the remote's default branch.
+- **Only the owner connects.** The GitHub and signing routes are owner-token only ([API](api.md#tokens-and-callers)): a paired device cannot connect the App, make or delete the key, or read the key's registration. The manifest flow's `state` is random, kept in memory for an hour and used once, so a conversion that did not start on the service is refused.
+- **Signed does not mean reviewed.** The service signs whatever a thread's agent committed, so Verified says the commit came through your service and its committer address is yours, not that the change is right. Pull requests open as drafts by default (`git.pr`) so you read them first.
+
 ## Where the details are
 
 - [Pairing](pairing.md): what crosses the network, who may connect, the firewall, backups and identity.
 - [API](api.md): agent policy (bash rules, tool approvals, spend caps, egress, allowed models), push policy, devices and pairing offers, the dashboard guard, [IRC messages](api.md#irc-messages) and [their VM side](api.md#the-vm-side-of-irc).
 - [Configuration](configuration.md): `service.json` (`listen` must be loopback), `remote`, git credentials.
+- [GitHub](github.md): the App, installation tokens, the signing key, Verified commits and pull requests.
 

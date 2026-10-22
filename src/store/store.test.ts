@@ -1270,6 +1270,46 @@ describe("migration 7", () => {
 	});
 });
 
+describe("migration 12", () => {
+	test("a version 11 database gains the pull request columns, null for its threads, and a pull request round-trips", async () => {
+		store.close();
+		await rm(dir, { recursive: true, force: true });
+		await mkdir(join(dir, "threads"), { recursive: true });
+		const raw = new Database(join(dir, "omp-cloud.db"));
+		for (const migration of MIGRATIONS.slice(0, 11)) raw.run(migration);
+		raw.run("PRAGMA user_version = 11");
+		raw
+			.query(
+				`INSERT INTO threads (id, owner, phase, title, model, thinking, repo_name, repo_remote_url, repo_base_ref, repo_base_commit,
+					repo_handoff_commit, repo_local_branch, home, workspace, author_name, author_email, secret_files, secret_env, created_at, last_activity_at)
+				VALUES (?, 'owner', 'idle', 'old', 'm', '', 'repo', '', '', '', 'def', '', '', '', '', '', '[]', '[]', ?, ?)`,
+			)
+			.run(ID, iso(0), iso(0));
+		raw.close();
+
+		store = open();
+		expect(store.getThread(ID)?.pr).toBeNull();
+
+		const pr = { number: 7, url: "https://github.com/acme/app/pull/7" };
+		store.setThreadPullRequest(ID, pr);
+		expect(store.getThread(ID)?.pr).toEqual(pr);
+		store.setThreadPullRequest(ID, { number: 8, url: "https://github.com/acme/app/pull/8" });
+		expect(store.getThread(ID)?.pr).toEqual({ number: 8, url: "https://github.com/acme/app/pull/8" });
+		// An unknown thread is a no-op.
+		store.setThreadPullRequest("zzzzzzzzzzzz", pr);
+		store.close();
+		store = open();
+		expect(store.getThread(ID)?.pr).toEqual({ number: 8, url: "https://github.com/acme/app/pull/8" });
+
+		store.close();
+		const check = new Database(join(dir, "omp-cloud.db"), { readonly: true });
+		expect(check.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(MIGRATIONS.length);
+		expect(MIGRATIONS.length).toBeGreaterThanOrEqual(12);
+		check.close();
+		store = open();
+	});
+});
+
 describe("settings", () => {
 	const set = (key: string, value: string | null): SettingChange => ({ key, value });
 

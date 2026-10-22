@@ -2,6 +2,7 @@ import { type Exec, ExecError, shellQuote } from "./exec";
 
 const HANDOFF_REF = "refs/omp-cloud/handoff";
 const RESULT_REF = "refs/omp-cloud/result";
+const SIGNED_REF = "refs/omp-cloud/signed";
 const DEFAULT_AUTHOR_NAME = "omp-cloud";
 const DEFAULT_AUTHOR_EMAIL = "omp-cloud@localhost";
 
@@ -62,6 +63,26 @@ export async function applyResultBundle(
 		}
 	}
 	await exec(`git -C ${ws} checkout -q -f -B ${branch} ${shellQuote(input.head)}`);
+}
+
+/**
+ * Moves the workspace's `branch` and HEAD onto the service-signed commits: `bundlePath` holds the branch the service
+ * rewrote (same trees, signed), `head` is its tip. The signed tip's tree must equal the workspace's, else nothing moves.
+ * The files stay as they are (`reset --soft`). Throws `ExecError` when git fails, `Error` on a tree mismatch.
+ */
+export async function adoptSigned(exec: Exec, input: { workspace: string; bundlePath: string; branch: string; head: string }): Promise<void> {
+	const ws = shellQuote(input.workspace);
+	const head = shellQuote(input.head);
+	await exec(`git -C ${ws} fetch -q ${shellQuote(input.bundlePath)} ${shellQuote(`+refs/heads/${input.branch}:${SIGNED_REF}`)}`);
+	const signed = (await exec(`git -C ${ws} rev-parse --verify ${SIGNED_REF}^{tree}`)).trim();
+	const current = (await exec(`git -C ${ws} rev-parse --verify HEAD^{tree}`)).trim();
+	if (signed !== current) {
+		await exec(`git -C ${ws} update-ref -d ${SIGNED_REF}`);
+		throw new Error("the signed result does not match the workspace");
+	}
+	await exec(`git -C ${ws} update-ref ${shellQuote(`refs/heads/${input.branch}`)} ${head}`);
+	await exec(`git -C ${ws} reset -q --soft ${head}`);
+	await exec(`git -C ${ws} update-ref -d ${SIGNED_REF}`);
 }
 
 /** The branch after a turn; the counts measure it from the handoff commit: everything the cloud changed. */

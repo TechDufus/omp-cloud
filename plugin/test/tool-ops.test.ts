@@ -470,6 +470,14 @@ describe("status", () => {
 		expect(t).toContain("next: cloud {\"op\":\"read\",\"thread\":\"k3x9fa2m7q1z\",\"turn\":2} for the full reply");
 	});
 
+	test("status names the pull request when the thread has one", async () => {
+		const r = rig();
+		r.w.threads.set(ID, detail({ id: ID, phase: "idle", pr: { number: 7, url: "https://github.com/o/r/pull/7" }, turns: [turn(1, { reply: "one" })] }));
+		expect(text(await call(r, { op: "status", thread: ID }))).toContain("pr: https://github.com/o/r/pull/7");
+		r.w.threads.set(ID, detail({ id: ID, phase: "idle", turns: [turn(1, { reply: "one" })] }));
+		expect(text(await call(r, { op: "status", thread: ID }))).not.toContain("pr: ");
+	});
+
 	test("replyChars, turns and include shape the output; events need their capability", async () => {
 		const r = rig();
 		r.w.threads.set(ID, detail({ id: ID, phase: "idle", turns: [turn(1, { reply: "one" }), turn(2, { reply: "two" }), turn(3, { reply: "y".repeat(300) })] }));

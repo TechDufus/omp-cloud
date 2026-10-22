@@ -339,6 +339,10 @@ export function parseTurn(o: Obj): ThreadTurn {
 	};
 }
 
+function parsePullRequest(v: unknown): { number: number; url: string } | null {
+	return isRecord(v) && num(v, "number") > 0 ? { number: num(v, "number"), url: str(v, "url") } : null;
+}
+
 function parseSummaryFields(o: Obj): Omit<ThreadSummary, "turns" | "warnings" | "repo" | "workspace"> {
 	return {
 		id: str(o, "id"),
@@ -363,6 +367,7 @@ function parseSummaryFields(o: Obj): Omit<ThreadSummary, "turns" | "warnings" | 
 		ref: str(o, "ref"),
 		session: str(o, "session"),
 		scratch: bool(o, "scratch"),
+		pr: parsePullRequest(o.pr),
 	};
 }
 

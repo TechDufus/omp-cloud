@@ -246,6 +246,8 @@ export interface ThreadSummary {
 	session: string;
 	/** The thread works in a synthesized empty repository, not a client repository. */
 	scratch: boolean;
+	/** The pull request the service keeps for the thread's branch; null when it has none. */
+	pr: { number: number; url: string } | null;
 }
 
 export interface TurnUsage {

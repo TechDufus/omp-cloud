@@ -35,7 +35,7 @@ description = "Undo `infra:up`: `omp-cloud uninstall --checkout` stops and remov
 run = "bun run src/bin.ts uninstall --checkout"
 
 [tasks.backup]
-description = "One archive of the service's database (a consistent online copy), blobs and git cache in <dataDir>/../backups; `-- --keep N` (default 7), `-- --config path`"
+description = "One archive of the service's database (a consistent online copy), blobs, git cache and keys (GitHub App, signing key) in <dataDir>/../backups; `-- --keep N` (default 7), `-- --config path`"
 run = "bun run scripts/backup.ts"
 
 [tasks."release:build"]

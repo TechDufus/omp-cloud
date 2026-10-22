@@ -77,7 +77,7 @@ export async function backup(options: BackupOptions): Promise<BackupResult> {
 		chmodSync(copy, 0o600);
 
 		closeSync(openSync(partial, "wx", 0o600));
-		const members = ["threads", join("git", "cache")].filter((member) => existsSync(join(dataDir, member)));
+		const members = ["threads", join("git", "cache"), "github", "signing"].filter((member) => existsSync(join(dataDir, member)));
 		const tar = Bun.spawn(["tar", "-czf", partial, "-C", staging, "omp-cloud.db", "-C", dataDir, ...members], { stdout: "ignore", stderr: "pipe" });
 		const [stderr, code] = await Promise.all([new Response(tar.stderr).text(), tar.exited]);
 		// tar's 1 means a file changed or vanished while it was read (a blob rewritten by the running service); 2 is fatal.

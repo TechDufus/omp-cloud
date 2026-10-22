@@ -19,7 +19,7 @@ import {
 } from "../api";
 import { messageOf, useQuery } from "../app/query";
 import { navigate } from "../app/route";
-import { ago, count, dateTime, diffstat, money, short } from "../format";
+import { ago, count, dateTime, diffstat, money, safeHref, short } from "../format";
 import { Badge, Card, Dot, EmptyState, ErrorState, KeyValues, Modal, PageHeader, TableSkeleton, type Tone } from "../kit/ui";
 import { LIFECYCLE_KINDS } from "../live";
 import { contextLabel, MetricsCard, threadLabel } from "./thread-metrics";
@@ -297,6 +297,14 @@ function factItems(t: ThreadDetailView): Fact[] {
 				result.pushed ? ` · pushed${result.pushRef ? ` to ${result.pushRef}` : ""}` : "",
 				result.pushError ? ` · push failed: ${result.pushError}` : "",
 			].join(""),
+		});
+	}
+	if (t.pr) {
+		const href = safeHref(t.pr.url);
+		items.push({
+			key: "pr",
+			label: "Pull request",
+			value: href === null ? `#${t.pr.number}` : <a href={href} target="_blank" rel="noreferrer noopener">{`PR #${t.pr.number}`}</a>,
 		});
 	}
 	return items;

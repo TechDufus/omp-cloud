@@ -61,6 +61,7 @@ const turnCard = (over: Partial<TurnCard> = {}): TurnCard => ({
 	deletions: 4,
 	pushed: true,
 	pushError: "",
+	prUrl: "",
 	pushRef: `omp-cloud/${ID}`,
 	branch: `omp-cloud/${ID}`,
 	reply: "Done.\n\nSee **tests**.",
@@ -899,6 +900,16 @@ describe("compact model-visible content", () => {
 		expect(text.split(open())[0]).not.toContain("denied");
 	});
 
+	test("a pull request is named after the diffstat line, in the model-visible text and the plain card", () => {
+		const url = "https://github.com/o/r/pull/7";
+		const text = cardContent(turnCard({ prUrl: url }));
+		expect(text).toContain(`PR #7 ${url}\n`);
+		expect(text.split(open())[0]).toContain(`PR #7 ${url}`);
+		expect(cardPlain(turnCard({ prUrl: url }))).toContain(`PR #7 ${url}`);
+		expect(cardContent(turnCard())).not.toContain("PR #");
+		expect(cardPlain(turnCard())).not.toContain("PR #");
+	});
+
 	test("a question: facts outside, header, text and options inside the fence, and who decides", () => {
 		expect(cardContent(question())).toBe(
 			[
@@ -1114,6 +1125,9 @@ describe("card renderer", () => {
 		expect(text).not.toContain("read a.go");
 		const expanded = buildRichCard(turnCard(), tui, theme, true).render(100).join("\n");
 		expect(expanded).toContain("read a.go");
+		const prText = buildRichCard(turnCard({ prUrl: "https://github.com/o/r/pull/7" }), tui, theme, false).render(200).join("\n");
+		expect(prText).toContain("PR #7 https://github.com/o/r/pull/7");
+		expect(text).not.toContain("PR #");
 		const launchText = buildRichCard(launch(), tui, theme, false).render(100).join("\n");
 		expect(launchText).toContain("and 10 more");
 		expect(launchText).toContain("certs/server.pem");
@@ -1557,6 +1571,16 @@ describe("buttons on hand-off, result and question cards", () => {
 		expect(kids(failed).map(n => n.key)).toEqual(["metrics", "reply"]);
 		const reply2 = kids(failed).find(n => n.key === "reply");
 		expect(reply2?.k === "md" && reply2.p?.text).toBe("spend cap reached");
+	});
+
+	test("a turn card with a pull request shows `PR #N <url>` after the result line; without one there is no such node", async () => {
+		const url = "https://github.com/o/r/pull/7";
+		const card = cardOf(await render(turnCard({ prUrl: url })));
+		expect(kids(card).map(n => n.key)).toEqual(["metrics", "result", "pr", "reply", "events"]);
+		expect(spanText(kids(card).find(n => n.key === "pr"))).toBe(`PR #7 ${url}`);
+		expect(kids(cardOf(await render(turnCard()))).some(n => n.key === "pr")).toBe(false);
+		const failed = cardOf(await render(turnCard({ state: "failed", error: "x", prUrl: url })));
+		expect(kids(failed).some(n => n.key === "pr")).toBe(false);
 	});
 
 	test("a launch card: the facts as a kv, the files and warnings as sections", async () => {

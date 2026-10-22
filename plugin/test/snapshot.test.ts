@@ -318,6 +318,57 @@ describe("takeSnapshot", () => {
 			/^repository bundle is [\d.]+ MB, over the [\d.]+ MB upload limit$/,
 		);
 	});
+
+	describe("the handoff commit's signature", () => {
+		/** A gpg stand-in (git runs `gpg.program` for `commit-tree -S`): `script` is its shell body. */
+		async function fakeGpg(f: { work: string }, script: string): Promise<void> {
+			const dir = await tmp("omp-cloud-gpg-");
+			const prog = join(dir, "fake-gpg");
+			await writeFile(prog, `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+			await git(f.work, ["config", "commit.gpgsign", "true"]);
+			await git(f.work, ["config", "gpg.program", prog]);
+			await writeFile(join(f.work, "a.txt"), "changed\n");
+		}
+		const headerOf = (work: string, commit: string) => git(work, ["cat-file", "commit", commit]);
+
+		test("commit.gpgsign true signs the handoff commit with commit-tree -S", async () => {
+			const f = await remoteFixture();
+			await fakeGpg(f, `cat >/dev/null\necho "[GNUPG:] SIG_CREATED D 1 8 00 0 0 0" >&2\nprintf -- '-----BEGIN PGP SIGNATURE-----\\n\\nZmFrZQ==\\n-----END PGP SIGNATURE-----\\n'`);
+			const snap = await takeSnapshot(await opts(f.work));
+			expect(snap.warnings).toEqual([]);
+			expect(snap.handoffCommit).not.toBe(f.base);
+			expect(await headerOf(f.work, snap.handoffCommit)).toContain("gpgsig -----BEGIN PGP SIGNATURE-----");
+		});
+
+		test("a failing signer falls back to an unsigned handoff commit and a warning with git's first stderr line", async () => {
+			const f = await remoteFixture();
+			await fakeGpg(f, `cat >/dev/null\necho "boom: no secret key" >&2\nexit 2`);
+			const snap = await takeSnapshot(await opts(f.work));
+			expect(snap.warnings).toHaveLength(1);
+			expect(snap.warnings[0]).toStartWith("the handoff commit is unsigned: ");
+			expect(snap.warnings[0]).toBe("the handoff commit is unsigned: error: gpg failed to sign the data:");
+			expect(snap.handoffCommit).not.toBe(f.base);
+			expect(await headerOf(f.work, snap.handoffCommit)).not.toContain("gpgsig");
+			expect(await git(f.work, ["show", `${snap.handoffCommit}:a.txt`])).toBe("changed");
+		});
+
+		test("a signer that hangs is killed at the timeout: the handoff is unsigned and says signing timed out", async () => {
+			const f = await remoteFixture();
+			await fakeGpg(f, "exec sleep 30");
+			const snap = await takeSnapshot(await opts(f.work, { signTimeoutMs: 300 }));
+			expect(snap.warnings).toEqual(["the handoff commit is unsigned: signing timed out"]);
+			expect(await headerOf(f.work, snap.handoffCommit)).not.toContain("gpgsig");
+		});
+
+		test("without commit.gpgsign the signer is never run and there are no warnings", async () => {
+			const f = await remoteFixture();
+			await fakeGpg(f, "exit 2");
+			await git(f.work, ["config", "commit.gpgsign", "false"]);
+			const snap = await takeSnapshot(await opts(f.work));
+			expect(snap.warnings).toEqual([]);
+			expect(await headerOf(f.work, snap.handoffCommit)).not.toContain("gpgsig");
+		});
+	});
 });
 
 describe("credential-named files", () => {

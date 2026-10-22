@@ -278,6 +278,11 @@ async function inPool<T, R>(items: readonly T[], limit: number, work: (item: T) 
 	return results;
 }
 
+/** The `provider/id` of the session's model, `""` when it has none: the model `planTask` checks when a task names none. */
+export function sessionModelOf(host: Pick<LaunchBatchInput["host"], "model">): string {
+	return host.model ? `${host.model.provider}/${host.model.id}` : "";
+}
+
 /**
  * Snapshots the repository once (twice at most: with and without uncommitted work), packs the conversation and the omp setup
  * once, and creates one thread per task, at most {@link MAX_CONCURRENT_CREATES} at a time. Every create carries an
@@ -309,7 +314,7 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 	signal?.throwIfAborted();
 	const meta = who.capabilities.includes("threads.meta");
 	const idempotent = who.capabilities.includes("threads.idempotency");
-	const sessionModel = host.model ? `${host.model.provider}/${host.model.id}` : "";
+	const sessionModel = sessionModelOf(host);
 	const level = input.pi.getThinkingLevel();
 	const sessionThinking = level !== undefined && THINKING_LEVELS.includes(level) ? level : "";
 
@@ -461,7 +466,7 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 					overlays: made.configOverlays,
 					policy: Object.keys(plan.policy),
 				};
-				return { ok: true, index, response: created.summary, replayed: created.replayed, workspace: plan.workspace, key: plan.key, warnings: [...local, ...created.summary.warnings], summary };
+				return { ok: true, index, response: created.summary, replayed: created.replayed, workspace: plan.workspace, key: plan.key, warnings: [...local, ...(snap?.warnings ?? []), ...created.summary.warnings], summary };
 			} catch (e) {
 				const error = keyReused(asCloudError(e), plan);
 				return { ok: false, index, workspace: plan.workspace, error, key: idempotent && error.code !== "conflict" ? plan.key : undefined };

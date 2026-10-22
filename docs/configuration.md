@@ -36,11 +36,11 @@ With no `url` from the environment or your file, the machine uses its paired con
 | `broker` | yes | `{url, tokenFile}`: the omp auth broker that `/cloud login` signs in to, and the file holding its token |
 | `models` | yes | `{default, direct?}`. `default` is `provider/id`, used when a thread names no model; its provider must be in `direct` or served by the gateway. `direct` maps provider names to omp provider objects with a `baseUrl` that go into every VM's `models.yml`; `apiKey`, `headers` and `authHeader` are refused anywhere in them. Setup writes `anthropic/claude-sonnet-4-6` |
 | `runner` | no | `{enabled, idleTimeoutSeconds, turnTimeoutSeconds, questionTimeoutSeconds, sandboxTimeoutSeconds, lifecycleSweepSeconds}`; every key is optional. `enabled: false` runs the API without VMs, so threads stay queued. The timeouts are positive integers of seconds, at most 2147483 (`sandboxTimeoutSeconds` at most 86400). Defaults: pause an idle VM after 600; abort a turn after 1800 (time a question is open does not count); answer an unanswered question with a note to proceed after 1800; sandbox expiry 3600, refreshed while the VM works; archive and orphan sweep every 3600 ([Archive](archive.md)) |
-| `git` | no | `{hosts, fetchTimeoutSeconds, pushTimeoutSeconds}`: the git hosts the service holds a credential for (without any, it fetches nothing and pushes nothing) and the timeouts of a network git call of a base fetch and of a push (default 120 each, at most 2147483) |
+| `git` | no | `{hosts, fetchTimeoutSeconds, pushTimeoutSeconds}`: the git hosts the service holds a credential for (without any, and without a connected [GitHub App](github.md) for github.com, it fetches nothing and pushes nothing) and the timeouts of a network git call of a base fetch and of a push (default 120 each, at most 2147483) |
 | `dashboard` | no | `{listen, url?}`: the dashboard listener, loopback only; without it there is no dashboard. `url` is the origin browsers use, without a path (default `http://<listen>`). Setup writes `127.0.0.1:8081` |
 | `remote` | no | The remote listener (TLS) for paired devices; without it the service has none. See below |
 
-`git.hosts` is keyed by the remote URL's lower-case host, with `:port` when the URL names one (`github.com`, `git.example:8443`). Each entry is `{credential, username?}`: `credential` is a `!command` whose output is the token (never the token itself), and `username` is the Basic-auth user name git sends (default `x-access-token`).
+`git.hosts` is keyed by the remote URL's lower-case host, with `:port` when the URL names one (`github.com`, `git.example:8443`). Each entry is `{credential, username?}`: `credential` is a `!command` whose output is the token (never the token itself), and `username` is the Basic-auth user name git sends (default `x-access-token`). `github.com` needs no entry once a GitHub App is connected ([below](#github-app-and-signing-key)); an entry is then used only for a repository the App is not installed on.
 
 `remote` is `{listen, certFile, keyFile, advertise?, allow?}`. `listen` may be any host and port. `certFile` holds one PEM certificate and `keyFile` its key, mode 0600 in a 0700 directory, checked at start. `advertise` lists the `host:port` entries pairing codes carry (default: the host's own addresses). `allow` lists CIDR ranges that replace the default sources, which are `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `169.254.0.0/16`, `fc00::/7` and `fe80::/10` (loopback is not among them). Setup writes `0.0.0.0:8443` and a certificate and key in `~/.config/omp-cloud/tls/`. See [API](api.md#listeners) and [Pairing](pairing.md).
 
@@ -51,4 +51,15 @@ With no `url` from the environment or your file, the machine uses its paired con
 ```
 
 The credential command runs in the service's environment (a systemd user unit), not your shell. Every unit runs with one fixed `PATH`, `<omp's directory>:/usr/local/bin:/usr/bin:/bin` (in a checkout, bun's directory comes first), never your interactive one, so a tool installed elsewhere needs its absolute path. The service logs at start which program each credential command runs (`journalctl --user -u omp-cloud`).
+
+## GitHub App and signing key
+
+`service.json` has no GitHub keys. The App and the signing key are connected and made on the dashboard's GitHub page, and live as files in the data directory, each directory mode 0700 and each file 0600:
+
+| Path under `dataDir` | Holds |
+|---|---|
+| `github/app.json`, `github/app.pem` | The connected GitHub App's description (id, slug, name, owner) and its private key |
+| `signing/ed25519.pem` | The SSH key the service signs commits with |
+
+A key file with group or other permission bits is refused (`the GitHub App key <path> must be mode 0600`, `the signing key <path> must be mode 0600`). Both directories are in every [backup](operations.md). The run-time settings are [`git.sign`, `git.committer` and `git.pr`](api.md#settings), with `git.push` deciding whether anything is pushed at all. Connecting, installing, signing and pull requests are explained in [GitHub](github.md); the dashboard's address is `dashboard.url` ([above](#service-config)), and the manifest flow needs a dashboard listener.
 

@@ -9,11 +9,14 @@
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { GitHostConfig } from "../config";
+import { GitHubAppNotInstalled, type GitHubApp } from "../github/app";
+import { githubRepoOf } from "../github/repo";
 import { shellQuote } from "../runner/exec";
 import { scrub, writeCredentialHelper } from "./credential";
 import { InspectError, Inspection } from "./inspect";
 import { normalizeRemote, remoteHostOf } from "./remote";
 import { SecretError, SecretRefs } from "./secret";
+import { rewriteSigned, type RawGit } from "./sign";
 
 /** The refs of an inspection repository: the thread's handoff commit and the branch of its stored result bundle. */
 const INSPECT_BASE_REF = "refs/omp-cloud/base";
@@ -86,6 +89,8 @@ export interface GitServiceOptions {
 	gitBinary?: string;
 	/** Test seam: resolves the credential references; defaults to a 5 minute in-memory cache. */
 	secrets?: SecretRefs;
+	/** The GitHub App: github.com remotes it is installed on are fetched and pushed with its 1-hour tokens. */
+	github?: Pick<GitHubApp, "connected" | "tokenFor">;
 }
 
 /** What `push` publishes. */
@@ -104,10 +109,39 @@ export interface PushInput {
 	protectedPatterns: readonly string[];
 }
 
+/** What `signResult` re-signs: the thread's base and its stored result bundle. */
+export interface SignInput {
+	remoteURL: string;
+	baseCommit: string;
+	handoffCommit: string;
+	/** The head of the latest result the service already exposed (stored, pulled or pushed); `""` for none. */
+	uploadedHead: string;
+	/** The path of `source.bundle`; null when the thread has none. Needed by full-history threads. */
+	sourceBundle: string | null;
+	/** The path of the result bundle the VM just made. */
+	resultBundle: string;
+	/** The branch the result bundle holds under `refs/heads/`. */
+	branch: string;
+	/** The branch's head in the result bundle. */
+	head: string;
+	privatePem: string;
+	committer: { name: string; email: string } | null;
+}
+
+/** A result bundle whose new commits the service signed; `dispose` deletes it. */
+export interface SignedResult {
+	bundlePath: string;
+	head: string;
+	rewritten: number;
+	dispose(): Promise<void>;
+}
+
 /** The outcome of a push: `error` says why nothing was pushed (`""` when it was). It never carries a credential. */
 export interface PushOutcome {
 	pushed: boolean;
 	error: string;
+	/** The remote's default branch (without `refs/heads/`) when `ls-remote` told; `""` where unknown. */
+	defaultBranch: string;
 }
 
 interface Run {
@@ -164,6 +198,7 @@ export class GitService {
 	readonly #pushTimeoutMs: number;
 	readonly #git: string;
 	readonly #secrets: SecretRefs;
+	readonly #github: Pick<GitHubApp, "connected" | "tokenFor"> | undefined;
 	readonly #chains = new Map<string, Promise<void>>();
 
 	private constructor(options: GitServiceOptions) {
@@ -174,6 +209,7 @@ export class GitService {
 		this.#pushTimeoutMs = options.pushTimeoutSeconds * 1000;
 		this.#git = options.gitBinary ?? "git";
 		this.#secrets = options.secrets ?? new SecretRefs();
+		this.#github = options.github;
 	}
 
 	/** Creates the directories and clears the scratch space a crash may have left behind (it can hold token files). */
@@ -185,14 +221,16 @@ export class GitService {
 		return service;
 	}
 
-	/** The configured host keys (`host` or `host:port`), sorted. */
+	/** The configured host keys (`host` or `host:port`), plus `github.com` while a GitHub App is connected; sorted, unique. */
 	hosts(): string[] {
-		return Object.keys(this.#hosts).sort();
+		const hosts = new Set(Object.keys(this.#hosts));
+		if (this.#github?.connected() === true) hosts.add("github.com");
+		return [...hosts].sort();
 	}
 
 	/** The remote without credentials; an ssh or scp-like remote of a configured host becomes its https URL. */
 	normalize(url: string): string {
-		return normalizeRemote(url, Object.keys(this.#hosts));
+		return normalizeRemote(url, this.hosts());
 	}
 
 	/**
@@ -201,7 +239,7 @@ export class GitService {
 	 */
 	canFetch(url: string): boolean {
 		const normalized = this.normalize(url);
-		if (!Object.hasOwn(this.#hosts, remoteHostOf(normalized))) return false;
+		if (!this.hosts().includes(remoteHostOf(normalized))) return false;
 		return normalized.startsWith("https://") || (normalized.startsWith("http://") && isLoopbackUrl(normalized));
 	}
 
@@ -320,6 +358,52 @@ export class GitService {
 		}
 	}
 
+	/**
+	 * Re-signs the commits the VM made in its latest turn. A scratch repository is built as `inspect` builds one (the
+	 * thread's base, then `input.resultBundle`'s branch); only the commits past `input.uploadedHead` (else the handoff
+	 * commit) are rewritten, so commits an earlier turn exposed keep their ids. Returns null when nothing was rewritten,
+	 * else a bundle of the signed branch (against `input.baseCommit` when there is one) that the caller adopts and stores;
+	 * `dispose` deletes it. Throws `Error` when the base or the bundle is unusable.
+	 */
+	async signResult(threadId: string, input: SignInput): Promise<SignedResult | null> {
+		const dir = await mkdtemp(join(this.#tmpDir, "sign-"));
+		const repo = join(dir, "repo.git");
+		const local = { cwd: repo, timeoutMs: LOCAL_TIMEOUT_MS };
+		const raw: RawGit = async (args, opts) => {
+			const done = await this.#runRaw(args, { cwd: opts.cwd, input: opts.input, timeoutMs: LOCAL_TIMEOUT_MS });
+			if (done.code !== 0) throw new Error(`git ${args[0]} failed: ${reasonOf(done.stderr)}`);
+			return done.stdout;
+		};
+		const sign = async (): Promise<SignedResult | null> => {
+			await this.#ok(["init", "--bare", "--quiet", repo], { timeoutMs: LOCAL_TIMEOUT_MS });
+			const source: InspectSource = { threadId, remoteURL: input.remoteURL, baseCommit: input.baseCommit, sourceBundle: input.sourceBundle, resultBundle: input.resultBundle, resultBranch: input.branch };
+			await this.#loadBase(source, repo, local);
+			const ref = `refs/heads/${input.branch}`;
+			const fetched = await this.#run(["fetch", "--quiet", "--no-tags", resolve(input.resultBundle), `+${ref}:${ref}`], local);
+			if (fetched.code !== 0) throw new Error(`the result bundle is unusable: ${reasonOf(fetched.stderr)}`);
+			const signed = await rewriteSigned(raw, {
+				repo,
+				base: input.uploadedHead || input.handoffCommit,
+				head: input.head,
+				privatePem: input.privatePem,
+				committer: input.committer,
+			});
+			if (signed.rewritten === 0) return null;
+			await this.#ok(["update-ref", ref, signed.head], local);
+			const bundlePath = join(dir, "signed.bundle");
+			await this.#ok(["bundle", "create", "--quiet", bundlePath, ref, ...(input.baseCommit === "" ? [] : [`^${input.baseCommit}`])], local);
+			return { bundlePath, head: signed.head, rewritten: signed.rewritten, dispose: () => rm(dir, { recursive: true, force: true }) };
+		};
+		try {
+			const result = input.baseCommit === "" ? await sign() : await this.#locked(this.#cachePath(this.normalize(input.remoteURL)), sign);
+			if (result === null) await rm(dir, { recursive: true, force: true });
+			return result;
+		} catch (error) {
+			await rm(dir, { recursive: true, force: true });
+			throw error;
+		}
+	}
+
 	/** Puts the thread's handoff commit into the inspection repository as `refs/omp-cloud/base`. */
 	async #loadBase(source: InspectSource, repo: string, local: { cwd: string; timeoutMs: number }): Promise<void> {
 		if (source.baseCommit === "") {
@@ -352,34 +436,36 @@ export class GitService {
 	 */
 	async push(threadId: string, input: PushInput): Promise<PushOutcome> {
 		const refusal = this.pushRefusal(input.remoteURL, input.target, input.protectedPatterns);
-		if (refusal !== null) return { pushed: false, error: refusal };
+		if (refusal !== null) return { pushed: false, error: refusal, defaultBranch: "" };
 		const url = this.normalize(input.remoteURL);
 		const { target } = input;
 		const cache = this.#cachePath(url);
 		try {
-			return await this.#locked(cache, async () => {
+			return await this.#locked(cache, async (): Promise<PushOutcome> => {
 				await this.#ensureCache(cache);
 				const local = { cwd: cache, timeoutMs: LOCAL_TIMEOUT_MS };
 				const remote = { cwd: cache, remote: url, timeoutMs: this.#pushTimeoutMs };
 				const valid = await this.#run(["check-ref-format", `refs/heads/${target}`], local);
-				if (valid.code !== 0) return { pushed: false, error: `${JSON.stringify(target.slice(0, 100))} is not a branch name` };
+				if (valid.code !== 0) return { pushed: false, error: `${JSON.stringify(target.slice(0, 100))} is not a branch name`, defaultBranch: "" };
 				const head = await this.#run(["ls-remote", "--symref", url, "HEAD"], remote);
-				if (head.code !== 0) return { pushed: false, error: pushFailure(head, url, target, this.#pushTimeoutMs) };
-				if (/^ref: (\S+)\s+HEAD$/m.exec(head.stdout)?.[1] === `refs/heads/${target}`) {
-					return { pushed: false, error: `refusing to push to ${target}, the default branch of ${url}` };
+				if (head.code !== 0) return { pushed: false, error: pushFailure(head, url, target, this.#pushTimeoutMs), defaultBranch: "" };
+				const defaultRef = /^ref: (\S+)\s+HEAD$/m.exec(head.stdout)?.[1];
+				const defaultBranch = defaultRef?.startsWith("refs/heads/") === true ? defaultRef.slice("refs/heads/".length) : "";
+				if (defaultRef === `refs/heads/${target}`) {
+					return { pushed: false, error: `refusing to push to ${target}, the default branch of ${url}`, defaultBranch };
 				}
 				const resultRef = `refs/omp-cloud/threads/${threadId}/result`;
 				const fetched = await this.#run(["fetch", "--quiet", "--no-tags", resolve(input.bundlePath), `+refs/heads/${input.localBranch}:${resultRef}`], local);
-				if (fetched.code !== 0) return { pushed: false, error: `the result bundle is unusable: ${reasonOf(fetched.stderr)}` };
+				if (fetched.code !== 0) return { pushed: false, error: `the result bundle is unusable: ${reasonOf(fetched.stderr)}`, defaultBranch };
 				const got = (await this.#ok(["rev-parse", "--verify", `${resultRef}^{commit}`], local)).trim();
-				if (got !== input.head) return { pushed: false, error: `the result bundle is at ${got}, not ${input.head}` };
+				if (got !== input.head) return { pushed: false, error: `the result bundle is at ${got}, not ${input.head}`, defaultBranch };
 				const pushed = await this.#run(["push", "--porcelain", url, `${input.head}:refs/heads/${target}`], remote);
-				if (pushed.code !== 0) return { pushed: false, error: pushFailure(pushed, url, target, this.#pushTimeoutMs) };
-				return { pushed: true, error: "" };
+				if (pushed.code !== 0) return { pushed: false, error: pushFailure(pushed, url, target, this.#pushTimeoutMs), defaultBranch };
+				return { pushed: true, error: "", defaultBranch };
 			});
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
-			return { pushed: false, error: `git push failed: ${scrub(reason, []).slice(0, MAX_REASON_CHARS)}` };
+			return { pushed: false, error: `git push failed: ${scrub(reason, []).slice(0, MAX_REASON_CHARS)}`, defaultBranch: "" };
 		}
 	}
 
@@ -453,16 +539,10 @@ export class GitService {
 		return result.stdout;
 	}
 
+	/** Runs git for the network and the cache: scrubbed text out, the credential of the remote's host (or the GitHub App) when `options.remote` is set. */
 	async #run(args: string[], options: RunOptions): Promise<Run> {
 		const home = await mkdtemp(join(this.#tmpDir, "run-"));
-		const env: Record<string, string> = {
-			PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-			HOME: home,
-			LC_ALL: "C",
-			GIT_TERMINAL_PROMPT: "0",
-			GIT_CONFIG_NOSYSTEM: "1",
-			GIT_CONFIG_GLOBAL: "/dev/null",
-		};
+		const env = this.#env(home);
 		const config: string[] = [];
 		const secrets: string[] = [];
 		try {
@@ -474,35 +554,86 @@ export class GitService {
 				const host = remoteHostOf(options.remote);
 				const entry = this.#hosts[host];
 				const protocol = new URL(options.remote).protocol.slice(0, -1);
-				if (entry !== undefined && (protocol === "https" || isLoopbackUrl(options.remote))) {
-					const token = await this.#secrets.resolve(entry.credential, host);
-					secrets.push(token);
-					const helper = await writeCredentialHelper(home, { protocol, host, username: entry.username, token });
+				let credential: { username: string; token: string } | null = null;
+				const github = host === "github.com" && this.#github?.connected() === true ? githubRepoOf(options.remote) : null;
+				if (github !== null && this.#github !== undefined) {
+					try {
+						credential = { username: "x-access-token", token: await this.#github.tokenFor(github.owner, github.repo) };
+					} catch (error) {
+						// Without the App on this repository a configured token for github.com still serves; every other failure stops the call.
+						if (!(error instanceof GitHubAppNotInstalled && entry !== undefined)) {
+							const reason = error instanceof Error ? error.message : String(error);
+							return { code: 128, stdout: "", stderr: `fatal: ${scrub(reason, []).slice(0, MAX_REASON_CHARS)}` };
+						}
+					}
+				}
+				if (credential === null && entry !== undefined && (protocol === "https" || isLoopbackUrl(options.remote))) {
+					credential = { username: entry.username, token: await this.#secrets.resolve(entry.credential, host) };
+				}
+				if (credential !== null) {
+					secrets.push(credential.token);
+					const helper = await writeCredentialHelper(home, { protocol, host, username: credential.username, token: credential.token });
 					config.push("-c", "credential.helper=", "-c", `credential.helper=!${shellQuote(helper)}`);
 				}
 			}
-			const proc = Bun.spawn([this.#git, ...config, ...args], { cwd: options.cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-			const output = Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-			// Read errors after the deadline have nobody to report to.
-			output.catch(() => undefined);
-			let timer: Timer | undefined;
-			// git-remote-https and index-pack inherit the pipes and outlive a killed git: the deadline must not wait for them.
-			const deadline = new Promise<null>(resolve => {
-				timer = setTimeout(() => {
-					proc.kill("SIGKILL");
-					resolve(null);
-				}, options.timeoutMs);
-			});
-			try {
-				const done = await Promise.race([output, deadline]);
-				if (done === null) return { code: 124, stdout: "", stderr: `git ${args[0]} timed out after ${options.timeoutMs / 1000} s` };
-				const [stdout, stderr, code] = done;
-				return { code, stdout: scrub(stdout, secrets), stderr: scrub(stderr, secrets) };
-			} finally {
-				clearTimeout(timer);
-			}
+			const done = await this.#spawn(args, env, options, config);
+			return { code: done.code, stdout: scrub(new TextDecoder().decode(done.stdout), secrets), stderr: scrub(done.stderr, secrets) };
 		} finally {
 			await rm(home, { recursive: true, force: true });
+		}
+	}
+
+	/**
+	 * Runs local git with bytes in and out, for the commit rewrite: the fixed environment of `#run`, no credentials,
+	 * and stdout is returned as it is (a commit's bytes must not be scrubbed or decoded).
+	 */
+	async #runRaw(args: string[], options: { cwd: string; input?: Uint8Array; timeoutMs: number }): Promise<{ code: number; stdout: Uint8Array; stderr: string }> {
+		const home = await mkdtemp(join(this.#tmpDir, "run-"));
+		try {
+			return await this.#spawn(args, this.#env(home), options);
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
+	}
+
+	/** The environment of every git call: a private HOME, no system or global config, no prompts. */
+	#env(home: string): Record<string, string> {
+		return {
+			PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+			HOME: home,
+			LC_ALL: "C",
+			GIT_TERMINAL_PROMPT: "0",
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_GLOBAL: "/dev/null",
+		};
+	}
+
+	/** Spawns git and waits at most `options.timeoutMs`; a call that outlives it is killed and answers exit code 124. */
+	async #spawn(
+		args: string[],
+		env: Record<string, string>,
+		options: { cwd?: string; input?: Uint8Array; timeoutMs: number },
+		config: string[] = [],
+	): Promise<{ code: number; stdout: Uint8Array; stderr: string }> {
+		const proc = Bun.spawn([this.#git, ...config, ...args], { cwd: options.cwd, env, stdin: options.input ?? "ignore", stdout: "pipe", stderr: "pipe" });
+		const output = Promise.all([new Response(proc.stdout).bytes(), proc.stderr.text(), proc.exited]);
+		// Read errors after the deadline have nobody to report to.
+		output.catch(() => undefined);
+		let timer: Timer | undefined;
+		// git-remote-https and index-pack inherit the pipes and outlive a killed git: the deadline must not wait for them.
+		const deadline = new Promise<null>(resolve => {
+			timer = setTimeout(() => {
+				proc.kill("SIGKILL");
+				resolve(null);
+			}, options.timeoutMs);
+		});
+		try {
+			const done = await Promise.race([output, deadline]);
+			if (done === null) return { code: 124, stdout: new Uint8Array(), stderr: `git ${args[0]} timed out after ${options.timeoutMs / 1000} s` };
+			const [stdout, stderr, code] = done;
+			return { code, stdout, stderr };
+		} finally {
+			clearTimeout(timer);
 		}
 	}
 }

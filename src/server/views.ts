@@ -160,6 +160,8 @@ export interface ThreadSummaryView {
 	scratch: boolean;
 	/** When the archive sweep released the thread's VM; null while it has one. The next message restores the thread. */
 	archivedAt: string | null;
+	/** The pull request the thread's pushes opened; null before any. */
+	pr: { number: number; url: string } | null;
 	/** What the thread's turns add up to. `context.window` 0 means the window is unknown. */
 	metrics: ThreadMetrics;
 	/** The running turn's latest tool call or assistant message; null when no turn runs. */
@@ -345,6 +347,7 @@ export function summaryView(thread: Thread, stats: ThreadStats, questionTimeoutS
 		workspace: thread.paths.workspace,
 		lastActivityAt: thread.lastActivityAt,
 		archivedAt: thread.archivedAt,
+		pr: thread.pr === null ? null : { ...thread.pr },
 		metrics: metricsView(stats.metrics),
 		activity: stats.activity === null ? null : { ...stats.activity },
 	};

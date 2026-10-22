@@ -146,6 +146,26 @@ describe("git.protected", () => {
 	});
 });
 
+describe("git.sign, git.committer and git.pr", () => {
+	test("git.sign and git.pr take their choices and refuse anything else", () => {
+		expect(REGISTRY["git.sign"].parse("ssh")).toBe("ssh");
+		expect(REGISTRY["git.sign"].default).toBe("off");
+		expect(() => REGISTRY["git.sign"].parse("gpg")).toThrow("git.sign must be one of off, ssh");
+		expect(REGISTRY["git.pr"].default).toBe("draft");
+		for (const mode of ["off", "draft", "ready"] as const) expect(REGISTRY["git.pr"].parse(mode)).toBe(mode);
+		expect(() => REGISTRY["git.pr"].parse("yes")).toThrow("git.pr must be one of off, draft, ready");
+	});
+
+	test("git.committer is empty or Name <email>", () => {
+		const parse = (raw: unknown) => REGISTRY["git.committer"].parse(raw);
+		expect(parse("")).toBe("");
+		expect(parse("Ada Lovelace <ada@example.com>")).toBe("Ada Lovelace <ada@example.com>");
+		for (const bad of ["ada@example.com", "<ada@example.com>", "Ada <ada>", "Ada <a b@c.d>", "Ada\n <a@b.c>", 5]) {
+			expect(() => parse(bad)).toThrow(SettingError);
+		}
+	});
+});
+
 describe("policy.bash.patterns", () => {
 	const parse = (raw: unknown) => REGISTRY["policy.bash.patterns"].parse(raw);
 

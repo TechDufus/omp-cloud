@@ -19,7 +19,7 @@ import { describeJobTile, describeJobWidget, renderJobTileLines } from "@oh-my-p
 import { type CloudJobThread, cloudJobTile, shortDate } from "./cloud-job";
 import { CARD_TYPE } from "./conversation";
 import { eventLines, lineLabel, lineText } from "./event-lines";
-import { clip, diffstat, formatCost, formatDuration, formatTokens, phaseIcon, plural, pushedText, stateIcon, threadHeading, truncateText } from "./format";
+import { clip, diffstat, formatCost, formatDuration, formatTokens, phaseIcon, plural, prLine, pushedText, stateIcon, threadHeading, truncateText } from "./format";
 import { isRecord } from "./guards";
 import { repoKey, repoLabel, type RepoRef } from "./repo-key";
 import type { Login, PendingQuestion, Question, QuestionOption, ThreadActivity, ThreadEvent, ThreadMetrics, ThreadOrigin, ThreadPhase, ThreadResult, ThreadSummary, TurnState, Whoami } from "./types";
@@ -132,6 +132,8 @@ export interface TurnCard extends ThreadCardBase {
 	pushError: string;
 	/** The remote branch the result was pushed to; `""` when it was not. */
 	pushRef: string;
+	/** The thread's pull request (`https://github.com/<o>/<r>/pull/<n>`); `""` when it has none. */
+	prUrl: string;
 	branch: string;
 	reply: string;
 	error: string;
@@ -596,6 +598,7 @@ export function cardContent(d: CardDetails): string {
 			if (d.state === "done") {
 				const push = d.pushed ? pushedText(d) : d.pushError ? "push failed" : "not pushed";
 				lines.push(`${diffstat(d)}${d.head ? ` · ${d.branch} @ ${d.head.slice(0, 8)}` : ""} · ${push}`);
+				if (d.prUrl) lines.push(prLine(d.prUrl));
 				if (d.pushError && !d.pushed) body.push(`Push error: ${clip(d.pushError, 80)}`);
 				if (d.reply) body.push(`Reply: ${truncateText(d.reply, CONTENT_REPLY_MAX)}`);
 			} else if (d.error) {
@@ -688,6 +691,7 @@ export function cardPlain(d: CardDetails): string[] {
 			if (d.state === "done") {
 				const push = d.pushed ? pushedText(d) : d.pushError ? `push failed: ${clip(d.pushError, 120)}` : "not pushed";
 				lines.push(`${diffstat(d)} · ${push} · ${d.branch}${d.head ? ` @ ${d.head.slice(0, 8)}` : ""}`);
+				if (d.prUrl) lines.push(prLine(d.prUrl));
 			}
 			lines.push("", ...(d.state === "failed" && d.error ? d.error.split("\n") : d.reply.split("\n")));
 			pushList(lines, `Events (${d.events.length})`, d.events.map(lineText));
@@ -856,6 +860,7 @@ function buildTurn(d: TurnCard, tui: TuiModule, theme: Theme, expanded: boolean,
 				{ separator: " · ", overflow: "wrap" },
 			),
 		);
+		if (d.prUrl) root.addChild(new tui.Text(theme.fg("accent", prLine(d.prUrl)), 0, 0));
 	}
 	const body = !ok && d.error ? d.error : d.reply;
 	if (body) root.addChild(new tui.Markdown(body, 0, 0, tui.getMarkdownTheme()));
@@ -1534,6 +1539,7 @@ function describeTurn(d: TurnCard, expanded: boolean): NativeNode {
 			[native.span(d.head ? `${d.branch} @ ${d.head.slice(0, 8)}` : d.branch, "mono")],
 		]);
 		children.push(native.node("text", { spans: result, wrap: "word" }, undefined, "result"));
+		if (d.prUrl) children.push(native.node("text", { spans: [native.span(prLine(d.prUrl), "mono")], wrap: "none", truncate: "end" }, undefined, "pr"));
 	}
 	const body = !ok && d.error ? d.error : d.reply;
 	if (body) children.push(native.node("md", { text: body, role: "omp.cloud.reply" }, undefined, "reply"));

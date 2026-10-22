@@ -11,7 +11,11 @@ import type { Sandbox } from "e2b";
 import type { Config } from "../config";
 import type { GatewayClients } from "../gateway/clients";
 import type { GatewayModels } from "../gateway/models";
-import type { GitService } from "../git";
+import type { GitService, SignedResult } from "../git";
+import { effectiveCommitter } from "../git/committer";
+import type { SigningKey } from "../git/signing-key";
+import type { GitHubApi } from "../github/api";
+import type { GitHubApp } from "../github/app";
 import { isRecord } from "../guards";
 import type { Settings } from "../settings";
 import { effectivePolicy } from "../settings/tighten";
@@ -45,15 +49,15 @@ import { APPROVAL_ABORTED, abortAfterDenying, approvalInput, approvalTimeoutAnsw
 import { ChildTracker } from "./children";
 import { TurnClock } from "./clock";
 import { sandboxExec, shellQuote } from "./exec";
-import { finalizeTurn, type TurnGit } from "./git";
+import { adoptSigned, finalizeTurn, type TurnGit } from "./git";
 import { formatDuration } from "./omp-config";
 import { ompAlive, OmpProcess } from "./omp-process";
 import { dropStaleSockets } from "./stale-sockets";
 import { IRC_COMMAND, ircDelivered, ircInCommand, ircPlainText, parseIrcFrame, turnMessage } from "./irc";
 import { classifyPrompt, type TurnOutcome } from "./outcome";
 import { addUsage, type AssistantEnd, assistantEnd, messageText, progressOf, toolEndEventOf, toolStartEventOf, usageEventOf } from "./progress";
-import { downloadBlob, envFileFor, ompLaunchArgs, provisionVm, shipIrcExtension } from "./provision";
-import { NOT_PUSHED, PushStep, type PushRecord } from "./push";
+import { downloadBlob, envFileFor, ompLaunchArgs, provisionVm, shipIrcExtension, uploadBlob } from "./provision";
+import { NOT_PUSHED, PushStep, pullRequestsOf, type PushRecord } from "./push";
 import { exportSession, exportSessionId } from "./session-export";
 import { checkSpend, type SpendBreach, spendCapError } from "./spend";
 import { VM_IRC_EXTENSION, VM_WORKSPACE } from "./vm-layout";
@@ -72,6 +76,12 @@ export interface ThreadEnv {
 	settings: Settings;
 	/** Completes the delta handoffs of the threads it runs to full-history bundles. */
 	git: GitService;
+	/** The service's SSH signing key, which `git.sign` `ssh` re-signs each turn's commits with. */
+	signingKey: SigningKey;
+	/** The connected GitHub App: its token pushes to github.com and opens pull requests. */
+	github: GitHubApp;
+	/** The client of GitHub's REST API that pull requests go through. */
+	githubApi: GitHubApi;
 	/** The service host's omp version: what a thread stored without one runs. */
 	ompVersion: string;
 }
@@ -130,6 +140,7 @@ export async function loseVm(env: ThreadEnv, threadId: string): Promise<void> {
 }
 
 const BUNDLE_PATH = "/tmp/omp-cloud-result.bundle";
+const SIGNED_BUNDLE_PATH = "/tmp/omp-cloud-signed.bundle";
 const EXPORT_PATH = "/tmp/omp-cloud-session-export.tar";
 /** Poll `get_state` this often while a turn runs, in case omp's frames were lost. */
 const POLL_MS = 30_000;
@@ -577,7 +588,7 @@ export class ThreadRunner {
 				await this.#exportConversation(turn);
 				// A command that never reached the model made no result of its own: the next model turn pushes whatever it changed.
 				if (!local) {
-					const record = await this.#push(rt, thread, turn, outcome, git.head);
+					const record = await this.#push(rt, thread, turn, outcome, git.head, reply);
 					if (record === null) return false;
 					pushed = record;
 				}
@@ -971,21 +982,23 @@ export class ThreadRunner {
 	}
 
 	/** The push step of the turn (`push.ts`); null when the runner went away while it waited for the owner's answer. */
-	async #push(rt: RunningTurn, thread: Thread, turn: Turn, outcome: TurnOutcome, head: string): Promise<PushRecord | null> {
-		const { store, config } = this.env;
+	async #push(rt: RunningTurn, thread: Thread, turn: Turn, outcome: TurnOutcome, head: string, reply: string): Promise<PushRecord | null> {
+		const { store, config, github, githubApi } = this.env;
 		rt.push = new PushStep(
 			{
 				store,
 				git: this.env.git,
 				settings: this.env.settings,
+				pulls: github.connected() ? pullRequestsOf(github, githubApi) : null,
+				github,
 				questionTimeoutSeconds: config.runner.questionTimeoutSeconds,
 				clock: rt.clock,
-				event: text => this.#event("push", text, turn.id),
+				event: (text, kind = "push") => this.#event(kind, text, turn.id),
 			},
 			thread,
 			turn,
 		);
-		const record = await rt.push.run({ outcome: outcome.outcome, stopped: rt.stopRequested, head });
+		const record = await rt.push.run({ outcome: outcome.outcome, stopped: rt.stopRequested, head, reply });
 		rt.push = null;
 		return record;
 	}
@@ -1001,7 +1014,7 @@ export class ThreadRunner {
 		if (sandbox === null) return none;
 		try {
 			const uploadedHead = this.env.store.threadStats(this.id).resultTurn?.head ?? "";
-			const git = await this.#saveResult(sandbox, thread, titleFromReply(reply) || `omp-cloud: turn ${turn.id}`, uploadedHead);
+			const git = await this.#saveResult(sandbox, thread, titleFromReply(reply) || `omp-cloud: turn ${turn.id}`, uploadedHead, turn.id);
 			return { head: git.head, filesChanged: git.filesChanged, insertions: git.insertions, deletions: git.deletions };
 		} catch (error) {
 			if (!isMissingThread(error)) this.#event("notice", `the result could not be saved: ${describe(error)}`, turn.id);
@@ -1011,10 +1024,11 @@ export class ThreadRunner {
 
 	/**
 	 * Commits the workspace changes (as `message`, only when there are any), moves the thread branch onto them and stores the
-	 * result bundle unless the branch is still at `uploadedHead`, the head the stored bundle already holds. Never pushes.
-	 * Throws when git or the transfer fails.
+	 * result bundle unless the branch is still at `uploadedHead`, the head the stored bundle already holds. With `git.sign`
+	 * `ssh` the new commits are then re-signed and the VM adopts them (`#signResult`). Never pushes. Throws when git or the
+	 * transfer fails.
 	 */
-	async #saveResult(sandbox: Sandbox, thread: Thread, message: string, uploadedHead: string): Promise<TurnGit> {
+	async #saveResult(sandbox: Sandbox, thread: Thread, message: string, uploadedHead: string, turnId: number | null): Promise<TurnGit> {
 		const exec = sandboxExec(sandbox);
 		const git = await finalizeTurn(exec, {
 			workspace: VM_WORKSPACE,
@@ -1024,11 +1038,57 @@ export class ThreadRunner {
 			uploadedHead,
 			bundlePath: BUNDLE_PATH,
 		});
-		if (git.bundlePath !== null) {
-			await downloadBlob(sandbox, git.bundlePath, this.env.store, this.id, "result.bundle", MAX_SOURCE_BYTES);
-			await exec(`rm -f ${shellQuote(git.bundlePath)}`).catch(() => undefined);
+		if (git.bundlePath === null) return git;
+		await downloadBlob(sandbox, git.bundlePath, this.env.store, this.id, "result.bundle", MAX_SOURCE_BYTES);
+		await exec(`rm -f ${shellQuote(git.bundlePath)}`).catch(() => undefined);
+		return this.#signResult(sandbox, thread, git, uploadedHead, turnId);
+	}
+
+	/**
+	 * Signs the commits of the turn's stored result bundle when `git.sign` is `ssh`. The service rewrites them, the VM
+	 * adopts the signed tip, and only then does the stored `result.bundle` change, so the stored bundle and the recorded head
+	 * always agree. Any failure before that leaves the unsigned bundle and head standing, with a notice.
+	 */
+	async #signResult(sandbox: Sandbox, thread: Thread, git: TurnGit, uploadedHead: string, turnId: number | null): Promise<TurnGit> {
+		const { store, settings, signingKey, github } = this.env;
+		if (settings.get("git.sign") !== "ssh") return git;
+		if (!signingKey.exists()) {
+			this.#event("notice", "git.sign is ssh but the service has no signing key: create it on the dashboard's GitHub page", turnId);
+			return git;
 		}
-		return git;
+		const exec = sandboxExec(sandbox);
+		const branch = RESULT_BRANCH_PREFIX + this.id;
+		let signed: SignedResult | null = null;
+		try {
+			signed = await this.env.git.signResult(this.id, {
+				remoteURL: thread.repo.remoteURL,
+				baseCommit: thread.repo.baseCommit,
+				handoffCommit: thread.repo.handoffCommit,
+				uploadedHead,
+				sourceBundle: (await store.blob(this.id, "source.bundle")) === null ? null : store.blobPath(this.id, "source.bundle"),
+				resultBundle: store.blobPath(this.id, "result.bundle"),
+				branch,
+				head: git.head,
+				privatePem: signingKey.privatePem() ?? "",
+				committer: effectiveCommitter(settings.get("git.committer"), github),
+			});
+			if (signed === null) return git;
+			await uploadBlob(sandbox, Bun.file(signed.bundlePath), SIGNED_BUNDLE_PATH);
+			try {
+				await adoptSigned(exec, { workspace: VM_WORKSPACE, bundlePath: SIGNED_BUNDLE_PATH, branch, head: signed.head });
+			} finally {
+				await exec(`rm -f ${shellQuote(SIGNED_BUNDLE_PATH)}`).catch(() => undefined);
+			}
+			await store.putBlob(this.id, "result.bundle", Bun.file(signed.bundlePath).stream(), MAX_SOURCE_BYTES);
+			this.#event("sign", `signed ${signed.rewritten} commit${signed.rewritten === 1 ? "" : "s"} with ${signingKey.fingerprint() ?? "the signing key"}`, turnId);
+			return { ...git, head: signed.head };
+		} catch (error) {
+			if (isMissingThread(error)) throw error;
+			this.#event("notice", `the commits were not signed: ${describe(error)}`, turnId);
+			return git;
+		} finally {
+			await signed?.dispose();
+		}
 	}
 
 	/**
@@ -1566,7 +1626,7 @@ export class ThreadRunner {
 			if (thread === null) return "skipped";
 			if (sandbox === null) throw new Error("the sandbox is gone");
 			const uploadedHead = thread.restoreHead !== "" ? thread.restoreHead : (store.threadStats(this.id).resultTurn?.head ?? "");
-			const saved = await this.#saveResult(sandbox, thread, ARCHIVE_COMMIT_MESSAGE, uploadedHead);
+			const saved = await this.#saveResult(sandbox, thread, ARCHIVE_COMMIT_MESSAGE, uploadedHead, null);
 			await this.#packConversation(sandbox, null);
 			// A message that arrived while the snapshot ran keeps the VM; the snapshot only made its bundle newer.
 			if (!this.#archivable(cutoff)) {

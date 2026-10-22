@@ -144,6 +144,7 @@ export function summary(over: Partial<ThreadSummary> = {}): ThreadSummary {
 		ref: "",
 		session: "",
 		scratch: false,
+		pr: null,
 		warnings: [],
 		repo: { name: "app", remoteURL: "", baseRef: "main", localBranch: "main" },
 		workspace: "/home/ada/app",

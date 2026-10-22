@@ -1,5 +1,8 @@
 import type { LoginManager } from "../auth/login";
 import type { GitService } from "../git";
+import type { SigningKey } from "../git/signing-key";
+import type { GitHubApi } from "../github/api";
+import type { GitHubApp } from "../github/app";
 import { canonicalAddress } from "../pairing/cidr";
 import { SourceLimiter } from "../pairing/limiter";
 import type { RemoteSettings } from "../pairing/remote";
@@ -31,11 +34,13 @@ import { inspectResponse } from "./inspect";
 import { INSPECTION_GATE, type InspectGate } from "./inspect-gate";
 import { MAX_SOURCE_BYTES } from "./limits";
 import { MAX_LIST_LIMIT, threadListBody } from "./list";
+import { handleGithub } from "./github-routes";
 import { handleLogins } from "./logins";
-import { LOGINS_PATH, SETTINGS_PATH } from "./paths";
+import { GITHUB_PATH, LOGINS_PATH, SETTINGS_PATH, SIGNING_PATH } from "./paths";
 import { PairingRoutes } from "./pairing-routes";
 import { requireScope } from "./scopes";
 import { handleSettings } from "./settings-routes";
+import { handleSigning } from "./signing-routes";
 import { turnTextPage } from "./turn-text";
 import { handleUpdate, HEALTH_PATH, healthBody, type UpdateApi, updateSummary } from "./update-routes";
 import { detailView, questionView, summaryView, turnView } from "./views";
@@ -73,6 +78,15 @@ export interface AppOptions {
 	inspectGate?: InspectGate;
 	/** The updater behind `GET /api/v1/update` and `whoami.update`; absent in a service without one (every test app): the update routes do not exist and whoami says `unsupported`. */
 	update?: UpdateApi;
+	/** The GitHub App, its REST client and the SSH signing key behind `/api/v1/github`, `/api/v1/signing` and `whoami.github`; absent in a service without them (most test apps): those routes do not exist. */
+	github?: GithubWiring;
+}
+
+/** What the GitHub and signing routes work with. */
+export interface GithubWiring {
+	app: GitHubApp;
+	api: GitHubApi;
+	signingKey: SigningKey;
 }
 
 /** A device's `last_seen_at` is written at most this often. */
@@ -102,6 +116,9 @@ const CAPABILITIES: readonly string[] = [
 	"threads.irc",
 	"events.live",
 	"events.children",
+	"github.app",
+	"commits.signed",
+	"threads.pr",
 ];
 
 /** A message body: its text plus JSON framing. */
@@ -232,7 +249,7 @@ function stringListField(body: Record<string, unknown>, key: string): string[] {
 
 /** Builds the API over `options.store`. */
 export function createApp(options: AppOptions): App {
-	const { store, apiTokenSha256, dataDir, models, ompVersion, logins, settings, git, remote, modelIds, update } = options;
+	const { store, apiTokenSha256, dataDir, models, ompVersion, logins, settings, git, remote, modelIds, update, github } = options;
 	const questionTimeoutSeconds = options.questionTimeoutSeconds ?? 0;
 	const inspectGate = options.inspectGate ?? INSPECTION_GATE;
 	const dashboardRoutes = new DashboardRoutes({
@@ -345,6 +362,17 @@ export function createApp(options: AppOptions): App {
 		if (pathname === SETTINGS_PATH || pathname.startsWith(`${SETTINGS_PATH}/`)) {
 			return handleSettings(req, pathname.slice(SETTINGS_PATH.length).split("/").slice(1), settings, principal);
 		}
+		if (github !== undefined && (pathname === GITHUB_PATH || pathname.startsWith(`${GITHUB_PATH}/`))) {
+			return handleGithub(req, pathname.slice(GITHUB_PATH.length).split("/").slice(1), { app: github.app });
+		}
+		if (github !== undefined && (pathname === SIGNING_PATH || pathname.startsWith(`${SIGNING_PATH}/`))) {
+			return handleSigning(req, pathname.slice(SIGNING_PATH.length).split("/").slice(1), {
+				key: github.signingKey,
+				app: github.app,
+				api: github.api,
+				settings,
+			});
+		}
 		const pairingResponse = await pairing.handle(caller, req, pathname);
 		if (pairingResponse !== null) return pairingResponse;
 		const dashboardResponse = await dashboardRoutes.handle(caller, req, pathname, server);
@@ -378,6 +406,7 @@ export function createApp(options: AppOptions): App {
 					modelPatterns: modelPatterns(models),
 					ompVersion,
 					gitHosts: git.hosts(),
+					github: { app: github?.app.info()?.slug ?? null, signing: github !== undefined && github.signingKey.exists() && settings.get("git.sign") === "ssh" },
 					vms: store.countVms(principal),
 					threads: store.countThreads(principal),
 					device: caller.device,

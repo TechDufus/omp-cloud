@@ -107,6 +107,12 @@ export function pushedText(t: { pushRef: string }): string {
 	return t.pushRef === "" ? "pushed" : `pushed to ${t.pushRef}`;
 }
 
+/** `PR #<n> <url>`: the number is the pull request URL's last segment; the bare URL when it has none. */
+export function prLine(url: string): string {
+	const n = /\/pull\/(\d+)\/?$/.exec(url)?.[1];
+	return n === undefined ? `PR ${url}` : `PR #${n} ${url}`;
+}
+
 /** The cost of a turn, from its usage block. */
 export function turnCost(t: Pick<ThreadTurn, "usage">): string {
 	return formatCost(t.usage?.cost);

@@ -11,7 +11,7 @@ mise run backup                  # the same from a checkout; arguments go after 
 omp-cloud setup                  # (re)writes the units below, including the backup timer
 ```
 
-`backup` runs while the service does. The archive (0600, in a 0700 directory) holds `omp-cloud.db` (a consistent `VACUUM INTO` copy of the live WAL database), `threads/` (the blobs, **`secrets.json` included**: treat the archive like the data directory) and `git/cache/` (not `git/tmp/`). It reads the same config as the service (`--config`, `$OMP_CLOUD_CONFIG`, else `~/.config/omp-cloud/service.json`). Keep copies off the host too; the default directory sits on the same disk.
+`backup` runs while the service does. The archive (0600, in a 0700 directory) holds `omp-cloud.db` (a consistent `VACUUM INTO` copy of the live WAL database), `threads/` (the blobs, **`secrets.json` included**: treat the archive like the data directory), `git/cache/` (not `git/tmp/`) and, when they exist, `github/` (the [GitHub App's](github.md#where-it-lives) private key) and `signing/` (the SSH signing key): a restore brings the App and the key back as they were. It reads the same config as the service (`--config`, `$OMP_CLOUD_CONFIG`, else `~/.config/omp-cloud/service.json`). Keep copies off the host too; the default directory sits on the same disk.
 
 **Restore** is manual: `systemctl --user stop omp-cloud`, move the data directory aside, `mkdir -m 0700 <dataDir>`, `tar -xzf <archive> -C <dataDir>`, `systemctl --user start omp-cloud`.
 Restore also brings back the devices (and their tokens) as they were when the archive was taken, so revoke again any you had revoked since ([Pairing](pairing.md)).

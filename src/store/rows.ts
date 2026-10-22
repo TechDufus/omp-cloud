@@ -60,6 +60,8 @@ export interface ThreadRow {
 	scratch: number;
 	idempotency_key: string | null;
 	idempotency_fingerprint: string;
+	pr_number: number;
+	pr_url: string;
 }
 
 export interface TurnRow {
@@ -178,6 +180,7 @@ export function threadFromRow(row: ThreadRow): Thread {
 		ref: row.ref,
 		session: row.session,
 		scratch: row.scratch === 1,
+		pr: row.pr_number === 0 ? null : { number: row.pr_number, url: row.pr_url },
 	};
 }
 

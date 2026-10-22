@@ -86,3 +86,12 @@ textarea.input {
 	flex-wrap: wrap;
 	gap: 4px 8px;
 }
+
+/* The GitHub page's facts sit in half-width cards: one column, long values wrap. */
+.github-facts .kv {
+	grid-template-columns: minmax(0, 1fr);
+}
+
+.github-facts .kv-value {
+	overflow-wrap: anywhere;
+}

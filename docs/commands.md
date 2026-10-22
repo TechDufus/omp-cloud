@@ -36,6 +36,8 @@ Wherever a command takes `<id>` (the `cloud` tool takes the same references), ty
 
 A reference that matches several threads at one step is refused with up to 10 candidates; use the full id. Completion offers threads by name.
 
+`/cloud <task>` and a provider the cloud cannot run: when the model is one of a provider the cloud has no login for, and you are on the server machine's owner connection in omp's interactive UI with the agent idle, omp asks `Log the cloud in?` (`The cloud cannot run <provider> models yet. Log the cloud broker in to <provider> now?`). Yes runs the same sign-in as `/cloud login <provider>` and then hands the task off; any other answer, a paired device, a non-interactive mode or a busy agent keeps the refusal that names `/cloud login <provider>` (the `cloud` tool never asks).
+
 ## Where results go
 
 For a thread you started yourself, a finished turn (done or failed) and a question do not land in the conversation. They go to a cloud inbox you read when you are ready, and cost the model nothing:
@@ -54,6 +56,7 @@ Hand-offs, and the finished turns and questions of model-delegated threads (or o
 
 - A launch card has Respond, Show and Stop.
 - A finished turn has Respond (the main action), Pull, Resume and Show; a failed one has Respond and Show.
+- A finished turn's card shows `PR #<n> <url>` when the service has opened a pull request for the thread ([GitHub](github.md#pull-requests)), in Tern, in a terminal UI and in the plain text the model sees.
 - A single-choice question lists its options (the recommended one badged) and gets one Other… button; a multiple-choice or free-text question gets one Answer… button. In Tern the card lists the options the way omp's `ask` does; once answered, expired or cancelled it settles and shows the answer. In a terminal without Tern's protocol the card is framed with omp's own output block and status line, with ask markers on a question. A launch card's chip follows turn 1 (running, done, failed or cancelled) and has no chip while that is unknown.
 - A card announcing a service update (owner only) has a Restart to update button; a terminal UI shows `/cloud update`.
 - Respond opens omp's input sheet (`Reply to <name> · <short id>`) and sends your text as `/cloud send` would. A question of a thread you started yourself opens omp's own ask dialog by itself (all of the turn's pending questions in one; tool approvals and the push question use omp's approve prompt instead, where once, session or a grant approve and deny denies; closing the dialog counts as no answer); Other… and Answer… and `/cloud answer <id>` without text take the same path, and an omp without those APIs asks with its select and input prompts. A question of a thread the model started wakes the model through its card instead (the model answers an `ask` question through the `cloud` tool or asks you); approvals and pushes are always yours, and each question card is posted once. The other buttons run their verbs; Resume switches the session, so where a button has no command context it asks you to type `/cloud resume <id>`.

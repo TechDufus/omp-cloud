@@ -20,6 +20,9 @@
  *  L  delta handoff from an authenticated git remote (`git.hosts`): the base history is in the VM, the result bundle is thin
  *  M  `git.push` ask: the result waits for a `Push` answer, then the branch lands on the remote
  *  N  `git.push` auto: no question, the remote branch follows the new head
+ *  N2 signed result (`git.sign` ssh, the service's signing key): a turn made unsigned stays as pushed; after `POST /signing/key` only the
+ *     new commits carry signatures that `git verify-commit` accepts, the push is a fast-forward of the unsigned head, the VM adopted the
+ *     signed tip (the next turn's first parent), and a cold restore after a killed sandbox still descends from it and pushes fast-forward
  *  O  push refusals: a protected branch, then a diverged remote branch (never force-pushed)
  *  P  cold restore: the thread's sandbox is killed; the next message restores it on a new VM from the stored bundles and export
  *  P2 archive: with a tiny `lifecycle.archiveAfterDays` the sweep snapshots the idle thread and releases its VM (no sandbox,
@@ -834,6 +837,109 @@ async function run(): Promise<void> {
 		expectEqual("remote branch", await remoteBranch(bareRepo, branch), text(result.head));
 	});
 
+	// Its own thread (the remote branch of `delta` belongs to O's divergence): a delta handoff, the same remote, `git.push` auto.
+	await report.step("N2 signed result: the service re-signs each turn's commits, the VM adopts them, pushes and restores fast-forward", async () => {
+		const handoffDelta = (await git(deltaRepo, "rev-parse", "refs/omp-cloud/handoff")).trim();
+		const signId = await createThread(handoffDelta, join(dir, "delta.bundle"), null, {
+			request: {
+				repo: { name: "scenario-sign", remoteURL: remoteUrl, baseRef: "main", baseCommit: deltaBase, handoffCommit: handoffDelta, localBranch: "main" },
+			},
+		});
+		try {
+			await waitTurnIdle(1, 240_000);
+			const bashTurn = async (file: string): Promise<{ head: string; result: Json }> => {
+				const turn = await sendMessage(`BASH: printf '${file}\\n' > ${file}.txt`);
+				const result = obj((await waitTurnIdle(turn, 180_000)).result, "result");
+				const head = text(result.head);
+				if (head === "") throw new Error(`turn ${turn} recorded no head: ${JSON.stringify(result)}`);
+				return { head, result };
+			};
+			const hasSignature = async (sha: string): Promise<boolean> => /^gpgsig/m.test((await git(deltaRepo, "cat-file", "commit", sha)).split("\n\n")[0] ?? "");
+			const allowed = join(dir, "allowed-signers");
+			const verify = (sha: string): Promise<string> =>
+				git(deltaRepo, "-c", "gpg.format=ssh", "-c", `gpg.ssh.allowedSignersFile=${allowed}`, "verify-commit", sha);
+			/** Downloads the stored result bundle and fetches the commits into the delta repository (which holds the base). */
+			const fetchResult = async (label: string, head: string): Promise<void> => {
+				const res = await api("GET", `/threads/${signId}/result`);
+				expectEqual(`${label}: GET /result status`, res.status, 200);
+				const saved = join(dir, `sign-${label}.bundle`);
+				await writeFile(saved, new Uint8Array(await res.arrayBuffer()));
+				const heads = (await git(deltaRepo, "bundle", "list-heads", saved)).trim().split("\n");
+				const ref = heads.map(line => line.split(" ")).find(([sha]) => sha === head)?.[1];
+				if (ref === undefined) throw new Error(`${label}: the result bundle holds no ref at ${head}: ${JSON.stringify(heads)}`);
+				await git(deltaRepo, "fetch", "-q", saved, `+${ref}:refs/scn/${label}`);
+				expectEqual(`${label}: fetched head`, (await git(deltaRepo, "rev-parse", `refs/scn/${label}`)).trim(), head);
+			};
+
+			// Unsigned first: git.sign is off, the head is pushed as the VM made it.
+			await putSettings({ "git.push": "auto", "git.sign": "off" });
+			const unsigned = await bashTurn("sign-u");
+			expectEqual("unsigned: result.pushed", unsigned.result.pushed, true);
+			const branch = text(unsigned.result.pushRef);
+			expectEqual("unsigned: remote branch", await remoteBranch(bareRepo, branch), unsigned.head);
+			await fetchResult("unsigned", unsigned.head);
+			if (await hasSignature(unsigned.head)) throw new Error(`the head ${unsigned.head} carries a signature with git.sign off`);
+
+			// A key, git.sign ssh: only this turn's commits are signed, and the push is a fast-forward of the unsigned head.
+			const created = await apiJson("POST", "/signing/key", 201);
+			const publicKey = text(created.publicKey);
+			if (!publicKey.startsWith("ssh-ed25519 ")) throw new Error(`POST /signing/key: unexpected public key ${JSON.stringify(created)}`);
+			expectContains("POST /signing/key fingerprint", text(created.fingerprint), "SHA256:");
+			await expectRefused("POST", "/signing/key", 409, "a signing key exists");
+			const shown = await apiJson("GET", "/signing", 200);
+			expectEqual("GET /signing publicKey", shown.publicKey, publicKey);
+			await writeFile(allowed, `omp-cloud ${publicKey}\n`);
+			await putSettings({ "git.sign": "ssh" });
+			const who = obj((await apiJson("GET", "/whoami", 200)).github, "whoami.github");
+			expectEqual("whoami.github.signing", who.signing, true);
+
+			const first = await bashTurn("sign-1");
+			expectEqual("signed 1: result.pushed", first.result.pushed, true);
+			expectEqual("signed 1: result.pushError", first.result.pushError, "");
+			await fetchResult("signed1", first.head);
+			const ahead = (await git(deltaRepo, "rev-list", first.head, `^${unsigned.head}`)).trim().split("\n").filter(sha => sha !== "");
+			if (ahead.length === 0) throw new Error(`the signed head ${first.head} adds no commit over the unsigned ${unsigned.head}`);
+			for (const sha of ahead) await verify(sha);
+			await git(deltaRepo, "merge-base", "--is-ancestor", unsigned.head, first.head);
+			if (!(await hasSignature(first.head))) throw new Error(`the head ${first.head} is not signed`);
+			if (await hasSignature(unsigned.head)) throw new Error(`the earlier unsigned commit ${unsigned.head} was rewritten`);
+			expectEqual("signed 1: remote branch", await remoteBranch(bareRepo, branch), first.head);
+			const signEvents = (await readEvents(2000)).filter(e => e.kind === "sign").map(e => e.text);
+			if (!signEvents.some(e => /^signed \d+ commits? with SHA256:/.test(e))) throw new Error(`no "signed <n> commit(s) with SHA256:..." sign event: ${JSON.stringify(signEvents)}`);
+
+			// The VM adopted the signed tip: the next turn's commit sits on it, and is signed too.
+			const second = await bashTurn("sign-2");
+			expectEqual("signed 2: result.pushed", second.result.pushed, true);
+			await fetchResult("signed2", second.head);
+			expectEqual("signed 2: first parent", (await git(deltaRepo, "rev-parse", `${second.head}^1`)).trim(), first.head);
+			await verify(second.head);
+			expectEqual("signed 2: remote branch", await remoteBranch(bareRepo, branch), second.head);
+
+			// Restore: the sandbox is killed, the new VM is rebuilt from the stored (signed) bundle and pushes a fast-forward.
+			const lost = text(obj(vmOf(await detail()), "vm").sandboxId);
+			if (lost === "") throw new Error("the signing thread has no sandbox to kill");
+			await Sandbox.kill(lost, vmonOptions(vmonKey ?? ""));
+			const restored = await bashTurn("sign-3");
+			expectEqual("restored: result.pushed", restored.result.pushed, true);
+			expectEqual("restored: result.pushError", restored.result.pushError, "");
+			await fetchResult("restored", restored.head);
+			await git(deltaRepo, "merge-base", "--is-ancestor", second.head, restored.head);
+			await verify(restored.head);
+			expectEqual("restored: remote branch", await remoteBranch(bareRepo, branch), restored.head);
+			await git(bareRepo, "merge-base", "--is-ancestor", second.head, restored.head);
+			const notices = (await readEvents(2000)).filter(e => e.kind === "notice" && e.text.includes("not signed")).map(e => e.text);
+			if (notices.length > 0) throw new Error(`signing failed: ${JSON.stringify(notices)}`);
+		} finally {
+			// git.push stays `auto`, as N left it (O needs it); the key goes, so a later step cannot sign.
+			await putSettings({ "git.sign": null });
+			await api("DELETE", "/signing/key");
+			threadId = delta;
+		}
+		// The thread is left to the final cleanup: deleting it here (killing its sandbox) made the paused VM of `delta` hang on its next resume (O).
+		const gone = await apiJson("GET", "/signing", 200);
+		expectEqual("GET /signing publicKey after DELETE /signing/key", gone.publicKey, null);
+	}, () => `thread ${threadId}`);
+
 	await report.step("O push refusals: a protected branch, then a diverged remote branch", async () => {
 		const branch = `omp-cloud/${delta}`;
 		const pushedHead = await remoteBranch(bareRepo, branch);
@@ -1557,7 +1663,7 @@ async function run(): Promise<void> {
 		expectEqual("service.version", service.version, pkg.version);
 		expectContains("service.version", text(service.version), ".");
 		expectEqual("service.api", service.api, API_VERSION);
-		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children"];
+		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr"];
 		expectEqual("capabilities", JSON.stringify((Array.isArray(who.capabilities) ? who.capabilities.map(text) : []).sort()), JSON.stringify([...expected].sort()));
 		const limits = obj(who.limits, "whoami.limits");
 		expectEqual("limits", JSON.stringify([limits.maxMessageBytes, limits.maxAnswerBytes, limits.listMax, limits.maxTurns]), JSON.stringify([32768, 4000, 200, 200]));

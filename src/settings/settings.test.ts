@@ -109,6 +109,9 @@ describe("get and list", () => {
 		const views = settings.list();
 		expect(views.slice(0, 3).map((v) => v.key)).toEqual(["git.push", "git.branch", "git.protected"]);
 		expect(views.slice(3).map((v) => [v.key, v.type])).toEqual([
+			["git.sign", "enum"],
+			["git.committer", "string"],
+			["git.pr", "enum"],
 			["policy.bash.patterns", "json"],
 			["policy.tools.approval", "json"],
 			["policy.fetch", "bool"],

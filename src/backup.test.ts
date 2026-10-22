@@ -18,6 +18,11 @@ beforeEach(() => {
 	writeFileSync(join(dataDir, "threads", "t1", "secrets.json"), '{"k":"v"}');
 	writeFileSync(join(dataDir, "git", "cache", "abc.git", "HEAD"), "ref: refs/heads/main\n");
 	writeFileSync(join(dataDir, "git", "tmp", "scratch"), "not part of a backup");
+	mkdirSync(join(dataDir, "github"), { recursive: true, mode: 0o700 });
+	mkdirSync(join(dataDir, "signing"), { recursive: true, mode: 0o700 });
+	writeFileSync(join(dataDir, "github", "app.json"), '{"id":1}');
+	writeFileSync(join(dataDir, "github", "app.pem"), "-----BEGIN RSA PRIVATE KEY-----\n", { mode: 0o600 });
+	writeFileSync(join(dataDir, "signing", "ed25519.pem"), "-----BEGIN PRIVATE KEY-----\n", { mode: 0o600 });
 	// The service's database: WAL mode, still open, rows that no checkpoint has moved into the main file.
 	live = new Database(join(dataDir, "omp-cloud.db"));
 	live.run("PRAGMA journal_mode = WAL");
@@ -45,7 +50,7 @@ async function tar(...args: string[]): Promise<string> {
 const mode = (path: string): number => statSync(path).mode & 0o777;
 
 describe("backup", () => {
-	test("archives a consistent database copy, the blobs and the git cache, not the git scratch space", async () => {
+	test("archives a consistent database copy, the blobs, the git cache, the GitHub App and the signing key, not the git scratch space", async () => {
 		const result = await backup({ dataDir, keep: 7, now: at("2026-10-20T04:15:00.123Z") });
 
 		expect(result.path).toBe(join(root, "backups", "omp-cloud-20261020T041500Z.tar.gz"));
@@ -56,6 +61,9 @@ describe("backup", () => {
 		expect(members).toContain("omp-cloud.db");
 		expect(members).toContain("threads/t1/secrets.json");
 		expect(members).toContain("git/cache/abc.git/HEAD");
+		expect(members).toContain("github/app.json");
+		expect(members).toContain("github/app.pem");
+		expect(members).toContain("signing/ed25519.pem");
 		expect(members.some((member) => member.startsWith("git/tmp"))).toBe(false);
 		expect(members.some((member) => member.endsWith("-wal") || member.endsWith("-shm"))).toBe(false);
 
@@ -69,6 +77,11 @@ describe("backup", () => {
 			copy.close();
 		}
 		expect(await Bun.file(join(out, "threads", "t1", "secrets.json")).text()).toBe('{"k":"v"}');
+		expect(await Bun.file(join(out, "github", "app.json")).text()).toBe('{"id":1}');
+		expect(await Bun.file(join(out, "signing", "ed25519.pem")).text()).toBe("-----BEGIN PRIVATE KEY-----\n");
+		// The keys keep their modes through a restore: the service refuses a key that others can read.
+		expect(mode(join(out, "github", "app.pem"))).toBe(0o600);
+		expect(mode(join(out, "signing", "ed25519.pem"))).toBe(0o600);
 	});
 
 	test("the backup directory is 0700, archives 0600, and nothing but the archive is left behind", async () => {
@@ -141,7 +154,7 @@ describe("backup", () => {
 		expect(result.path.startsWith(backupDir)).toBe(true);
 		const members = (await tar("-tzf", result.path)).split("\n");
 		expect(members).toContain("omp-cloud.db");
-		expect(members.some((member) => member.startsWith("git"))).toBe(false);
+		expect(members.some((member) => member.startsWith("git/"))).toBe(false);
 	});
 
 	test("a second run in the same second fails and keeps the first archive", async () => {

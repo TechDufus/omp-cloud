@@ -70,6 +70,7 @@ describe("summaryView", () => {
 		ref: "",
 		session: "",
 		scratch: false,
+		pr: null,
 	};
 
 	function turn(overrides: Partial<Turn>): Turn {
@@ -113,6 +114,14 @@ describe("summaryView", () => {
 		expect(summaryView({ ...thread, ...meta }, stats)).toMatchObject(meta);
 		expect(detailView({ ...thread, ...meta }, stats, [], null)).toMatchObject(meta);
 		expect(summaryView(thread, stats)).toMatchObject({ origin: "", ref: "", session: "", scratch: false });
+	});
+
+	test("the summary and the detail carry the pull request, null before any", () => {
+		const stats: ThreadStats = { turns: 1, queued: 0, latest: null, resultTurn: null, pending: null, metrics: NO_METRICS, activity: null };
+		const pr = { number: 7, url: "https://github.com/acme/app/pull/7" };
+		expect(summaryView(thread, stats).pr).toBeNull();
+		expect(summaryView({ ...thread, pr }, stats).pr).toEqual(pr);
+		expect(detailView({ ...thread, pr }, stats, [], null).pr).toEqual(pr);
 	});
 
 	test("result.updatedAt falls back to the queue time of a turn without completion time", () => {

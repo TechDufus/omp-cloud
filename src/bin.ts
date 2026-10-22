@@ -25,7 +25,7 @@ usage: omp-cloud [command] [options]
   update apply                           install the downloaded release and restart the service
   install [--from <binary>] [--config <path>]
                                          turn this install into a managed one (updates itself in place)
-  backup [--keep N] [--config <path>]    one archive of the database, blobs and git cache
+  backup [--keep N] [--config <path>]    one archive of the database, blobs, git cache and keys
   version                                print the version and build id
   --help                                 this text
 

@@ -140,6 +140,8 @@ export interface ThreadSummaryView {
 	latest: LatestView | null;
 	question: PendingQuestionView | null;
 	result: ResultView | null;
+	/** The pull request the service opened for the thread's branch; null until one exists. */
+	pr: { number: number; url: string } | null;
 	createdAt: string;
 	lastActivityAt: string;
 	/** When the archive sweep released the thread's VM; null when it has one or never did. */
@@ -498,6 +500,82 @@ export async function inputLogin(id: string, input: string): Promise<Login> {
 
 export async function cancelLogin(id: string): Promise<void> {
 	await send("DELETE", `/api/v1/logins/${encodeURIComponent(id)}`);
+}
+
+// GitHub App and commit signing
+
+/** The GitHub App the service created through the manifest flow. */
+export interface GithubApp {
+	id: number;
+	slug: string;
+	name: string;
+	clientId: string;
+	htmlUrl: string;
+	owner: { login: string; id: number; type: string };
+	createdAt: string;
+}
+
+export interface GithubInstallation {
+	id: number;
+	account: string;
+	accountType: string;
+	selection: "all" | "selected";
+	htmlUrl: string;
+}
+
+/** `GET /api/v1/github`; `installationsError` is `""` when the installations listed. */
+export interface GithubStatus {
+	app: GithubApp | null;
+	installUrl: string | null;
+	installations: GithubInstallation[];
+	installationsError: string;
+}
+
+/** What the page posts to GitHub to create the App: `manifest` goes in a form field named `manifest`. */
+export interface GithubManifest {
+	postUrl: string;
+	manifest: string;
+	state: string;
+}
+
+/** `GET /api/v1/signing`; `publicKey` and `fingerprint` are null while there is no key. */
+export interface SigningStatus {
+	publicKey: string | null;
+	fingerprint: string | null;
+	createdAt: string | null;
+	/** The effective committer of signed commits as `Name <email>`, or null when each commit keeps its own. */
+	committer: string | null;
+	/** The key's owner on GitHub; `registered` is null when GitHub could not say. */
+	github: { login: string; registered: boolean | null; error: string } | null;
+}
+
+export async function getGithub(): Promise<GithubStatus> {
+	return call<GithubStatus>("GET", "/api/v1/github");
+}
+
+export async function githubManifest(request: { origin: string; org?: string }): Promise<GithubManifest> {
+	return call<GithubManifest>("POST", "/api/v1/github/manifest", { json: request });
+}
+
+/** Finishes the manifest flow with the `code` and `state` GitHub redirected back with. */
+export async function githubConvert(code: string, state: string): Promise<GithubApp> {
+	return (await call<{ app: GithubApp }>("POST", "/api/v1/github/conversions", { json: { code, state } })).app;
+}
+
+export async function disconnectGithub(): Promise<void> {
+	await send("DELETE", "/api/v1/github");
+}
+
+export async function getSigning(): Promise<SigningStatus> {
+	return call<SigningStatus>("GET", "/api/v1/signing");
+}
+
+export async function createSigningKey(): Promise<{ publicKey: string; fingerprint: string }> {
+	return call("POST", "/api/v1/signing/key");
+}
+
+export async function deleteSigningKey(): Promise<void> {
+	await send("DELETE", "/api/v1/signing/key");
 }
 
 // Devices and pairing

@@ -130,6 +130,13 @@ describe("listThreadsPage", () => {
 		expect(parseThreadSummary({ ...summary(), origin: "robot" }).origin).toBe("");
 	});
 
+	test("a pull request is parsed; a thread without one, or with number 0, has none", () => {
+		expect(parseThreadSummary({ ...summary(), pr: { number: 7, url: "https://github.com/o/r/pull/7" } }).pr).toEqual({ number: 7, url: "https://github.com/o/r/pull/7" });
+		expect(parseThreadSummary(summary()).pr).toBeNull();
+		expect(parseThreadSummary({ ...summary(), pr: null }).pr).toBeNull();
+		expect(parseThreadSummary({ ...summary(), pr: { number: 0, url: "" } }).pr).toBeNull();
+	});
+
 	test("listThreads is the newest page's threads", async () => {
 		const { client } = service(() => Response.json({ threads: [summary({ id: "aaaaaaaaaaaa" })], next: "c", total: 9 }));
 		expect((await client.listThreads()).map(t => t.id)).toEqual(["aaaaaaaaaaaa"]);

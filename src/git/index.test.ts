@@ -3,7 +3,9 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type GitHttpServer, serveGitHttp } from "../../test/git-http";
-import { GitError, GitService, type PushInput } from "./index";
+import { generateSigningKey } from "./sshsig";
+import { GitHubAppNotInstalled } from "../github/app";
+import { GitError, GitService, type PushInput, type SignInput } from "./index";
 
 setDefaultTimeout(60_000);
 
@@ -399,7 +401,7 @@ describe("push", () => {
 	test("pushes the result as a new branch and leaves every other branch alone", async () => {
 		const service = await open();
 		const r = await result(`omp-cloud/${ID}`, base, "r1.txt", null);
-		expect(await service.push(ID, inputOf(r))).toEqual({ pushed: true, error: "" });
+		expect(await service.push(ID, inputOf(r))).toEqual({ pushed: true, error: "", defaultBranch: "main" });
 		expect(await remoteRef(`refs/heads/omp-cloud/${ID}`)).toBe(r.head);
 		expect(await remoteRef("refs/heads/main")).toBe(base);
 		expect(server.requests.some(req => req.authorized)).toBe(true);
@@ -410,7 +412,7 @@ describe("push", () => {
 		const first = await result(`omp-cloud/${ID}`, base, "r1.txt", null);
 		expect((await service.push(ID, inputOf(first))).pushed).toBe(true);
 		const second = await result(`omp-cloud/${ID}`, first.head, "r2.txt", null);
-		expect(await service.push(ID, inputOf(second))).toEqual({ pushed: true, error: "" });
+		expect(await service.push(ID, inputOf(second))).toEqual({ pushed: true, error: "", defaultBranch: "main" });
 		expect(await remoteRef(`refs/heads/omp-cloud/${ID}`)).toBe(second.head);
 	});
 
@@ -418,7 +420,7 @@ describe("push", () => {
 		const service = await open();
 		await service.prepare(ID, { remoteURL: urlOf(), baseRef: "main", baseCommit: base, handoffCommit: base }, null);
 		const r = await result(`omp-cloud/${ID}`, base, "r1.txt", base);
-		expect(await service.push(ID, inputOf(r))).toEqual({ pushed: true, error: "" });
+		expect(await service.push(ID, inputOf(r))).toEqual({ pushed: true, error: "", defaultBranch: "main" });
 		expect(await remoteRef(`refs/heads/omp-cloud/${ID}`)).toBe(r.head);
 	});
 
@@ -433,7 +435,7 @@ describe("push", () => {
 		const service = await open();
 		const r = await result(`omp-cloud/${ID}`, base, "r1.txt", null);
 		const outcome = await service.push(ID, inputOf(r, { target: "release/1.2" }));
-		expect(outcome).toEqual({ pushed: false, error: "refusing to push to protected branch release/1.2" });
+		expect(outcome).toEqual({ pushed: false, error: "refusing to push to protected branch release/1.2", defaultBranch: "" });
 		expect(server.requests).toEqual([]);
 	});
 
@@ -454,7 +456,7 @@ describe("push", () => {
 		const service = await open();
 		const r = await result(`omp-cloud/${ID}`, base, "r1.txt", null);
 		const outcome = await service.push(ID, inputOf(r, { target: "main", protectedPatterns: [] }));
-		expect(outcome).toEqual({ pushed: false, error: `refusing to push to main, the default branch of ${urlOf()}` });
+		expect(outcome).toEqual({ pushed: false, error: `refusing to push to main, the default branch of ${urlOf()}`, defaultBranch: "main" });
 		expect(await remoteRef("refs/heads/main")).toBe(base);
 	});
 
@@ -464,7 +466,7 @@ describe("push", () => {
 		await git(work, "push", "-q", bare, `${theirs.head}:refs/heads/omp-cloud/${ID}`);
 		const mine = await result(`omp-cloud/${ID}`, base, "mine.txt", null);
 		const outcome = await service.push(ID, inputOf(mine));
-		expect(outcome).toEqual({ pushed: false, error: `omp-cloud/${ID} on ${urlOf()} has commits the result lacks; not force-pushing` });
+		expect(outcome).toEqual({ pushed: false, error: `omp-cloud/${ID} on ${urlOf()} has commits the result lacks; not force-pushing`, defaultBranch: "main" });
 		expect(await remoteRef(`refs/heads/omp-cloud/${ID}`)).toBe(theirs.head);
 	});
 
@@ -497,7 +499,7 @@ describe("push", () => {
 		const service = await open();
 		const r = await result(`omp-cloud/${ID}`, base, "r1.txt", null);
 		const outcome = await service.push(ID, inputOf(r, { remoteURL: "https://evil.example/a.git" }));
-		expect(outcome).toEqual({ pushed: false, error: "the service has no git credentials for evil.example" });
+		expect(outcome).toEqual({ pushed: false, error: "the service has no git credentials for evil.example", defaultBranch: "" });
 		expect(server.requests).toEqual([]);
 	});
 
@@ -505,7 +507,7 @@ describe("push", () => {
 		const service = await open();
 		const r = await result(`omp-cloud/${ID}`, base, "r1.txt", null);
 		const outcome = await service.push(ID, inputOf(r, { head: base }));
-		expect(outcome).toEqual({ pushed: false, error: `the result bundle is at ${r.head}, not ${base}` });
+		expect(outcome).toEqual({ pushed: false, error: `the result bundle is at ${r.head}, not ${base}`, defaultBranch: "main" });
 		expect(await remoteRef(`refs/heads/omp-cloud/${ID}`).catch(() => "")).toBe("");
 	});
 
@@ -524,7 +526,7 @@ describe("push", () => {
 		await chmod(wrapper, 0o700);
 		const service = await open({ gitBinary: wrapper, pushTimeoutSeconds: 3 });
 		const r = await result(`omp-cloud/${ID}`, base, "r1.txt", null);
-		expect(await service.push(ID, inputOf(r))).toEqual({ pushed: false, error: "git push timed out after 3 s" });
+		expect(await service.push(ID, inputOf(r))).toEqual({ pushed: false, error: "git push timed out after 3 s", defaultBranch: "main" });
 		expect(await readdir(join(dataDir, "git", "tmp"))).toEqual([]);
 	});
 
@@ -610,5 +612,254 @@ describe("scratchSource", () => {
 		const source = await service.scratchSource();
 		await source.release();
 		expect(server.requests).toEqual([]);
+	});
+});
+
+describe("the GitHub App", () => {
+	const MINTED = "ghs_MINTED-token-7e1d";
+	const INSTALL_URL = "https://github.com/apps/omp-cloud-abc123/installations/new";
+
+	/** A git that answers every fetch and ls-remote with exit 128: it records what the call's credential helper hands out and echoes it to stderr, as a verbose git could. */
+	async function recordingGit(): Promise<{ wrapper: string; record: string }> {
+		const dir = await mkdtemp(join(root, "wrapper-"));
+		const wrapper = join(dir, "git.sh");
+		const record = join(dir, "record.txt");
+		await writeFile(
+			wrapper,
+			`#!/bin/sh
+case " $* " in
+	*" fetch "*|*" ls-remote "*)
+		for a in "$@"; do case "$a" in credential.helper=!*) helper=\${a#credential.helper=!};; esac; done
+		if [ -n "$helper" ]; then
+			out=$(printf 'protocol=https\\nhost=github.com\\n\\n' | eval "$helper get")
+			printf '%s\\n' "$out" >> ${record}
+			echo "fatal: unable to access 'https://x-access-token:$(printf '%s\\n' "$out" | sed -n 's/^password=//p')@github.com/acme/app': 403" >&2
+		fi
+		exit 128;;
+esac
+exec git "$@"
+`,
+		);
+		await chmod(wrapper, 0o700);
+		return { wrapper, record };
+	}
+
+	function app(over: { tokenFor?: (owner: string, repo: string) => Promise<string>; connected?: boolean } = {}) {
+		const calls: string[] = [];
+		return {
+			calls,
+			github: {
+				connected: () => over.connected ?? true,
+				tokenFor: async (owner: string, repoName: string): Promise<string> => {
+					calls.push(`${owner}/${repoName}`);
+					return over.tokenFor === undefined ? MINTED : over.tokenFor(owner, repoName);
+				},
+			},
+		};
+	}
+
+	const githubRepo = { remoteURL: "https://github.com/acme/app", baseRef: "main", baseCommit: "b".repeat(40), handoffCommit: "b".repeat(40) };
+
+	test("a connected App makes github.com a host, and ssh remotes of it normalize to https", async () => {
+		const { github } = app();
+		const service = await GitService.open({ dataDir, hosts: { "git.example.test": { credential: "!true", username: "u" } }, fetchTimeoutSeconds: 5, pushTimeoutSeconds: 5, github });
+		expect(service.hosts()).toEqual(["git.example.test", "github.com"]);
+		expect(service.normalize("git@github.com:acme/app.git")).toBe("https://github.com/acme/app.git");
+		expect(service.canFetch("git@github.com:acme/app.git")).toBe(true);
+		const without = await GitService.open({ dataDir, hosts: {}, fetchTimeoutSeconds: 5, pushTimeoutSeconds: 5, github: app({ connected: false }).github });
+		expect(without.hosts()).toEqual([]);
+		expect(without.canFetch("https://github.com/acme/app")).toBe(false);
+	});
+
+	test("a github.com remote is fetched with a helper that answers x-access-token and the minted token, which no error shows", async () => {
+		const { wrapper, record } = await recordingGit();
+		const { github, calls } = app();
+		const service = await GitService.open({ dataDir, hosts: {}, fetchTimeoutSeconds: 5, pushTimeoutSeconds: 5, gitBinary: wrapper, github });
+		const error = await expectGitError(service.prepare(ID, githubRepo, null), "base");
+		expect(calls.length).toBeGreaterThan(0);
+		expect(new Set(calls)).toEqual(new Set(["acme/app"]));
+		const handedOut = await readFile(record, "utf8");
+		expect(handedOut).toContain("username=x-access-token");
+		expect(handedOut).toContain(`password=${MINTED}`);
+		expect(error.message).not.toContain(MINTED);
+		expect(error.message).toContain("is not on https://github.com/acme/app");
+	});
+
+	test("an App that is not installed there falls back to the git.hosts token of github.com", async () => {
+		const { wrapper, record } = await recordingGit();
+		const { github } = app({
+			tokenFor: async () => {
+				throw new GitHubAppNotInstalled(`the GitHub App omp-cloud-abc123 is not installed on acme/app: ${INSTALL_URL}`);
+			},
+		});
+		const service = await GitService.open({
+			dataDir,
+			hosts: { "github.com": { credential: "!printf %s fallback-PAT-99", username: "pat-user" } },
+			fetchTimeoutSeconds: 5,
+			pushTimeoutSeconds: 5,
+			gitBinary: wrapper,
+			github,
+		});
+		await expectGitError(service.prepare(ID, githubRepo, null), "base");
+		const handedOut = await readFile(record, "utf8");
+		expect(handedOut).toContain("username=pat-user");
+		expect(handedOut).toContain("password=fallback-PAT-99");
+	});
+
+	test("an App that is not installed and no host entry: the base error names the install URL", async () => {
+		const { github } = app({
+			tokenFor: async () => {
+				throw new GitHubAppNotInstalled(`the GitHub App omp-cloud-abc123 is not installed on acme/app: ${INSTALL_URL}`);
+			},
+		});
+		const service = await GitService.open({ dataDir, hosts: {}, fetchTimeoutSeconds: 5, pushTimeoutSeconds: 5, github });
+		const error = await expectGitError(service.prepare(ID, githubRepo, null), "base");
+		expect(error.message).toContain("is not on https://github.com/acme/app");
+		expect(error.message).toContain(INSTALL_URL);
+	});
+
+	test("a push to a repository the App is not installed on reports the install URL", async () => {
+		const { github } = app({
+			tokenFor: async () => {
+				throw new GitHubAppNotInstalled(`the GitHub App omp-cloud-abc123 is not installed on acme/app: ${INSTALL_URL}`);
+			},
+		});
+		const service = await GitService.open({ dataDir, hosts: {}, fetchTimeoutSeconds: 5, pushTimeoutSeconds: 5, github });
+		const outcome = await service.push(ID, {
+			remoteURL: "https://github.com/acme/app",
+			bundlePath: join(dataDir, "none.bundle"),
+			localBranch: `omp-cloud/${ID}`,
+			head: "c".repeat(40),
+			target: `omp-cloud/${ID}`,
+			protectedPatterns: [],
+		});
+		expect(outcome.pushed).toBe(false);
+		expect(outcome.error).toStartWith("git push failed: fatal: the GitHub App omp-cloud-abc123 is not installed");
+		expect(outcome.error).toContain(INSTALL_URL);
+	});
+
+	test("any other token failure stops the call with a fatal line, even when a git.hosts entry exists", async () => {
+		const { github } = app({
+			tokenFor: async () => {
+				throw new Error("GitHub answered 500");
+			},
+		});
+		const service = await GitService.open({
+			dataDir,
+			hosts: { "github.com": { credential: "!printf %s fallback-PAT-99", username: "pat-user" } },
+			fetchTimeoutSeconds: 5,
+			pushTimeoutSeconds: 5,
+			github,
+		});
+		const error = await expectGitError(service.prepare(ID, githubRepo, null), "base");
+		expect(error.message).toContain("fatal: GitHub answered 500");
+	});
+});
+
+describe("signResult", () => {
+	let signing: string;
+
+	beforeEach(async () => {
+		signing = await mkdtemp(join(root, "signing-"));
+	});
+
+	/** `base` is the thread's handoff commit; the result is two commits on top of it. */
+	async function twoCommits(): Promise<{ resultBundle: string; head: string; first: string; sourceBundle: string }> {
+		const sourceBundle = await bundleOf(base, null);
+		await git(work, "checkout", "-q", "-f", "--detach", base);
+		const first = await commit(work, "s1.txt", "s1\n");
+		const head = await commit(work, "s2.txt", "s2\n");
+		await git(work, "branch", "-q", "-f", `omp-cloud/${ID}`, head);
+		await git(work, "checkout", "-q", "-f", "main");
+		const resultBundle = join(await mkdtemp(join(root, "result-")), "result.bundle");
+		await git(work, "bundle", "create", resultBundle, `refs/heads/omp-cloud/${ID}`);
+		return { resultBundle, head, first, sourceBundle };
+	}
+
+	const input = (over: Partial<SignInput>): SignInput => ({
+		remoteURL: server.url("app"),
+		baseCommit: "",
+		handoffCommit: base,
+		uploadedHead: "",
+		sourceBundle: null,
+		resultBundle: "",
+		branch: `omp-cloud/${ID}`,
+		head: "",
+		privatePem: generateSigningKey().privatePem,
+		committer: null,
+		...over,
+	});
+
+	test("signs the turn's commits on a full-history thread: same trees and messages, new ids, a bundle holding the signed tip", async () => {
+		const r = await twoCommits();
+		const service = await open();
+		const signed = await service.signResult(ID, input({ sourceBundle: r.sourceBundle, resultBundle: r.resultBundle, head: r.head }));
+		if (signed === null) throw new Error("expected a signed result");
+		try {
+			expect(signed.rewritten).toBe(2);
+			expect(signed.head).not.toBe(r.head);
+			const check = await mkdtemp(join(root, "check-"));
+			await git(check, "init", "-q", "--bare");
+			await git(check, "fetch", "-q", join(root, "work"), base);
+			await git(check, "fetch", "-q", signed.bundlePath, `refs/heads/omp-cloud/${ID}:refs/heads/signed`);
+			expect(await git(check, "rev-parse", "refs/heads/signed")).toBe(signed.head);
+			expect(await git(check, "rev-parse", `${signed.head}^{tree}`)).toBe(await git(work, "rev-parse", `${r.head}^{tree}`));
+			expect(await git(check, "log", "-2", "--format=%s", signed.head)).toBe("add s2.txt\nadd s1.txt");
+			expect(await git(check, "cat-file", "commit", signed.head)).toContain("gpgsig -----BEGIN SSH SIGNATURE-----");
+			expect(await git(check, "rev-parse", `${signed.head}~2`)).toBe(base);
+		} finally {
+			await signed.dispose();
+		}
+		expect(await Bun.file(signed.bundlePath).exists()).toBe(false);
+		expect(await readdir(join(dataDir, "git", "tmp"))).toEqual([]);
+	});
+
+	test("leaves the commits an earlier turn exposed alone (uploadedHead), and bundles thin on the base of a delta thread", async () => {
+		const r = await twoCommits();
+		const service = await open();
+		await service.prepare(ID, repoOf(base), null);
+		const signed = await service.signResult(ID, input({ baseCommit: base, uploadedHead: r.first, resultBundle: r.resultBundle, head: r.head }));
+		if (signed === null) throw new Error("expected a signed result");
+		try {
+			expect(signed.rewritten).toBe(1);
+			const check = await mkdtemp(join(root, "check-"));
+			await git(check, "init", "-q", "--bare");
+			await git(check, "fetch", "-q", join(root, "work"), base);
+			await git(check, "fetch", "-q", signed.bundlePath, `refs/heads/omp-cloud/${ID}:refs/heads/signed`);
+			// The first commit keeps its id; only the second was rewritten.
+			expect(await git(check, "rev-parse", `${signed.head}~1`)).toBe(r.first);
+			expect(await git(check, "rev-parse", signed.head)).toBe(signed.head);
+		} finally {
+			await signed.dispose();
+		}
+	});
+
+	test("returns null when nothing needed signing, and replaces committers when asked", async () => {
+		const r = await twoCommits();
+		const service = await open();
+		expect(await service.signResult(ID, input({ sourceBundle: r.sourceBundle, resultBundle: r.resultBundle, head: r.head, uploadedHead: r.head }))).toBeNull();
+		const signed = await service.signResult(
+			ID,
+			input({ sourceBundle: r.sourceBundle, resultBundle: r.resultBundle, head: r.head, committer: { name: "Ada Lovelace", email: "1+ada@users.noreply.github.com" } }),
+		);
+		if (signed === null) throw new Error("expected a signed result");
+		try {
+			const check = await mkdtemp(join(root, "check-"));
+			await git(check, "init", "-q", "--bare");
+			await git(check, "fetch", "-q", join(root, "work"), base);
+			await git(check, "fetch", "-q", signed.bundlePath, `refs/heads/omp-cloud/${ID}:refs/heads/signed`);
+			expect(await git(check, "log", "-1", "--format=%cn <%ce> / %an <%ae>", signed.head)).toBe("Ada Lovelace <1+ada@users.noreply.github.com> / Test <test@example.com>");
+		} finally {
+			await signed.dispose();
+		}
+		expect(await readdir(join(dataDir, "git", "tmp"))).toEqual([]);
+	});
+
+	test("a result bundle that is unusable throws and leaves no scratch space", async () => {
+		const service = await open();
+		const junk = join(signing, "junk.bundle");
+		await writeFile(junk, "not a bundle");
+		await expect(service.signResult(ID, input({ resultBundle: junk, sourceBundle: await bundleOf(base, null), head: base }))).rejects.toThrow("the result bundle is unusable");
+		expect(await readdir(join(dataDir, "git", "tmp"))).toEqual([]);
 	});
 });

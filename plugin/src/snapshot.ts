@@ -20,6 +20,8 @@ export interface SnapshotOptions {
 	gitHosts: readonly string[];
 	/** `false` leaves uncommitted work out: the handoff is HEAD itself. Default `true`. */
 	wip?: boolean;
+	/** How long signing the handoff commit may take before it falls back to an unsigned one. Default 30 s. */
+	signTimeoutMs?: number;
 }
 
 export interface Snapshot {
@@ -48,6 +50,8 @@ export interface Snapshot {
 	untrackedTotal: number;
 	/** Credential-named files left out of the snapshot: they stay on this machine. */
 	withheld: string[];
+	/** Problems the user should know about that did not stop the handoff (the handoff commit could not be signed). */
+	warnings: string[];
 }
 
 export interface GitOptions {
@@ -252,6 +256,26 @@ export function readSecretEnv(names: readonly string[], env: Record<string, stri
 	return out;
 }
 
+/** How long `commit-tree -S` may take: a pinentry or hardware-key prompt must not hang the handoff. */
+const SIGN_TIMEOUT_MS = 30_000;
+
+/**
+ * The WIP commit of `tree` on HEAD. When the user's git signs commits (`commit.gpgsign`), it is signed too, with a
+ * timeout; a failed or timed-out signature falls back to an unsigned commit and a warning.
+ */
+async function commitHandoff(root: string, tree: string, author: { name: string; email: string }, warnings: string[], signTimeoutMs: number): Promise<string> {
+	const env = { GIT_AUTHOR_NAME: author.name, GIT_AUTHOR_EMAIL: author.email, GIT_COMMITTER_NAME: author.name, GIT_COMMITTER_EMAIL: author.email };
+	const args = ["commit-tree", tree, "-p", "HEAD", "-m", "omp-cloud: local changes at handoff"];
+	if ((await gitOpt(root, ["config", "--type=bool", "--get", "commit.gpgsign"])) === "true") {
+		const signed = await gitRaw(root, ["commit-tree", "-S", ...args.slice(1)], { env, timeoutMs: signTimeoutMs });
+		const commit = signed.stdout.trim();
+		if (signed.code === 0 && commit !== "") return commit;
+		const reason = signed.code === 124 ? "signing timed out" : signed.stderr.trim().split("\n")[0] || "signing failed";
+		warnings.push(`the handoff commit is unsigned: ${reason}`);
+	}
+	return git(root, ["-c", "commit.gpgsign=false", ...args], { env });
+}
+
 /** The commit author of `cwd`'s git configuration, else a placeholder. */
 export async function readAuthor(cwd: string): Promise<{ name: string; email: string }> {
 	return {
@@ -288,6 +312,7 @@ export async function takeSnapshot(opts: SnapshotOptions): Promise<Snapshot> {
 	let withheld: string[] = [];
 	let untracked: string[] = [];
 	let wip = { files: 0, insertions: 0, deletions: 0 };
+	const warnings: string[] = [];
 	let handoff = head;
 	if (opts.wip !== false) {
 		const indexEnv = { GIT_INDEX_FILE: join(opts.tmpDir, "index") };
@@ -298,18 +323,7 @@ export async function takeSnapshot(opts: SnapshotOptions): Promise<Snapshot> {
 		const tree = await git(root, ["write-tree"], { env: indexEnv });
 		wip = await wipStat(root, indexEnv);
 		if (tree !== (await git(root, ["rev-parse", "HEAD^{tree}"]))) {
-			handoff = await git(
-				root,
-				["-c", "commit.gpgsign=false", "commit-tree", tree, "-p", "HEAD", "-m", "omp-cloud: local changes at handoff"],
-				{
-					env: {
-						GIT_AUTHOR_NAME: name,
-						GIT_AUTHOR_EMAIL: email,
-						GIT_COMMITTER_NAME: name,
-						GIT_COMMITTER_EMAIL: email,
-					},
-				},
-			);
+			handoff = await commitHandoff(root, tree, { name, email }, warnings, opts.signTimeoutMs ?? SIGN_TIMEOUT_MS);
 		}
 	}
 
@@ -349,5 +363,6 @@ export async function takeSnapshot(opts: SnapshotOptions): Promise<Snapshot> {
 		untracked: untracked.slice(0, UNTRACKED_LISTED),
 		untrackedTotal: untracked.length,
 		withheld,
+		warnings,
 	};
 }

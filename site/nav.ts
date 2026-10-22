@@ -4,6 +4,7 @@ import {
   Code,
   DatabaseBackup,
   Download,
+  GitBranch,
   Hammer,
   Layers,
   Link2,
@@ -50,6 +51,7 @@ export const NAV: NavGroup[] = [
     heading: "Operate",
     items: [
       { source: "docs/configuration.md", icon: SlidersHorizontal },
+      { source: "docs/github.md", icon: GitBranch },
       { source: "docs/updating.md", icon: RefreshCw },
       { source: "docs/operations.md", icon: DatabaseBackup },
       { source: "docs/security.md", icon: ShieldCheck },

@@ -180,6 +180,7 @@ export class Deliverer implements WatchSink {
 			pushed: turn.pushed,
 			pushError: turn.pushError,
 			pushRef: turn.pushRef,
+			prUrl: thread.pr?.url ?? "",
 			branch: threadBranch(thread.id),
 			reply: turn.reply.slice(0, DETAILS_REPLY_MAX),
 			error: turn.error,

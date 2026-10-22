@@ -204,6 +204,7 @@ function thread(overrides: Partial<Thread>): Thread {
 		ref: "",
 		session: "",
 		scratch: false,
+		pr: null,
 		...overrides,
 	};
 }

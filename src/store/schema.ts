@@ -259,4 +259,9 @@ export const MIGRATIONS: readonly string[] = [
 	);
 	CREATE INDEX irc_inbox_by_turn ON irc_inbox (thread_id, turn_id, at);
 	`,
+	// 12: the pull request a thread's pushes opened (`pr_number` 0 means none).
+	`
+	ALTER TABLE threads ADD COLUMN pr_number INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE threads ADD COLUMN pr_url TEXT NOT NULL DEFAULT '';
+	`,
 ];

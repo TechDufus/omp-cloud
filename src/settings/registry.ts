@@ -40,6 +40,15 @@ const SAMPLE_THREAD_ID = "aaaaaaaaaaaa";
 /** Where a thread's result may be pushed to the remote. */
 const PUSH_MODES = ["never", "ask", "auto"] as const;
 
+/** Whether a thread's commits are re-signed by the service. */
+const SIGN_MODES = ["off", "ssh"] as const;
+
+/** Whether a push to GitHub opens a pull request, and in which state. */
+const PR_MODES = ["off", "draft", "ready"] as const;
+
+/** `Name <email>`: the committer of signed commits. */
+const COMMITTER_PATTERN = /^[^<>\n]+ <[^<>\s]+@[^<>\s]+>$/;
+
 /** How the service follows releases. */
 const UPDATE_MODES = ["off", "notify", "auto"] as const;
 const MAX_TOKEN_REFERENCE_CHARS = 500;
@@ -130,6 +139,12 @@ export interface SettingValues {
 	"git.push": (typeof PUSH_MODES)[number];
 	/** The pushed branch's name, `{thread}` standing for the thread id. */
 	"git.branch": string;
+	/** `off`: commits stay as the VM made them; `ssh`: the service re-signs each turn's commits with its SSH key. */
+	"git.sign": (typeof SIGN_MODES)[number];
+	/** `Name <email>` of the committer of signed commits; "" falls back to the GitHub App owner's noreply address. */
+	"git.committer": string;
+	/** `off`: no pull request; `draft` or `ready`: open one after a push to a github.com repository the App is installed on. */
+	"git.pr": (typeof PR_MODES)[number];
 	/** Globs (`*` matches any run of characters) of branches a push never writes to. */
 	"git.protected": readonly string[];
 	/** `policy.bash.patterns`: the order is the rules' order. The first rule that applies wins, so put the strictest first. */
@@ -237,6 +252,42 @@ export const REGISTRY: Registry = {
 				}
 			}
 			return [...raw];
+		},
+	},
+	"git.sign": {
+		key: "git.sign",
+		type: "enum",
+		default: "off",
+		doc: "Sign the commits a thread makes with the service's SSH signing key. Create it on the dashboard's GitHub page and add the public key to GitHub as a Signing Key.",
+		choices: SIGN_MODES,
+		parse(raw) {
+			const mode = SIGN_MODES.find((choice) => choice === raw);
+			if (mode === undefined) throw new SettingError(`git.sign must be one of ${SIGN_MODES.join(", ")}`);
+			return mode;
+		},
+	},
+	"git.committer": {
+		key: "git.committer",
+		type: "string",
+		default: "",
+		doc: "The committer of signed commits as Name <email>. GitHub shows Verified only when this email is verified on the account holding the key. Empty uses the GitHub App owner's noreply address, else each commit's committer.",
+		parse(raw) {
+			if (typeof raw !== "string" || (raw !== "" && !COMMITTER_PATTERN.test(raw))) {
+				throw new SettingError('git.committer must be empty or "Name <email>"');
+			}
+			return raw;
+		},
+	},
+	"git.pr": {
+		key: "git.pr",
+		type: "enum",
+		default: "draft",
+		doc: "After a push to a github.com repository the GitHub App is installed on, open a pull request into the thread's base branch and keep its omp-cloud section current; off opens none.",
+		choices: PR_MODES,
+		parse(raw) {
+			const mode = PR_MODES.find((choice) => choice === raw);
+			if (mode === undefined) throw new SettingError(`git.pr must be one of ${PR_MODES.join(", ")}`);
+			return mode;
 		},
 	},
 	"policy.bash.patterns": {

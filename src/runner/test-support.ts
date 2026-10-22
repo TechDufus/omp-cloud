@@ -4,6 +4,9 @@ import { join } from "node:path";
 import type { Config } from "../config";
 import { GatewayClients } from "../gateway/clients";
 import { GitService } from "../git";
+import { SigningKey } from "../git/signing-key";
+import { GitHubApi } from "../github/api";
+import { GitHubApp } from "../github/app";
 import { isRecord } from "../guards";
 import { Settings } from "../settings";
 import { Store } from "../store";
@@ -44,6 +47,7 @@ export async function openEnv(dir: string): Promise<{ store: Store; settings: Se
 	const store = Store.open({ dataDir: dir });
 	const settings = Settings.load(store);
 	const gateway = new GatewayClients({ file: join(dir, "clients.json"), url: "http://gateway" });
+	const githubApi = new GitHubApi();
 	const env: ThreadEnv = {
 		store,
 		vmon: fakeVmon(null).vmon,
@@ -53,6 +57,9 @@ export async function openEnv(dir: string): Promise<{ store: Store; settings: Se
 		serviceId: store.serviceId(),
 		settings,
 		git: await GitService.open({ dataDir: dir, hosts: {}, fetchTimeoutSeconds: 1, pushTimeoutSeconds: 1 }),
+		signingKey: SigningKey.open(dir),
+		github: await GitHubApp.open(dir, githubApi),
+		githubApi,
 		ompVersion: "18.12.3",
 	};
 	return { store, settings, gateway, env };
@@ -117,6 +124,8 @@ export interface FakeVm {
 	sandbox: Sandbox;
 	/** Commands in the order they ran. */
 	commands: string[];
+	/** The sandbox paths files were written to, in order. */
+	uploads: string[];
 	paused: () => number;
 }
 
@@ -129,6 +138,7 @@ export function fakeVm(options: { dirty: boolean; head: string; failBundle?: boo
 	const commands: string[] = [];
 	let journalId = OLD_SESSION;
 	let paused = 0;
+	const uploads: string[] = [];
 	const sandbox = {
 		commands: {
 			run: async (command: string) => {
@@ -148,13 +158,18 @@ export function fakeVm(options: { dirty: boolean; head: string; failBundle?: boo
 				return { stdout: "" };
 			},
 		},
-		files: { read: async (path: string) => new Blob([`content of ${path}`]).stream() },
+		files: {
+			read: async (path: string) => new Blob([`content of ${path}`]).stream(),
+			write: async (path: string) => {
+				uploads.push(path);
+			},
+		},
 		pause: async () => {
 			paused++;
 			return true;
 		},
 	} as unknown as Sandbox;
-	return { sandbox, commands, paused: () => paused };
+	return { sandbox, commands, uploads, paused: () => paused };
 }
 
 /** A vmon that hands out `sandbox` for every connect and records connects and kills (`onKill` runs first). */

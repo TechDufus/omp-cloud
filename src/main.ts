@@ -4,6 +4,9 @@ import { GatewayClients } from "./gateway/clients";
 import { GatewayModels } from "./gateway/models";
 import { GitService } from "./git";
 import { credentialExecutable } from "./git/executable";
+import { SigningKey } from "./git/signing-key";
+import { GitHubApi } from "./github/api";
+import { GitHubApp } from "./github/app";
 import { type HostOmp, hostOmp } from "./omp-version";
 import { Runner } from "./runner";
 import { serviceClientName } from "./runner/thread";
@@ -112,11 +115,15 @@ export async function serve(args: readonly string[]): Promise<void> {
 	try {
 		const orphans = await store.sweepOrphanBlobs();
 		if (orphans > 0) console.log(`omp-cloud: removed ${orphans} orphaned thread director${orphans === 1 ? "y" : "ies"}`);
+		const githubApi = new GitHubApi();
+		const githubApp = await GitHubApp.open(config.dataDir, githubApi);
+		const signingKey = SigningKey.open(config.dataDir);
 		const git = await GitService.open({
 			dataDir: config.dataDir,
 			hosts: config.git.hosts,
 			fetchTimeoutSeconds: config.git.fetchTimeoutSeconds,
 			pushTimeoutSeconds: config.git.pushTimeoutSeconds,
+			github: githubApp,
 		});
 		store.subscribeAll({
 			event: () => {},
@@ -130,7 +137,7 @@ export async function serve(args: readonly string[]): Promise<void> {
 		await models.start();
 		if (config.runner.enabled) {
 			vmon = await Vmon.open(config.vmon);
-			runner = await Runner.start({ store, vmon, gateway, models, config, settings, git, ompVersion });
+			runner = await Runner.start({ store, vmon, gateway, models, config, settings, git, signingKey, github: githubApp, githubApi, ompVersion });
 		} else if (config.dashboard) {
 			// The dashboard's VMs page only reads vmon (the sandbox list and metrics), so it gets a client without the runner.
 			try {
@@ -168,6 +175,7 @@ export async function serve(args: readonly string[]): Promise<void> {
 			logins,
 			settings,
 			git,
+			github: { app: githubApp, api: githubApi, signingKey },
 			dashboard:
 				config.dashboard === undefined
 					? undefined

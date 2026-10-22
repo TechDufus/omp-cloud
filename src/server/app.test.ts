@@ -4,6 +4,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitService } from "../git";
+import { SigningKey } from "../git/signing-key";
+import { GitHubApi } from "../github/api";
+import { GitHubApp } from "../github/app";
 import { isRecord } from "../guards";
 import { Settings } from "../settings";
 import { SETTING_DEFS } from "../settings/registry";
@@ -61,7 +64,18 @@ beforeEach(async () => {
 		fetchTimeoutSeconds: 30,
 		pushTimeoutSeconds: 30,
 	});
-	app = createApp({ store, apiTokenSha256: tokenSha256(TOKEN), dataDir: dir, models: MODELS, ompVersion: OMP_VERSION, logins: noLogins(), settings, git });
+	const githubApi = new GitHubApi();
+	app = createApp({
+		store,
+		apiTokenSha256: tokenSha256(TOKEN),
+		dataDir: dir,
+		models: MODELS,
+		ompVersion: OMP_VERSION,
+		logins: noLogins(),
+		settings,
+		git,
+		github: { app: await GitHubApp.open(dir, githubApi), api: githubApi, signingKey: SigningKey.open(dir) },
+	});
 });
 
 afterEach(async () => {
@@ -310,6 +324,9 @@ describe("whoami", () => {
 				"threads.irc",
 				"events.live",
 				"events.children",
+				"github.app",
+				"commits.signed",
+				"threads.pr",
 			],
 			limits: { maxMessageBytes: MAX_TEXT_BYTES, maxAnswerBytes: MAX_QUESTION_TEXT_BYTES, maxUploadBytes: MAX_SOURCE_BYTES, listMax: 200, maxTurns: MAX_TURNS },
 			spend: { todayUSD: 0, dayCapUSD: 0 },
@@ -319,6 +336,7 @@ describe("whoami", () => {
 			modelPatterns: ["anthropic/*", "fake/*"],
 			ompVersion: OMP_VERSION,
 			gitHosts: ["git.example.test:8443", "github.com"],
+			github: { app: null, signing: false },
 			vms: { running: 0, paused: 0 },
 			threads: { starting: 1, working: 1, waiting: 1, idle: 1, failed: 1 },
 			device: null,
@@ -384,7 +402,7 @@ describe("listing", () => {
 
 const SUMMARY_KEYS = sorted(
 	"id", "title", "name", "owner", "phase", "error", "turns", "queued", "model", "thinking", "ompVersion", "latest", "question", "result", "createdAt", "lastActivityAt",
-	"repo", "workspace", "archivedAt", "metrics", "activity", "origin", "ref", "session", "scratch",
+	"repo", "workspace", "archivedAt", "pr", "metrics", "activity", "origin", "ref", "session", "scratch",
 );
 const TURN_KEYS = sorted(
 	"id", "state", "text", "by", "origin", "ircFrom", "ircId", "ircReplyTo", "queuedAt", "startedAt", "completedAt", "reply", "title", "error", "usage", "head", "filesChanged",
@@ -1394,12 +1412,12 @@ describe("logins", () => {
 describe("settings", () => {
 	const SETTING_FIELDS = sorted("key", "type", "value", "default", "source", "doc", "choices", "updatedAt", "updatedBy");
 
-	/** The `{key: value}` of the git settings of a settings answer. */
+	/** The `{key: value}` of the push settings (`git.push`, `git.branch`, `git.protected`) of a settings answer. */
 	function valuesOf(body: unknown): Record<string, unknown> {
 		const list = at(body, "settings");
 		if (!Array.isArray(list)) throw new Error("expected a settings list");
 		const entries = list.map((entry): [string, unknown] => [String(at(entry, "key")), at(entry, "value")]);
-		return Object.fromEntries(entries.filter(([key]) => key.startsWith("git.")));
+		return Object.fromEntries(entries.filter(([key]) => key === "git.push" || key === "git.branch" || key === "git.protected"));
 	}
 
 	test("every route needs the token", async () => {
