@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Sandbox } from "e2b";
-import { DROP_STALE_SOCKETS, dropStaleSockets } from "./stale-sockets";
+import { DROP_ALL_SOCKETS, DROP_STALE_SOCKETS, dropStaleSockets } from "./stale-sockets";
 
 let dir: string;
 
@@ -19,7 +19,7 @@ afterEach(async () => {
  * Runs the cleanup script with a fake `ip` (the guest's addresses) and a fake `ss` (its sockets, `ss -K` recorded in
  * `destroyed`), in the shape the real tools print them.
  */
-async function runScript(input: { addresses: string[]; sockets: string[][] }): Promise<{ dropped: string[]; destroyed: string[] }> {
+async function runScript(input: { addresses: string[]; sockets: string[][] }, script: string = DROP_STALE_SOCKETS): Promise<{ dropped: string[]; destroyed: string[] }> {
 	const bin = join(dir, "bin");
 	await Bun.$`mkdir -p ${bin}`.quiet();
 	await writeFile(
@@ -33,7 +33,7 @@ async function runScript(input: { addresses: string[]; sockets: string[][] }): P
 	);
 	await chmod(join(bin, "ip"), 0o755);
 	await chmod(join(bin, "ss"), 0o755);
-	const proc = Bun.spawn(["sh", "-c", DROP_STALE_SOCKETS], { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` }, stdout: "pipe", stderr: "pipe" });
+	const proc = Bun.spawn(["sh", "-c", script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` }, stdout: "pipe", stderr: "pipe" });
 	const [stdout, , code] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
 	expect(code).toBe(0);
 	const destroyed = await readFile(join(dir, "destroyed"), "utf8").catch(() => "");
@@ -76,6 +76,26 @@ describe("the cleanup script", () => {
 	});
 });
 
+describe("the drop-everything script", () => {
+	test("destroys the sockets of every non-loopback address, also one the guest still has", async () => {
+		const { dropped, destroyed } = await runScript(
+			{
+				addresses: ["127.0.0.1", "172.20.0.126"],
+				sockets: [
+					["ESTAB", "172.20.0.126:45734", "10.254.254.1:32909"],
+					["ESTAB", "172.20.0.126:45800", "10.254.254.1:4000"],
+					["ESTAB", "127.0.0.1:47604", "127.0.0.1:49983"],
+					["ESTAB", "[::1]:47604", "[::1]:49983"],
+				],
+			},
+			DROP_ALL_SOCKETS,
+		);
+
+		expect(dropped).toEqual(["172.20.0.126"]);
+		expect(destroyed).toEqual(["-K -tn src 172.20.0.126"]);
+	});
+});
+
 describe("dropStaleSockets", () => {
 	function sandboxRunning(run: (command: string, options: { user?: string; timeoutMs?: number }) => Promise<{ stdout: string }>): Sandbox {
 		return { commands: { run } } as unknown as Sandbox;
@@ -98,5 +118,16 @@ describe("dropStaleSockets", () => {
 		});
 
 		expect(await dropStaleSockets(sandbox)).toEqual([]);
+	});
+
+	test("all = true runs the drop-everything script", async () => {
+		const seen: string[] = [];
+		const sandbox = sandboxRunning(async command => {
+			seen.push(command);
+			return { stdout: "172.20.0.126\n" };
+		});
+
+		expect(await dropStaleSockets(sandbox, true)).toEqual(["172.20.0.126"]);
+		expect(seen).toEqual([DROP_ALL_SOCKETS]);
 	});
 });

@@ -14,7 +14,7 @@ import { Store } from "../store";
 import type { NewThread } from "../store/types";
 import type { SandboxSummary, Vmon } from "../vmon";
 import { messageText } from "./progress";
-import { DROP_STALE_SOCKETS } from "./stale-sockets";
+import { DROP_ALL_SOCKETS, DROP_STALE_SOCKETS } from "./stale-sockets";
 import { clientName, type ThreadEnv } from "./thread";
 
 /** The head every seeded thread's first turn ended at. */
@@ -146,7 +146,7 @@ export function fakeVm(options: { dirty: boolean; head: string; failBundle?: boo
 			run: async (command: string) => {
 				commands.push(command);
 				options.onCommand?.(command);
-				if (command === DROP_STALE_SOCKETS) return { stdout: (options.staleAddresses ?? []).map(address => `${address}\n`).join("") };
+				if (command === DROP_STALE_SOCKETS || command === DROP_ALL_SOCKETS) return { stdout: (options.staleAddresses ?? []).map(address => `${address}\n`).join("") };
 				if (command.includes("diff --cached --quiet")) {
 					if (options.dirty) throw exit(1);
 					return { stdout: "" };

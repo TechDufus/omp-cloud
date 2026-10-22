@@ -8,7 +8,7 @@ import type { Store } from "../store";
 import type { ThreadEvent } from "../store/types";
 import type { SandboxSummary, Vmon } from "../vmon";
 import { archiveSweep, ARCHIVE_PER_SWEEP, sweepOrphans } from "./lifecycle";
-import { DROP_STALE_SOCKETS } from "./stale-sockets";
+import { DROP_ALL_SOCKETS } from "./stale-sockets";
 import { fakeVm, fakeVmon, HEAD, openEnv, seedThread, threadId } from "./test-support";
 import { clientName, serviceClientName, type ArchiveOutcome, ThreadRunner, type ThreadEnv } from "./thread";
 
@@ -173,7 +173,7 @@ describe("ThreadRunner.archive", () => {
 		expect(store.vm(id)?.state).toBe("paused");
 	});
 
-	test("a resume that gave the VM another address drops the connections of the old one and says so", async () => {
+	test("a resume of a paused VM drops all its connections, not only those of an old address, and says so", async () => {
 		const id = await seedThread(store, gateway, 1, "paused");
 		const vm = fakeVm({ dirty: true, head: SNAPSHOT_HEAD, failBundle: true, staleAddresses: ["172.20.0.138"] });
 		const { vmon } = fakeVmon(vm.sandbox);
@@ -181,19 +181,19 @@ describe("ThreadRunner.archive", () => {
 		await runnerFor(vmon, id).archive(later(), 7);
 
 		// Right after the resume, before any work in the guest.
-		expect(vm.commands[0]).toBe(DROP_STALE_SOCKETS);
-		expect(eventsOf(id, "vm")).toContain("the sandbox's address changed: dropped its connections from 172.20.0.138");
+		expect(vm.commands[0]).toBe(DROP_ALL_SOCKETS);
+		expect(eventsOf(id, "vm")).toContain("dropped the connections the paused VM held from 172.20.0.138");
 	});
 
-	test("a resume that kept the address says nothing about connections", async () => {
+	test("a resume that dropped nothing says nothing about connections", async () => {
 		const id = await seedThread(store, gateway, 1, "paused");
 		const vm = fakeVm({ dirty: true, head: SNAPSHOT_HEAD, failBundle: true });
 		const { vmon } = fakeVmon(vm.sandbox);
 
 		await runnerFor(vmon, id).archive(later(), 7);
 
-		expect(vm.commands[0]).toBe(DROP_STALE_SOCKETS);
-		expect(eventsOf(id, "vm").some(text => text.includes("address changed"))).toBe(false);
+		expect(vm.commands[0]).toBe(DROP_ALL_SOCKETS);
+		expect(eventsOf(id, "vm").some(text => text.includes("dropped the connections"))).toBe(false);
 	});
 
 	test("a sandbox vmon no longer has is nothing to archive", async () => {

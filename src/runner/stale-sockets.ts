@@ -23,13 +23,33 @@ export const DROP_STALE_SOCKETS = [
 ].join("\n");
 
 /**
- * Drops the guest's connections that belong to an address it no longer has (see {@link DROP_STALE_SOCKETS}). Returns the
- * addresses whose sockets were destroyed, `[]` when nothing was stale. Best effort: a sandbox that cannot run it (no root,
- * no `ss`) is left as it is and the result is `[]`.
+ * Prints and destroys every established IPv4 TCP socket that is not loopback, whatever address it is on.
+ *
+ * An unchanged address does not make a connection valid after a resume. vmon releases a paused sandbox's /30, so another
+ * sandbox may take it; every VM cloned from a template picks the same ephemeral source ports, so its connection to the
+ * gateway or the model gets the same 4-tuple as the paused guest's. A killed sandbox's host-side proxy socket stays ESTABLISHED
+ * (vmon never closes it), so when the paused guest resumes on that address its old connection is answered by the dead sandbox's
+ * socket: the sequence numbers never match, nothing is acknowledged and a request written to it hangs for good. Destroying
+ * the guest's end (`ss -K`, root) makes omp open a new connection with a new port.
  */
-export async function dropStaleSockets(sandbox: Sandbox): Promise<string[]> {
+export const DROP_ALL_SOCKETS = [
+	"for a in $(ss -tnH | awk '{print $4}' | sed -n 's/^\\([0-9][0-9.]*\\):[0-9]*$/\\1/p' | sort -u); do",
+	'\tcase "$a" in',
+	"\t\t127.*) ;;",
+	'\t\t*) ss -K -tn src "$a" >/dev/null 2>&1 && echo "$a" ;;',
+	"\tesac",
+	"done",
+].join("\n");
+
+/**
+ * Drops the guest's connections that cannot be trusted after a resume and returns the addresses whose sockets were destroyed,
+ * `[]` when nothing was dropped. `all` (a sandbox that was paused) destroys every non-loopback connection
+ * ({@link DROP_ALL_SOCKETS}); otherwise only the ones of an address the guest no longer has ({@link DROP_STALE_SOCKETS}).
+ * Best effort: a sandbox that cannot run it (no root, no `ss`) is left as it is and the result is `[]`.
+ */
+export async function dropStaleSockets(sandbox: Sandbox, all = false): Promise<string[]> {
 	try {
-		const result = await sandbox.commands.run(DROP_STALE_SOCKETS, { user: "root", timeoutMs: TIMEOUT_MS });
+		const result = await sandbox.commands.run(all ? DROP_ALL_SOCKETS : DROP_STALE_SOCKETS, { user: "root", timeoutMs: TIMEOUT_MS });
 		return result.stdout.split("\n").map(line => line.trim()).filter(line => line !== "");
 	} catch {
 		return [];

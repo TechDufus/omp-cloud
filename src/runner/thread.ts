@@ -1443,9 +1443,14 @@ export class ThreadRunner {
 			store.putVm({ ...record, state: "running" });
 			this.#event("vm", "resumed", turnId);
 		}
-		// A resume may hand the guest another address: connections opened under the old one (omp's idle keep-alive to its model) never answer.
-		const dropped = await dropStaleSockets(sandbox);
-		if (dropped.length > 0) this.#event("vm", `the sandbox's address changed: dropped its connections from ${dropped.join(", ")}`, turnId);
+		// A VM that was paused holds connections nothing can trust any more, also on an unchanged address: its old /30 may have been
+		// taken by a sandbox that was killed since, and that sandbox's host-side proxy socket (same 4-tuple: clones pick the same ports)
+		// answers them. Drop them all so the next request opens a new one. A running VM only loses the sockets of a changed address.
+		const wasPaused = record.state !== "running";
+		const dropped = await dropStaleSockets(sandbox, wasPaused);
+		if (dropped.length > 0) {
+			this.#event("vm", wasPaused ? `dropped the connections the paused VM held from ${dropped.join(", ")}` : `the sandbox's address changed: dropped its connections from ${dropped.join(", ")}`, turnId);
+		}
 	}
 
 	async #startOmp(thread: Thread, record: VmRecord, turnId: number): Promise<void> {

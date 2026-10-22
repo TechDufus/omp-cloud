@@ -954,7 +954,8 @@ async function run(): Promise<void> {
 			await api("DELETE", "/signing/key");
 			threadId = delta;
 		}
-		// The thread is left to the final cleanup: deleting it here (killing its sandbox) made the paused VM of `delta` hang on its next resume (O).
+		// Deleting the thread kills its sandbox, whose address the paused VM of `delta` may hold: O resumes that VM, which must not hang.
+		await waitGone(signId);
 		const gone = await apiJson("GET", "/signing", 200);
 		expectEqual("GET /signing publicKey after DELETE /signing/key", gone.publicKey, null);
 	}, () => `thread ${threadId}`);
