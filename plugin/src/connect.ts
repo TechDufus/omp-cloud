@@ -97,14 +97,29 @@ interface Target {
 	ip: ServerAddress;
 }
 
+/** An IPv6 zone (`%eth0`), which `isIP` does not accept. */
+const ZONE_ID = /%[\w.-]+$/;
+
 /**
- * Resolves each name of `addresses` exactly once and vets what it resolved to. A name that does not resolve is skipped
- * and reported; a name that resolves to an address that is not local (unless `allowPublic`) refuses the whole code.
- * The targets carry IP literals: nothing after this connects by name.
+ * How a name counts as local without `--allow-public`. `text`: by its suffix, for a pairing code, whose writer chose
+ * its addresses and its fingerprint alike. `resolved`: by the addresses it resolves to now, for ssh, whose fingerprint
+ * came through the user's own login, so a name only decides where to dial.
  */
-async function resolveTargets(addresses: ServerAddress[], allowPublic: boolean, resolve: (host: string) => Promise<string[]>): Promise<{ targets: Target[]; problems: string[] }> {
-	if (!allowPublic) {
-		const outside = addresses.find(a => !isLocalHost(a.host));
+type NameCheck = "text" | "resolved";
+
+/**
+ * Vets `addresses` and resolves each name exactly once. Without `allowPublic`, an IP literal that is not local refuses
+ * the whole set before anything is resolved, and so does a name that is not local by its text under `names: "text"`;
+ * every name must also resolve to local addresses only. A name that does not resolve is skipped and reported. The
+ * targets carry IP literals: nothing after this connects by name.
+ */
+async function resolveTargets(
+	addresses: ServerAddress[],
+	vet: { allowPublic: boolean; names: NameCheck },
+	resolve: (host: string) => Promise<string[]>,
+): Promise<{ targets: Target[]; problems: string[] }> {
+	if (!vet.allowPublic) {
+		const outside = addresses.find(a => !isLocalHost(a.host) && (vet.names === "text" || isIP(a.host.replace(ZONE_ID, "")) !== 0));
 		if (outside) {
 			throw new UserError(`☁ ${outside.text} is not a local address; connecting over the public internet needs --allow-public, and only for a code the server's owner gave you`);
 		}
@@ -112,7 +127,7 @@ async function resolveTargets(addresses: ServerAddress[], allowPublic: boolean, 
 	const targets: Target[] = [];
 	const problems: string[] = [];
 	for (const a of addresses) {
-		if (isIP(a.host.replace(/%[\w.-]+$/, "")) !== 0) {
+		if (isIP(a.host.replace(ZONE_ID, "")) !== 0) {
 			targets.push({ code: a, shown: a.text, ip: a });
 			continue;
 		}
@@ -128,7 +143,7 @@ async function resolveTargets(addresses: ServerAddress[], allowPublic: boolean, 
 			continue;
 		}
 		const away = resolved.find(ip => !isLocalHost(ip));
-		if (!allowPublic && away !== undefined) {
+		if (!vet.allowPublic && away !== undefined) {
 			throw new UserError(`☁ ${a.text} resolves to ${away}, which is not a local address; connecting over the public internet needs --allow-public, and only for a code the server's owner gave you`);
 		}
 		for (const ip of resolved) {
@@ -205,6 +220,8 @@ interface Expected {
 	fingerprint: string;
 	/** For "presents a different certificate than …". */
 	source: string;
+	/** How a name counts as local without `--allow-public`. */
+	names: NameCheck;
 	notes: string[];
 	after: string;
 }
@@ -215,10 +232,10 @@ interface Expected {
  * refuses.
  */
 async function verifyServer(addresses: ServerAddress[], s: Session, expected: Expected): Promise<Pick<Paired, "pin" | "wire" | "firstIp">> {
-	const { fingerprint, source, notes, after } = expected;
+	const { fingerprint, source, names, notes, after } = expected;
 	let verified: { pin: ServerPin; ips: string[] };
 	try {
-		const { targets, problems: unresolved } = await resolveTargets(addresses, s.input.allowPublic, s.deps.resolve ?? resolveHost);
+		const { targets, problems: unresolved } = await resolveTargets(addresses, { allowPublic: s.input.allowPublic, names }, s.deps.resolve ?? resolveHost);
 		const { pin, problems } = await verifyAddresses(targets, fingerprint, s.deps.readCertificate ?? readServerCertificate, source);
 		if (pin === undefined) throw new UserError(`☁ cannot pair: ${[...notes, ...unresolved, ...problems].join("; ")}`);
 		verified = pin;
@@ -234,7 +251,7 @@ async function verifyServer(addresses: ServerAddress[], s: Session, expected: Ex
 async function pairWithCode(code: PairingCode, s: Session): Promise<Paired> {
 	const { ui } = s.deps;
 	const sleep = s.deps.sleep ?? ((ms: number) => Bun.sleep(ms));
-	const server = await verifyServer(code.addresses, s, { fingerprint: code.fingerprint, source: "the code names", notes: [], after: "" });
+	const server = await verifyServer(code.addresses, s, { fingerprint: code.fingerprint, source: "the code names", names: "text", notes: [], after: "" });
 	const anonymous = new CloudClient(`https://${server.firstIp}`, "", pinnedFetch(server.wire));
 	const redeemed = await anonymous.redeemPairing({ offer: code.offer, secret: code.secret, name: s.name, platform: process.platform });
 	const expiresAt = Number.isNaN(Date.parse(redeemed.expiresAt)) ? s.now() + FALLBACK_WAIT_MS : Date.parse(redeemed.expiresAt);
@@ -275,7 +292,7 @@ async function pairWithSsh(target: SshTarget, s: Session): Promise<Paired> {
 	const { addresses, problem } = pairingAddresses(named.host, pairing);
 	const notes = [named.problem, problem].filter((p): p is string => p !== undefined);
 	if (addresses.length === 0) throw new UserError(`☁ cannot pair: ${notes.join("; ")}; the server listed no usable address${unused}`);
-	const server = await verifyServer(addresses, s, { fingerprint: pairing.fingerprint, source: "the one ssh delivered", notes, after: unused });
+	const server = await verifyServer(addresses, s, { fingerprint: pairing.fingerprint, source: "the one ssh delivered", names: "resolved", notes, after: unused });
 	return { device: pairing.device, token: pairing.token, ...server };
 }
 

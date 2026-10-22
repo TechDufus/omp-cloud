@@ -222,6 +222,17 @@ describe("/cloud connect", () => {
 		expect(probed).toBe(1);
 	});
 
+	test("a code's name is judged by its text: one in a public domain is refused before any lookup, even when it would resolve to a local address", async () => {
+		const lookups: string[] = [];
+		const resolve = async (host: string): Promise<string[]> => {
+			lookups.push(host);
+			return ["10.0.0.5"];
+		};
+		const r = await setup(pairingCode(cert, ["nas.example.org:8443"]), {}, { resolve });
+		expect(await failure(runConnect(r.input, r.deps))).toContain("nas.example.org:8443 is not a local address");
+		expect(lookups).toEqual([]);
+	});
+
 	test("an existing connection is refused without --replace, and nothing is contacted", async () => {
 		const old = service(impostorCert);
 		const { file, connection } = await pairedFile(impostorCert, [old.address]);
@@ -445,23 +456,42 @@ describe("/cloud connect over ssh", () => {
 		expect(await readConnectionFile(file)).toEqual(connection);
 	});
 
-	test("a host that is not local is refused without --allow-public before any certificate is read, and the unused device is named", async () => {
+	test("a host that is not local is refused without --allow-public before any certificate is read (an IP address by itself, a name by what it resolves to), and the unused device is named", async () => {
 		const svc = service();
+		const port = svc.address.split(":")[1];
 		const read: string[] = [];
 		const readCertificate: ConnectDeps["readCertificate"] = async a => {
 			read.push(a.text);
 			throw new Error("must not be reached");
 		};
-		const resolve = async (): Promise<string[]> => ["93.184.216.34"];
-		const ssh = sshd(ok(record(svc)), "nas.example.org");
-		const r = await setup("me@nas.example.org", {}, { ssh: ssh.run, env: {}, readCertificate, resolve });
-		const message = await failure(runConnect(r.input, r.deps));
-
-		expect(message).toContain(`nas.example.org:${svc.address.split(":")[1]} is not a local address`);
-		expect(message).toContain("--allow-public");
-		expect(message).toContain("was created on the server and is not used");
+		const lookups: string[] = [];
+		const resolve = async (host: string): Promise<string[]> => {
+			lookups.push(host);
+			return ["93.184.216.34"];
+		};
+		for (const [host, refusal] of [
+			["203.0.113.7", `203.0.113.7:${port} is not a local address`],
+			["nas.example.org", `nas.example.org:${port} resolves to 93.184.216.34, which is not a local address`],
+		] as const) {
+			const r = await setup(`me@${host}`, {}, { ssh: sshd(ok(record(svc)), host).run, env: {}, readCertificate, resolve });
+			const message = await failure(runConnect(r.input, r.deps));
+			expect(message).toContain(refusal);
+			expect(message).toContain("--allow-public");
+			expect(message).toContain("was created on the server and is not used");
+		}
+		expect(lookups).toEqual(["nas.example.org"]);
 		expect(read).toEqual([]);
 		expect(svc.seen).toEqual([]);
+	});
+
+	test("a host name in a public domain that resolves to a local address pairs without --allow-public, and the file keeps the name", async () => {
+		const svc = service();
+		const port = svc.address.split(":")[1];
+		const resolve = async (host: string): Promise<string[]> => (host === "nas.example.org" ? ["127.0.0.1"] : []);
+		const r = await setup("me@nas.example.org", {}, { ssh: sshd(ok(record(svc)), "nas.example.org").run, env: {}, resolve });
+		await runConnect(r.input, r.deps);
+		expect((await readConnectionFile(r.file))?.server.addresses).toEqual([`nas.example.org:${port}`, svc.address]);
+		expect(svc.seen.map(s => [s.method, s.path])).toEqual([["GET", "/api/v1/whoami"]]);
 	});
 
 	test("ssh failures end the connect with their hint, before any address is contacted, and leave no file", async () => {

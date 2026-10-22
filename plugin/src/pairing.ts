@@ -206,7 +206,8 @@ function isLocalIPv4([a = 0, b = 0]: readonly number[]): boolean {
 /**
  * Whether `host` is loopback, private (10/8, 172.16/12, 192.168/16, 100.64/10), link-local, an IPv6 ULA or link-local
  * address, a single-label name, `localhost`, or a name ending `.local`, `.lan`, `.home.arpa` or `.internal`.
- * Anything else is public and needs `--allow-public`. An IPv4-mapped IPv6 address counts as its IPv4 address.
+ * Anything else is public: `/cloud connect` refuses it without `--allow-public` (an ssh pairing judges a name by the
+ * addresses it resolves to instead). An IPv4-mapped IPv6 address counts as its IPv4 address.
  */
 export function isLocalHost(host: string): boolean {
 	const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
