@@ -3,13 +3,18 @@ import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tu
 import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { cardContent, cardPlain, loadTui, type CardDetails } from "../src/cards";
+import { asCard, cardContent, cardPlain, loadTui, type CardDetails } from "../src/cards";
 import { run } from "../src/exec";
 import { cloudJobId } from "../src/cloud-job";
+import { originsFromEntries } from "../src/deliver";
 import { git } from "../src/snapshot";
 import { describeResult } from "../src/tool-view";
 import { runTool, type ToolParams } from "../src/tool";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { AnswerBody, HandoffRequest, ThreadDetail, ThreadResult, ThreadSummary } from "../src/types";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { Env } from "../src/config";
 import { Cloud } from "../src/verbs";
 import { detail, event, metrics, pending, question, summary, turn, whoami } from "./builders";
@@ -24,6 +29,13 @@ const OTHER = "k3x9fbq8w4e5";
 /** How the tests' thread reads in text: its title (it has no name) and its id. */
 const TAG = `Add Greet · ${ID}`;
 
+/** The body of an IRC message the plugin posts. */
+interface IrcBody {
+	id: string;
+	from: string;
+	body: string;
+}
+
 interface Req {
 	method: string;
 	path: string;
@@ -31,6 +43,8 @@ interface Req {
 	key?: string | null;
 	parts?: Record<string, Blob | string>;
 }
+
+const noIrc = (_body: IrcBody): Response => Response.json({ error: "no irc in this test" }, { status: 500 });
 
 const state = {
 	reqs: [] as Req[],
@@ -40,6 +54,7 @@ const state = {
 	bundle: undefined as string | undefined,
 	stream: undefined as ReadableStreamDefaultController<Uint8Array> | undefined,
 	created: summary(),
+	irc: noIrc,
 };
 
 function reset(): void {
@@ -56,6 +71,7 @@ function reset(): void {
 	state.detail = detail({ id: ID, title: "Add Greet", phase: "idle", turns: [turn(1)] });
 	state.bundle = undefined;
 	state.created = summary({ id: ID, title: "Add Greet", phase: "starting", turns: 0, warnings: ["model x is not available; using y"] });
+	state.irc = noIrc;
 }
 
 const sseBytes = new TextEncoder();
@@ -90,6 +106,10 @@ beforeAll(() => {
 			if (req.method === "POST" && p === `${T}/messages`) {
 				r.json = await req.json();
 				return Response.json({ turn: { id: 3 } }, { status: 201 });
+			}
+			if (req.method === "POST" && p === `${T}/irc`) {
+				r.json = await req.json();
+				return state.irc(r.json as IrcBody);
 			}
 			if (req.method === "POST" && p === `${T}/stop`) return Response.json({ stoppedRunning: true, cancelled: 2 });
 			const answer = /^\/api\/v1\/threads\/[^/]+\/turns\/(\d+)\/questions\/(\d+)\/answer$/.exec(p);
@@ -131,11 +151,11 @@ async function push(kind: string, seq: number): Promise<void> {
 }
 
 /** An omp agent dir of its own (so omp's extension discovery never reads the developer's) and the environment whose omp-cloud file points the plugin at the fake service. */
-async function configured(cwd: string | undefined, deliver?: "transcript"): Promise<{ agentDir: string; pi: FakePi; env: Env }> {
+async function configured(cwd: string | undefined, deliver?: "transcript", entries?: unknown[]): Promise<{ agentDir: string; pi: FakePi; env: Env }> {
 	const { agentDir } = await isolateOmp();
 	const settings = await fakeSettings({ agentDir, cwd });
 	const env = await cloudEnv(`url: http://127.0.0.1:${server.port}\ntoken: tok\n${deliver ? `deliver: ${deliver}\n` : ""}`, { PI_CODING_AGENT_DIR: agentDir });
-	return { agentDir, pi: fakePi({ settings }), env };
+	return { agentDir, pi: fakePi({ settings, entries }), env };
 }
 
 interface SetupOptions {
@@ -146,13 +166,15 @@ interface SetupOptions {
 	/** The personal file's `deliver`; the default (the tray) when absent. */
 	deliver?: "transcript";
 	hostOpts?: Parameters<typeof fakeHost>[0];
+	/** The session's entries as a resumed session has them; what the plugin appends joins them, and the host reads them all. */
+	entries?: unknown[];
 }
 
 async function setup(opts: SetupOptions = {}): Promise<{ f: Fixture | undefined; pi: FakePi; cloud: Cloud; host: FakeHost }> {
 	const f = opts.cwd ? undefined : (opts.fixture ?? (await remoteFixture()));
-	const { pi, env } = await configured(opts.cwd ?? f?.work, opts.deliver);
+	const { pi, env } = await configured(opts.cwd ?? f?.work, opts.deliver, opts.entries);
 	const cloud = new Cloud(pi.pi, "/own", env);
-	const host = fakeHost({ cwd: opts.cwd ?? f?.work, sessionFile: opts.sessionFile, mode: opts.mode, ...opts.hostOpts });
+	const host = fakeHost({ cwd: opts.cwd ?? f?.work, sessionFile: opts.sessionFile, mode: opts.mode, entries: pi.entries, ...opts.hostOpts });
 	live.push({ cloud, host });
 	return { f, pi, cloud, host };
 }
@@ -342,24 +364,23 @@ describe("delegation", () => {
 		expect(session.stdout).not.toContain("call_9");
 		expect(session.stdout).not.toContain("[cloud] old");
 
-		// The launch card waits while the agent is busy, then appears without a turn.
+		// The delegate result is the record: no launch card is posted, even once the agent is idle again; the session wrote an entry at once, while the agent was busy.
 		expect(pi.sent).toHaveLength(0);
 		host.idle = true;
 		cloud.flushCards(host.host);
-		expect(pi.sent).toHaveLength(1);
-		expect(pi.sent[0]?.options).toEqual({ triggerTurn: false });
-		const card = pi.sent[0]?.message.details as CardDetails;
-		expect(card).toMatchObject({ kind: "launch", origin: "tool", thread: ID, withheld: [".env.local"], untracked: ["untracked.txt"], untrackedTotal: 1, conversation: "included" });
-		expect(pi.sent[0]?.message.content).toContain("Left on this machine: .env.local.");
+		expect(pi.sent).toHaveLength(0);
+		expect(pi.entries).toEqual([{ type: "custom", customType: "omp-cloud-thread", data: { thread: ID, origin: "tool" } }]);
+		expect(lines).toContain("  left on this machine (credential-named): .env.local");
+		expect(lines).toContain("  conversation: forked from this session");
 
 		// The watcher follows the event stream; the finished turn reaches the model as a turn of its own.
 		// The follow starts in the background: it has read the working thread and opened the stream before the turn ends.
 		await until(() => state.stream !== undefined);
 		state.detail = detail({ id: ID, phase: "idle", turns: [turn(1, { title: "Ported", reply: "Ported." })] });
 		await push("turn_done", 1);
-		await until(() => pi.sent.length === 2);
-		expect(pi.sent[1]?.options).toEqual({ triggerTurn: true });
-		expect(pi.sent[1]?.message.content).toContain(`[cloud] ${ID} turn 1 done\n`);
+		await until(() => pi.sent.length === 1);
+		expect(pi.sent[0]?.options).toEqual({ triggerTurn: true });
+		expect(pi.sent[0]?.message.content).toContain(`[cloud] ${ID} turn 1 done\n`);
 		expect(pi.sent.every(s => s.message.attribution === "agent")).toBe(true);
 	});
 
@@ -413,6 +434,8 @@ describe("delegation", () => {
 		await until(() => pi.sent.length === 1);
 		expect(pi.sent[0]?.options).toEqual({ triggerTurn: false });
 		expect((pi.sent[0]?.message.details as CardDetails).origin).toBe("user");
+		// The user's thread is recorded by its card: no `omp-cloud-thread` entry.
+		expect(pi.entries).toEqual([]);
 
 		// The follow starts in the background: it has read the working thread and opened the stream before the turn ends.
 		await until(() => state.stream !== undefined);
@@ -627,7 +650,7 @@ describe("choosing a cloud through the tool", () => {
 		const refused = await call(cloud, host, { op: "use", cloud: "personal" });
 		expect(refused.isError).toBe(true);
 		expect(text(refused)).toStartWith("cloud use: error conflict: this session already works with 1 cloud thread (");
-		expect(pi.entries).toEqual([]);
+		expect(pi.entries).toEqual([{ type: "custom", customType: "omp-cloud-thread", data: { thread: ID, origin: "tool" } }]);
 
 		// A session that has started nothing may pick the other cloud; the pick is the session's own.
 		const fresh = await twoClouds();
@@ -678,5 +701,117 @@ describe("choosing a cloud through the tool", () => {
 		expect(text(out)).toStartWith("cloud info: error not_configured");
 		expect(text(out)).toContain("cloud connect {target} pairs it");
 		expect(text(out)).toContain("cloud: none configured on this machine");
+	});
+});
+
+describe("how a model's agent reaches it: one delivery for each turn", () => {
+	/** The main agent's session as the IRC relay sees it: every message delivered to it is recorded. */
+	class FakeMain {
+		readonly delivered: IrcMessage[] = [];
+
+		async deliverIrcMessage(msg: IrcMessage): Promise<"injected"> {
+			this.delivered.push(msg);
+			return "injected";
+		}
+	}
+
+	let main: FakeMain;
+	let manager: AsyncJobManager;
+	/** What omp's own result delivery handed the model: the text of each job that finished. */
+	let results: string[];
+
+	beforeEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		main = new FakeMain();
+		AgentRegistry.global().register({ id: "Main", displayName: "Main", kind: "main", session: main as unknown as AgentSession, status: "running" });
+		manager = new AsyncJobManager({ retentionMs: 60_000, consumedResultEvictionMs: 60_000 });
+		results = [];
+		manager.registerDeliverySink("Main", (_id, text) => void results.push(text));
+		AsyncJobManager.setInstance(manager);
+		state.who = { ...state.who, capabilities: [...state.who.capabilities, "threads.irc"] };
+	});
+
+	afterEach(async () => {
+		AsyncJobManager.resetForTests();
+		await manager.dispose({ timeoutMs: 200 });
+		AgentRegistry.global().unregister("Main");
+	});
+
+	/** One lifecycle event of turn `turnId` on the thread's event stream. */
+	async function pushTurn(kind: string, seq: number, turnId: number): Promise<void> {
+		await until(() => state.stream !== undefined);
+		state.stream?.enqueue(sseBytes.encode(`id: ${seq}\ndata: ${JSON.stringify(event(seq, { kind, turn: turnId }))}\n\n`));
+	}
+
+	const cardsOf = (pi: FakePi, kind: string, turnId: number) => pi.sent.map(s => asCard(s.message.details)).filter(c => c?.kind === kind && "turn" in c && c.turn === turnId);
+
+	test("a model's delegation posts no launch card, and the session writes an entry that names the thread at once", async () => {
+		state.detail = detail({ id: ID, phase: "working", turns: [turn(1, { state: "running", completedAt: "" })] });
+		const { cloud, host, pi } = await setup({ cwd: await tmp("omp-cloud-wd-") });
+		host.idle = false;
+		const started = await call(cloud, host, { op: "delegate", task: "fix it", workspace: "scratch" });
+		expect(started.isError).toBeUndefined();
+		host.idle = true;
+		cloud.flushCards(host.host);
+
+		expect(pi.sent).toEqual([]);
+		expect(pi.entries).toEqual([{ type: "custom", customType: "omp-cloud-thread", data: { thread: ID, origin: "tool" } }]);
+		expect(originsFromEntries(pi.entries).get(ID)).toBe("tool");
+		// A delegation this session repeats (the service answers the same thread) records it once.
+		await call(cloud, host, { op: "delegate", task: "fix it", workspace: "scratch" });
+		expect(pi.entries).toHaveLength(1);
+	});
+
+	test("a session resumed with only the entry follows the thread as the model's", async () => {
+		state.listed = [summary({ id: ID, phase: "working" })];
+		state.detail = detail({ id: ID, phase: "working", turns: [turn(1, { state: "running", completedAt: "" })] });
+		const { cloud, host } = await setup({ cwd: await tmp("omp-cloud-wd-"), entries: [{ type: "custom", customType: "omp-cloud-thread", data: { thread: ID, origin: "tool" } }] });
+		await cloud.followSession(host.host);
+		expect(cloud.followState(ID)).toMatchObject({ followed: true, origin: "tool" });
+	});
+
+	test("a turn an IRC message woke reaches the model once: the wake relay, and no turn card", async () => {
+		state.detail = detail({ id: ID, phase: "working", turns: [turn(1, { state: "running", completedAt: "" })] });
+		const { cloud, host, pi } = await setup({ cwd: await tmp("omp-cloud-wd-") });
+		expect((await call(cloud, host, { op: "delegate", task: "fix it", workspace: "scratch" })).isError).toBeUndefined();
+
+		// The first turn ends; the thread is idle and the watcher lets it go.
+		await until(() => state.stream !== undefined);
+		const first = turn(1, { reply: "First." });
+		state.detail = detail({ id: ID, phase: "idle", turns: [first] });
+		await pushTurn("turn_done", 1, 1);
+		await until(() => !cloud.followState(ID).followed);
+
+		// The model wakes it with a message; the service queues the turn the message started.
+		let ircId = "";
+		state.irc = body => {
+			ircId = body.id;
+			const woken = { text: body.body, origin: "irc" as const, ircFrom: body.from, ircId: body.id };
+			state.detail = detail({ id: ID, phase: "working", turns: [first, turn(2, { ...woken, state: "running", completedAt: "" })] });
+			return Response.json({ receipt: "woken", id: body.id, turn: turn(2, { ...woken, state: "queued", completedAt: "" }) }, { status: 201 });
+		};
+		const sent = await call(cloud, host, { op: "send", thread: ID, text: "also the farewell" });
+		expect(sent.isError).toBeUndefined();
+		expect(sent.content[0]?.text).toContain("woken");
+
+		await until(() => cloud.jobOf(ID) !== undefined);
+		const wokenJob = cloud.jobOf(ID) ?? "";
+		state.detail = detail({ id: ID, phase: "idle", turns: [first, turn(2, { text: "also the farewell", reply: "Second.", origin: "irc", ircFrom: "Main", ircId })] });
+		await pushTurn("turn_done", 2, 2);
+		await until(() => main.delivered.length === 1);
+		await until(() => !cloud.followState(ID).followed);
+		await manager.drainDeliveries({ timeoutMs: 500 });
+
+		// The report of the woken turn is the wake relay, once: no turn card, nothing from omp's own result delivery, and a wait on its job gets a pointer.
+		expect(main.delivered[0]).toMatchObject({ to: "Main", replyTo: ircId, wakeRelay: true });
+		expect(main.delivered[0]?.body).toContain("Second.");
+		expect(cardsOf(pi, "turn", 2)).toEqual([]);
+		expect(results).toHaveLength(1);
+		const woken = manager.getJob(wokenJob);
+		expect(woken?.resultText).toContain("Its reply was delivered to you as an incoming message");
+		expect(woken?.resultText).not.toContain("Second.");
+		// The first turn, which no message woke, keeps its one delivery: omp's own result, with no card.
+		expect(results[0]).toContain("First.");
+		expect(cardsOf(pi, "turn", 1)).toEqual([]);
 	});
 });

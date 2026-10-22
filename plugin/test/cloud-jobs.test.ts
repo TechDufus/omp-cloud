@@ -119,6 +119,8 @@ function fakeManager(over: FakeManagerOptions = {}): FakeManager {
 interface RigOptions extends FakeManagerOptions {
 	/** The agent id of a thread, as `CloudAgents.agentId` answers; without it the plugin names the job itself. */
 	agentId?: (thread: string) => string | undefined;
+	/** Whether the turn's reply is on its way to the agent that woke the thread, as `CloudAgents.relayed` answers. */
+	relayed?: (thread: string, turn: number) => boolean;
 }
 
 interface Rig {
@@ -149,6 +151,7 @@ function rig(over: RigOptions = {}): Rig {
 		manager: () => present.manager,
 		wakes: () => wakes.value,
 		...(over.agentId ? { agentId: over.agentId } : {}),
+		...(over.relayed ? { relayed: over.relayed } : {}),
 		warn: message => void warnings.push(message),
 		stop: thread => void stops.push(thread),
 		aside: (thread, label) => void asides.push([thread, label]),
@@ -407,6 +410,33 @@ describe("settling", () => {
 		await failed.fake.jobs[0]?.settled;
 		expect(failed.fake.jobs[0]?.status).toBe("failed");
 		expect(failed.fake.jobs[0]?.error).toContain("arrives as a [cloud] message");
+	});
+
+	test("a turn the wake relay delivers settles as a pointer to the relay, done or failed, so a wait on it does not repeat the report; a quiet turn nothing relays keeps its full result", async () => {
+		const done = rig({ relayed: (thread, t) => thread === ID && t === 1 });
+		done.wakes.value = false;
+		done.jobs.sync(running(), []);
+		expect(done.jobs.settle(ended("done"), turn(1, { state: "done", title: "Greeting fixed", reply: "All done." }))).toEqual({ id: JOB, waited: false, native: false });
+		await done.fake.jobs[0]?.settled;
+		expect(done.fake.jobs[0]?.status).toBe("completed");
+		expect(done.fake.jobs[0]?.result).toBe(`Turn 1 done: Greeting fixed. Its reply was delivered to you as an incoming message from agent ${JOB}; agent://${JOB} reads it again.`);
+		expect(done.fake.jobs[0]?.structured).toBeUndefined();
+
+		const failed = rig({ relayed: () => true });
+		failed.wakes.value = false;
+		failed.jobs.sync(running(), []);
+		failed.jobs.settle(ended("failed"), turn(1, { state: "failed", error: "vm lost" }));
+		await failed.fake.jobs[0]?.settled;
+		expect(failed.fake.jobs[0]?.status).toBe("failed");
+		expect(failed.fake.jobs[0]?.error).toContain("delivered to you as an incoming message");
+		expect(failed.fake.jobs[0]?.error).not.toContain("vm lost");
+
+		const unrelayed = rig({ relayed: () => false });
+		unrelayed.wakes.value = false;
+		unrelayed.jobs.sync(running(), []);
+		unrelayed.jobs.settle(ended("done"), turn(1, { state: "done", reply: "All done." }));
+		await unrelayed.fake.jobs[0]?.settled;
+		expect(unrelayed.fake.jobs[0]?.result).toContain("All done.");
 	});
 
 	test("adopting a job the model's own cards already deliver changes nothing", async () => {

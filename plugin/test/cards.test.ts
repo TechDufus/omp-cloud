@@ -1382,20 +1382,42 @@ describe("buttons on hand-off, result and question cards", () => {
 			expect(first).toContain(`☁ Handed off to ${ID}`);
 			expect(first).not.toMatch(/running|done|failed|cancelled/);
 			expect(first).not.toContain(hostTheme.symbol("status.running"));
-			// A turn of another thread, or a later turn of this one, says nothing of the hand-off.
+			// A turn of another thread says nothing of the hand-off.
 			QUESTIONS.settle("bbbbbbk3x9fa", [{ id: 1, state: "done", questions: [] }]);
-			QUESTIONS.settle(ID, [{ id: 2, state: "failed", questions: [] }]);
 			expect([statusOf(cardOf(c)), cardOf(c).p?.tone]).toEqual([undefined, "neutral"]);
 		});
 
-		test("a hand-off the session sync fetched shows the fetched state at once, without waiting for a watcher refresh", async () => {
+		test("a hand-off the session sync fetched shows the fetched state at once, without waiting for a watcher refresh, and names a turn past the first", async () => {
 			const c = await render(launch());
 			const node = c.describe?.(cx);
 			// What the session-start sync does with a thread it fetched: records its turns.
 			QUESTIONS.settle(ID, [{ id: 1, state: "done", questions: [] }, { id: 2, state: "running", questions: [] }]);
-			expect([statusOf(cardOf(c)), cardOf(c).p?.tone]).toEqual(["done", "success"]);
+			expect([statusOf(cardOf(c)), cardOf(c).p?.tone]).toEqual(["running", "pending"]);
 			expect(c.describe?.(cx)).not.toBe(node);
-			expect(c.render(100)[0]).toContain(`${hostTheme.symbol("status.success")} Handed off to ${ID}`);
+			expect(c.render(100)[0]).toContain(`${hostTheme.symbol("status.running")} Handed off to ${ID}`);
+			expect(c.render(100)[0]).toContain("turn 2 running");
+			expect(headText(cardOf(c))).toContain("turn 2");
+		});
+
+		test("a hand-off follows its thread's newest turn: a first turn that failed does not make it failed once later turns finished, and the header names the turn", async () => {
+			const c = await render(launch());
+			QUESTIONS.settle(ID, [{ id: 1, state: "failed", questions: [] }]);
+			expect([statusOf(cardOf(c)), cardOf(c).p?.tone]).toEqual(["error", "error"]);
+			expect(c.render(100)[0]).toContain("failed");
+			expect(c.render(100)[0]).not.toContain("turn 1");
+			expect(headText(cardOf(c))).not.toContain("turn");
+			const failed = c.describe?.(cx);
+			QUESTIONS.settle(ID, [{ id: 1, state: "failed", questions: [] }, { id: 2, state: "failed", questions: [] }, { id: 3, state: "done", questions: [] }]);
+			expect([statusOf(cardOf(c)), cardOf(c).p?.tone]).toEqual(["done", "success"]);
+			expect(c.describe?.(cx)).not.toBe(failed);
+			const header = c.render(100)[0] ?? "";
+			expect(header).toContain(`${hostTheme.symbol("status.success")} Handed off to ${ID}`);
+			expect(header).toContain("turn 3 done");
+			expect(header).not.toContain("failed");
+			expect(headText(cardOf(c))).toContain("turn 3");
+			// A turn that finished earlier than the newest one does not move it back.
+			QUESTIONS.settle(ID, [{ id: 2, state: "failed", questions: [] }]);
+			expect(statusOf(cardOf(c))).toBe("done");
 		});
 
 		test("a hand-off follows its first turn: running while it runs, then done, failed or cancelled, in both renderers", async () => {
@@ -1406,11 +1428,6 @@ describe("buttons on hand-off, result and question cards", () => {
 			const header = () => c.render(100)[0] ?? "";
 			expect(header()).toContain(`${hostTheme.symbol("status.running")} Handed off to ${ID}`);
 			expect(header()).toContain("running");
-			const node = c.describe?.(cx);
-			// A later turn's state is not the hand-off's.
-			QUESTIONS.settle(ID, [{ id: 2, state: "failed", questions: [] }]);
-			expect(chip()).toEqual(["running", "pending"]);
-			expect(c.describe?.(cx)).toBe(node);
 			const cases: [TurnState, string, string, Parameters<Theme["symbol"]>[0], string][] = [
 				["queued", "running", "pending", "status.running", "running"],
 				["done", "done", "success", "status.success", "done"],

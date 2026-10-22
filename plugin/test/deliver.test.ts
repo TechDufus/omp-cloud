@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CARD_VERSION, cardContent, cardPlain, type CardDetails } from "../src/cards";
-import { Deliverer, launchCard, originsFromEntries } from "../src/deliver";
+import { Deliverer, launchCard, originsFromEntries, threadsFromEntries } from "../src/deliver";
 import type { HandoffSummary } from "../src/launch";
 import type { ThreadOrigin, ThreadTurn } from "../src/types";
 import { detail, event, pending, turn } from "./builders";
@@ -292,6 +292,35 @@ describe("thread origin", () => {
 		d.turn(host.host, thread(), done(), []);
 		expect(pi.sent[0]?.options).toEqual({ triggerTurn: true });
 		expect(d.originOf(host.host, "unknown-thread")).toBe("user");
+	});
+
+	test("is recovered from `omp-cloud-thread` entries too, where the model's delegation is recorded without a card; an entry that names no thread or origin records nothing", () => {
+		const record = (data: unknown, customType = "omp-cloud-thread") => ({ type: "custom", customType, data });
+		const entries = [
+			record({ thread: ID, origin: "tool" }),
+			record({ thread: OTHER_ID, origin: "user" }),
+			record({ thread: "yyyyyyyyyyyy", origin: "somebody" }),
+			record({ thread: "", origin: "tool" }),
+			record("zzzzzzzzzzzz"),
+			record({ thread: "wwwwwwwwwwww", origin: "tool" }, "other"),
+			{ type: "custom_message", customType: "omp-cloud-thread", details: launch("tool", "vvvvvvvvvvvv") },
+		];
+		expect([...originsFromEntries(entries)]).toEqual([
+			[ID, "tool"],
+			[OTHER_ID, "user"],
+		]);
+		expect([...threadsFromEntries(entries)]).toEqual([ID, OTHER_ID]);
+
+		// Cards of sessions written before the entry existed, and the user's cards, still name their threads; a later record of a thread wins.
+		const mixed = [{ type: "custom_message", customType: "omp-cloud", details: launch("user", ID) }, record({ thread: ID, origin: "tool" }), { type: "custom_message", customType: "omp-cloud", details: launch("tool", OTHER_ID) }];
+		expect([...originsFromEntries(mixed)]).toEqual([
+			[ID, "tool"],
+			[OTHER_ID, "tool"],
+		]);
+		expect([...threadsFromEntries(mixed)]).toEqual([ID, OTHER_ID]);
+
+		const host = fakeHost({ entries });
+		expect(new Deliverer(fakePi().pi).originOf(host.host, ID)).toBe("tool");
 	});
 
 	test("a remembered origin wins over the persisted cards", () => {

@@ -1001,6 +1001,7 @@ export async function delegate(env: Env): Promise<OpOutput> {
 		if (o.summary.readOnly) lines.push("  read-only: nothing it changes is pushed, and it has no MCP servers");
 		if (o.summary.conversation === "included") lines.push("  conversation: forked from this session");
 		else if (o.summary.conversation === "too-large") lines.push("  conversation: too large, not shipped");
+		if (o.summary.withheld.length > 0) lines.push(`  left on this machine (credential-named): ${o.summary.withheld.join(", ")}`);
 		if (o.warnings.length > 0) lines.push(`  warnings: ${o.warnings.join("; ")}`);
 		details.push({ ok: true, index: o.index, thread: r.id, name: r.name, job: o.job ?? null, agent: o.agent ?? null, model: o.summary.model, branch: threadBranch(r.id), ref: task?.ref ?? "", key: o.key, replayed: o.replayed, workspace: o.workspace, readOnly: o.summary.readOnly, warnings: o.warnings });
 	}

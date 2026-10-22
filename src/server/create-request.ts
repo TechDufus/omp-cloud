@@ -16,6 +16,8 @@ export interface CreateRequest {
 }
 
 const MAX_TITLE_CHARS = 80;
+/** A heading this short names a section (`Goal`, `Known cause`) rather than the work, so the line under it joins the title. */
+const SHORT_HEADING_WORDS = 3;
 const MAX_NAME_CHARS = 60;
 const NAME_MESSAGE = `name must be one line of at most ${MAX_NAME_CHARS} characters`;
 const MAX_FIELD_BYTES = 512;
@@ -103,11 +105,39 @@ function objectField(obj: Record<string, unknown>, key: string): Record<string, 
 	return value;
 }
 
-/** The first non-empty line of the prompt, trimmed and cut to 80 code points. */
+/**
+ * The text of an ATX Markdown heading (`# Goal`, `## Plan ##`) without its `#` runs; undefined for any other line. Seven
+ * `#`, or a `#` with no space after it, is not a heading, and a closing run counts only after a space (`# C#` keeps its
+ * `#`). Scanned by hand, not with a regex, so a long line costs linear time.
+ */
+function headingText(line: string): string | undefined {
+	let open = 0;
+	while (open < line.length && line[open] === "#") open++;
+	if (open === 0 || open > 6 || (open < line.length && !/\s/.test(line.charAt(open)))) return undefined;
+	let end = line.length;
+	while (end > open && line[end - 1] === "#") end--;
+	if (end < line.length && !/\s/.test(line.charAt(end - 1))) end = line.length;
+	return line.slice(open, end).trim();
+}
+
+/**
+ * The first non-empty line of the prompt, trimmed, without the `#` runs of a Markdown heading (an empty heading is
+ * skipped). A heading of at most three words is joined with the next non-empty line (`# Goal` then `Fix the bug` gives
+ * `Goal: Fix the bug`). Cut to 80 code points.
+ */
 function titleOf(prompt: string): string {
-	for (const line of prompt.split("\n")) {
-		const trimmed = line.trim();
-		if (trimmed !== "") return cut(trimmed, MAX_TITLE_CHARS);
+	const lines = prompt
+		.split("\n")
+		.map(line => line.trim())
+		.filter(line => line !== "");
+	for (const [i, line] of lines.entries()) {
+		const text = headingText(line);
+		if (text === undefined) return cut(line, MAX_TITLE_CHARS);
+		if (text === "") continue;
+		const next = lines[i + 1];
+		const under = next === undefined ? "" : (headingText(next) ?? next);
+		const short = text.split(/\s+/).length <= SHORT_HEADING_WORDS;
+		return cut(short && under !== "" ? `${text}: ${under}` : text, MAX_TITLE_CHARS);
 	}
 	return "";
 }

@@ -14,7 +14,8 @@
  * fails the job with the same structured data. A thread the user started has its delivery acknowledged at registration (the
  * inbox and the cards are its channel, and a running job must never hold the local session open), and so does a turn an IRC
  * message woke (its reply goes back to the sender as a wake relay): never both channels for one turn. A model blocked in
- * `wait` on the job gets the result from `wait` itself. A job cancelled from omp's own surfaces (the jobs panel, `/jobs`,
+ * `wait` on the job gets the result from `wait` itself, except for a turn the wake relay delivers: `wait` then returns only a
+ * pointer to the relay, so the report reaches the model once. A job cancelled from omp's own surfaces (the jobs panel, `/jobs`,
  * `proc://<id>/kill`) stops the cloud turn like a native kill. omp's own cleanup (`/clear`, a branch, a switch) cancels
  * the job with the same reason, and must not stop it: a cancel within the session switch window is that cleanup.
  * No manager, a full one or a host without one: no job, nothing else changes.
@@ -60,6 +61,8 @@ export interface CloudJobsOptions {
 	manager?: () => JobManager | undefined;
 	/** Whether the turn's result is delivered to the model: the thread was started by the model's `cloud` tool and no message woke the turn; only then is the job's result delivered by omp. */
 	wakes: (thread: string, turn: ThreadTurn) => boolean;
+	/** Whether the turn's reply is on its way to the agent that messaged the thread (`CloudAgents.relayed`): that wake relay is its one delivery, so the job's own result is only a pointer to it. Absent: none is. */
+	relayed?: (thread: string, turn: number) => boolean;
 	/** The registry id of the agent `thread` is (`CloudAgents.agentId`): the job's label and `agentId`; the job's own id when absent. */
 	agentId?: (thread: string) => string | undefined;
 	/** Whether `id` names an agent of omp's registry: a child's job id and `agentId` never take one (the VM's agents are named from the same pool as omp's own). Absent: none is. */
@@ -277,9 +280,12 @@ export class CloudJobs {
 		this.#line(live, `· ${head}\n`);
 		this.#end(live, turn.state === "done" ? "completed" : turn.state === "failed" ? "failed" : "aborted");
 		this.#publish(live, cloudJobLiveWidget({ ...detail, activity: null, turns: detail.turns.map(t => (t.id === turn.id ? turn : t)) }, this.#now(), endStage(turn, detail), live.id));
-		if (live.adopted) {
-			// A wait blocked on this job cannot be told apart from the acknowledgement made while the thread was the user's: the card is the one that carries the result.
-			const pointer = `${head}. The full result arrives as a [cloud] message from this thread, not through this job.`;
+		const relayed = live.quiet && (this.#opts.relayed?.(detail.id, turn.id) ?? false);
+		if (live.adopted || relayed) {
+			// A wait blocked on this job cannot be told apart from the acknowledgement made while the thread was the user's, and a turn an IRC message woke is delivered by its wake relay: the one delivery is elsewhere, and what a wait returns only says where.
+			const pointer = live.adopted
+				? `${head}. The full result arrives as a [cloud] message from this thread, not through this job.`
+				: `${head}. Its reply was delivered to you as an incoming message from agent ${live.agent}; agent://${live.agent} reads it again.`;
 			if (turn.state === "done") live.outcome.resolve(pointer);
 			else live.outcome.reject(new Error(pointer));
 		} else {

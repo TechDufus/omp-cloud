@@ -477,6 +477,8 @@ const LEDGER_MAX = 2000;
 export class QuestionLedger {
 	readonly #outcomes = new Map<string, QuestionOutcome>();
 	readonly #turns = new Map<string, TurnState>();
+	/** The highest turn id each thread has been reported with. */
+	readonly #newest = new Map<string, number>();
 
 	get(thread: string, turn: number, question: number): QuestionOutcome | undefined {
 		return this.#outcomes.get(`${thread}:${turn}:${question}`);
@@ -487,12 +489,20 @@ export class QuestionLedger {
 		return this.#turns.get(`${thread}:${turn}`);
 	}
 
+	/** The newest turn the session heard of for `thread` and its last reported state; undefined before it heard of any. */
+	newestTurn(thread: string): { id: number; state: TurnState } | undefined {
+		const id = this.#newest.get(thread);
+		const state = id === undefined ? undefined : this.#turns.get(`${thread}:${id}`);
+		return id === undefined || state === undefined ? undefined : { id, state };
+	}
+
 	/** Records what `turns` (a thread's, or the one an answer came back for) say of their questions and of themselves. */
 	settle(thread: string, turns: readonly { id: number; state: TurnState; questions: readonly Question[] }[]): void {
 		for (const turn of turns) {
 			const turnKey = `${thread}:${turn.id}`;
 			this.#turns.delete(turnKey);
 			this.#turns.set(turnKey, turn.state);
+			if (turn.id >= (this.#newest.get(thread) ?? 0)) this.#newest.set(thread, turn.id);
 			for (const q of turn.questions) {
 				const outcome = questionOutcome(q, turn.state);
 				if (!outcome) continue;
@@ -514,28 +524,22 @@ export class QuestionLedger {
 	clear(): void {
 		this.#outcomes.clear();
 		this.#turns.clear();
+		this.#newest.clear();
 	}
 }
 
 /** The session's settled questions and turn states ({@link QuestionLedger}); the watcher feeds it and the cards read it. */
 export const QUESTIONS = new QuestionLedger();
 
-/** How a hand-off stands: its first turn's state; `unknown` until the session has a record of the thread (a transcript resumed from yesterday says nothing live). */
+/** How a hand-off stands: the state of the newest turn the session knows of the thread; `unknown` until the session has a record of it (a transcript resumed from yesterday says nothing live). */
 type LaunchState = "unknown" | "running" | "done" | "error" | "cancelled";
 
-function launchState(d: LaunchCard): LaunchState {
-	switch (QUESTIONS.turnState(d.thread, 1)) {
-		case "done":
-			return "done";
-		case "failed":
-			return "error";
-		case "cancelled":
-			return "cancelled";
-		case undefined:
-			return "unknown";
-		default:
-			return "running";
-	}
+/** The state of a hand-off's thread and the turn it is read from: the hand-off's first turn, and the turn after it that the thread has moved on to. */
+function launchState(d: LaunchCard): { state: LaunchState; turn: number } {
+	const newest = QUESTIONS.newestTurn(d.thread);
+	if (!newest) return { state: "unknown", turn: 1 };
+	const state = newest.state === "done" ? "done" : newest.state === "failed" ? "error" : newest.state === "cancelled" ? "cancelled" : "running";
+	return { state, turn: newest.id };
 }
 
 /** A hand-off's native tone, as omp's task card tones a job; neutral (and no status chip) while the session has no word on it. */
@@ -1297,8 +1301,10 @@ function cardSignature(d: ThreadCard): string | undefined {
 	switch (d.kind) {
 		case "question":
 			return `${JSON.stringify(QUESTIONS.get(d.thread, d.turn, d.questionId) ?? null)}|${agent}`;
-		case "launch":
-			return `${launchState(d)}|${agent}`;
+		case "launch": {
+			const { state, turn } = launchState(d);
+			return `${state}:${turn}|${agent}`;
+		}
 		case "turn":
 			return agent;
 	}
@@ -1310,10 +1316,11 @@ function classicHeader(d: ThreadCard, theme: Theme): { state: State | undefined;
 	const { title: label, note } = cardHead(d);
 	switch (d.kind) {
 		case "launch": {
-			const s = launchState(d);
+			const { state: s, turn } = launchState(d);
 			const description = note || undefined;
 			if (s === "unknown") return { state: undefined, header: renderStatusLine({ iconOverride: "☁", title: `Handed off to ${label}`, description }, theme) };
-			return { state: LAUNCH_BLOCK_STATE[s], header: renderStatusLine({ icon: LAUNCH_ICON[s], title: `Handed off to ${label}`, description, meta: [s === "error" ? "failed" : s] }, theme) };
+			const word = s === "error" ? "failed" : s;
+			return { state: LAUNCH_BLOCK_STATE[s], header: renderStatusLine({ icon: LAUNCH_ICON[s], title: `Handed off to ${label}`, description, meta: [turn > 1 ? `turn ${turn} ${word}` : word] }, theme) };
 		}
 		case "turn": {
 			const ok = d.state === "done";
@@ -1526,14 +1533,14 @@ function describeLaunch(d: LaunchCard, expanded: boolean): NativeNode {
 	if (untracked.length > 0) children.push(lineSection("untracked", "Untracked files shipped", untracked, "path"));
 	if (d.withheld.length > 0) children.push(lineSection("withheld", "Left on this machine (credential-named)", d.withheld, "path"));
 	if (d.warnings.length > 0) children.push(lineSection("warnings", "Warnings", d.warnings, "warning"));
-	const state = launchState(d);
+	const { state, turn } = launchState(d);
 	return native.card(
 		{
 			key: "card",
 			role: "omp.cloud.launch",
 			tone: LAUNCH_TONE[state],
 			...(state === "unknown" ? {} : { status: state }),
-			head: [native.span("☁ ", "accent"), native.span("Handed off to ", "muted"), native.span(cardHead(d).title, "strong"), ...(cardHead(d).note ? [native.span(`: ${cardHead(d).note}`, "muted")] : [])],
+			head: [native.span("☁ ", "accent"), native.span("Handed off to ", "muted"), native.span(cardHead(d).title, "strong"), ...(state !== "unknown" && turn > 1 ? [native.span(` · turn ${turn}`, "muted")] : []), ...(cardHead(d).note ? [native.span(`: ${cardHead(d).note}`, "muted")] : [])],
 			collapsible: true,
 			collapsed: !expanded,
 			preview: { lines: PREVIEW_LINES },

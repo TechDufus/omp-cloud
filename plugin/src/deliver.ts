@@ -38,10 +38,28 @@ function modelNotice(title: string, lines: string[]): NoticeCard {
 	return { ...noticeCard("", title, lines), origin: "tool" };
 }
 
-/** Thread origins recorded in the launch cards of a session's entries. */
+/**
+ * The `custom` session entry that records a thread the local model started: its `delegate` result already tells the model of the
+ * start, so no launch card is posted, and the session still has to remember the thread across a restart (its results, its origin).
+ */
+export const THREAD_ENTRY = "omp-cloud-thread";
+
+/** The thread an `omp-cloud-thread` entry records and who started it; undefined for any other entry. */
+function recordedThread(e: unknown): { thread: string; origin: ThreadOrigin } | undefined {
+	if (!isRecord(e) || e.type !== "custom" || e.customType !== THREAD_ENTRY || !isRecord(e.data)) return undefined;
+	const { thread, origin } = e.data;
+	return typeof thread === "string" && thread !== "" && (origin === "tool" || origin === "user") ? { thread, origin } : undefined;
+}
+
+/** Thread origins a session's entries record: its `omp-cloud-thread` entries, and the launch cards of the user's `/cloud` threads and of sessions written before the entry existed. */
 export function originsFromEntries(entries: readonly unknown[]): Map<string, ThreadOrigin> {
 	const out = new Map<string, ThreadOrigin>();
 	for (const e of entries) {
+		const recorded = recordedThread(e);
+		if (recorded) {
+			out.set(recorded.thread, recorded.origin);
+			continue;
+		}
 		if (!isRecord(e) || e.type !== "custom_message" || e.customType !== CARD_TYPE) continue;
 		const card = asCard(e.details);
 		if (card?.kind === "launch") out.set(card.thread, card.origin);
@@ -49,10 +67,15 @@ export function originsFromEntries(entries: readonly unknown[]): Map<string, Thr
 	return out;
 }
 
-/** Ids of the threads the session's cards name: the ones it launched, was told about or was asked a question by. */
+/** Ids of the threads the session's entries name: the ones it launched (card or `omp-cloud-thread` entry), was told about or was asked a question by. */
 export function threadsFromEntries(entries: readonly unknown[]): Set<string> {
 	const out = new Set<string>();
 	for (const e of entries) {
+		const recorded = recordedThread(e);
+		if (recorded) {
+			out.add(recorded.thread);
+			continue;
+		}
 		if (!isRecord(e) || e.type !== "custom_message" || e.customType !== CARD_TYPE) continue;
 		const card = asCard(e.details);
 		if (card && card.kind !== "inventory" && card.thread !== "") out.add(card.thread);

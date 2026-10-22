@@ -123,6 +123,21 @@ describe("title", () => {
 		const line = "y".repeat(80);
 		expect(parseCreateRequest(request({ prompt: `${line}\nz` })).thread.title).toBe(line);
 	});
+
+	const title = (prompt: string): string => parseCreateRequest(request({ prompt })).thread.title;
+
+	test("a Markdown heading loses its # runs, and a heading of three words or fewer takes the line under it", () => {
+		expect(title("# Goal\nThe thread page shows raw Markdown.\n\n# Change")).toBe("Goal: The thread page shows raw Markdown.");
+		expect(title("## Research: signed commits and draft pull requests ##\nbody")).toBe("Research: signed commits and draft pull requests");
+		expect(title("#\n\n## Plan it\n### Step one")).toBe("Plan it: Step one");
+		expect(title("# Goal")).toBe("Goal");
+	});
+
+	test("a line that only looks like a heading is kept as written", () => {
+		expect(title("#hashtag rules")).toBe("#hashtag rules");
+		expect(title("####### seven")).toBe("####### seven");
+		expect(title("# C#\nnotes")).toBe("C#: notes");
+	});
 });
 
 describe("name", () => {

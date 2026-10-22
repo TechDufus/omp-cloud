@@ -18,7 +18,7 @@ import { readConnectionFile, type PairedConnection } from "./connection";
 import { runDashboard, showForwardedDashboard } from "./dashboard";
 import { CloudAgents, planModeFromEntries } from "./cloud-agents";
 import { CloudJobs } from "./cloud-jobs";
-import { Deliverer, launchCard, originsFromEntries, threadsFromEntries } from "./deliver";
+import { Deliverer, launchCard, originsFromEntries, THREAD_ENTRY, threadsFromEntries } from "./deliver";
 import { devicesCard, runDisconnect, runRevoke } from "./devices";
 import { clip, metricsLine, plural, threadHeading, threadTag, truncateText } from "./format";
 import { isRecord } from "./guards";
@@ -354,6 +354,7 @@ export class Cloud implements CardActions, ToolCloud {
 			this.#watcher?.unwatch();
 			const jobs = new CloudJobs({
 				wakes: (thread, turn) => this.#ctx !== undefined && this.#deliver.originOf(this.#ctx, thread) === "tool" && turn.origin !== "irc",
+				relayed: (thread, turn) => this.#agents.relayed(thread, turn),
 				agentId: thread => this.#agents.agentId(thread),
 				taken: id => this.#agents.holdsId(id),
 				warn: message => this.#ctx?.ui.notify(message, "warning"),
@@ -1321,8 +1322,8 @@ export class Cloud implements CardActions, ToolCloud {
 	/** The watcher's sink: finished turns become cards (or inbox entries) and also save the conversation. */
 	#watchSink(client: CloudClient): WatchSink {
 		return {
-			turn: (host, thread, turn, events, job) => {
-				this.#deliver.turn(host, thread, turn, events, job);
+			turn: (host, thread, turn, events, job, relayed) => {
+				this.#deliver.turn(host, thread, turn, events, job, relayed);
 				this.#saveFinishedTurn(host, client, thread);
 			},
 			question: (host, thread, q) => {
@@ -1383,7 +1384,7 @@ export class Cloud implements CardActions, ToolCloud {
 		return this.#targets.get(id);
 	}
 
-	/** Remembers that this session works with `thread`: the launch card that records it may not be posted yet. */
+	/** Remembers that this session works with `thread`: the entry or launch card that records it may not be written yet. */
 	#markUsed(ctx: Host, thread: string): void {
 		const id = this.#sessionId(ctx);
 		const used = this.#used.get(id) ?? new Set<string>();
@@ -1392,19 +1393,28 @@ export class Cloud implements CardActions, ToolCloud {
 	}
 
 	/**
-	 * The threads this session launched or adopted: those its launch cards name, and those it started in this process.
+	 * The threads this session launched or adopted: those its entries and launch cards name, and those it started in this process.
 	 * The watcher's and the agents' threads are not part of it, because they outlive `/new`.
 	 */
 	#sessionThreads(ctx: Host): Set<string> {
 		return new Set([...originsFromEntries(ctx.sessionManager.getEntries?.() ?? []).keys(), ...(this.#used.get(this.#sessionId(ctx)) ?? [])]);
 	}
 
-	/** What a created thread gets in this session: it leads the cached list, its launch card is posted (not for a replayed create: the card exists already) and it is followed for `origin`. The host job of its first turn, when it is one already. */
+	/**
+	 * What a created thread gets in this session: it leads the cached list, the session records it and it is followed for `origin`. The user's
+	 * `/cloud <task>` gets its launch card (not for a replayed create: the card exists already); the model's delegation gets none, since the
+	 * `delegate` result is its record, and is written as an `omp-cloud-thread` entry at once instead (a card would wait for the end of the run).
+	 * The host job of its first turn, when it is one already.
+	 */
 	#announce(ctx: Host, origin: ThreadOrigin, prompt: string, o: LaunchedThread): string | undefined {
 		const id = o.response.id;
 		this.#threads = [o.response, ...this.#threads.filter(t => t.id !== id)];
 		this.#markUsed(ctx, id);
-		if (!o.replayed) this.#deliver.post(ctx, launchCard({ origin, thread: id, name: o.response.name, prompt, summary: o.summary, warnings: o.warnings }));
+		if (origin === "tool") {
+			if (originsFromEntries(ctx.sessionManager.getEntries?.() ?? []).get(id) !== "tool") this.#pi.appendEntry(THREAD_ENTRY, { thread: id, origin });
+		} else if (!o.replayed) {
+			this.#deliver.post(ctx, launchCard({ origin, thread: id, name: o.response.name, prompt, summary: o.summary, warnings: o.warnings }));
+		}
 		this.follow(id, { origin });
 		return this.#jobs?.jobId(id);
 	}
