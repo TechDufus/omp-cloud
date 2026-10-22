@@ -4,6 +4,8 @@ Release notes of omp-cloud, newest first. `mise run release -- <version>` moves 
 
 ## Unreleased
 
+## 0.5.2 (2026-10-22)
+
 - **Website.** The documentation is published at https://omp-cloud.techdufus.com with a landing page, in the dashboard's look with a light and a dark theme and search over every page. The pages are `docs/*.md`, `CHANGELOG.md` and sections of `README.md` themselves, rebuilt on every push to `main`; `mise run site:build` builds it into `site/dist/` and fails on a link to a page or heading that does not exist, and `mise run site:dev` previews it locally.
 - **Shorter install line.** `curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh` installs the server; the website serves the same `install.sh` from `main` as `raw.githubusercontent.com`, which keeps working.
 - **Login link stays on screen.** `/cloud login` posts the provider's sign-in link (and a device code) as a card in the transcript, with a link to click and the full URL to copy; in Tern it was a notification that vanished after two seconds. In omp's interactive UI it asks you to wait while the agent is working.
