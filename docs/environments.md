@@ -98,6 +98,8 @@ The plugin starts a small forwarder on a free port of this machine and prints `â
 
 One forwarder serves one thread and port, so `/cloud preview <id> 3000` and `/cloud preview <id> 8000` are two. They also end with `/cloud preview stop`, on `/cloud disconnect` and when omp ends. From a paired device the requests go over the pinned TLS connection and the service's remote listener, like every other call.
 
+The local model can do the same through the `cloud` tool's `preview` op (`{op: "preview", thread, port}`; `{op: "preview", stop: true}` ends them): it gets the `http://localhost:<lp>/` address and opens it with omp's browser tool to take screenshots, click and read the page. The tool and the slash command share one list of forwarders, so each reuses the other's, and `/cloud preview stop` ends the model's too. See [The `cloud` tool](cloud-tool.md).
+
 What the service does: it resolves the thread's VM, resumes it if it is paused, and relays the request to the port through vibemon's ingress. Every request postpones the idle pause (`runner.idleTimeoutSeconds`), so a VM you are looking at stays awake. The server has to keep running after the agent's command ends, so ask the agent to start it detached (`setsid nohup <command> >/dev/null 2>&1 &`). A thread with no VM yet answers `409` `the thread has no VM; send it a message first`. Port 49983 is the VM's own control port and is never forwarded. The full contract is in [API](api.md#environments-and-previews).
 
 Limits are under [Known limitations](architecture.md#known-limitations).

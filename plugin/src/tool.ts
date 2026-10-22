@@ -21,7 +21,7 @@ export const TOOL_NAME = "cloud";
 /** The name used when `cloud` is already taken by another tool. */
 export const TOOL_NAME_FALLBACK = "cloud_agent";
 
-export const TOOL_OPS = ["delegate", "list", "status", "read", "events", "diff", "files", "send", "answer", "stop", "wait", "pull", "delete", "info"] as const;
+export const TOOL_OPS = ["delegate", "list", "status", "read", "events", "diff", "files", "send", "answer", "stop", "wait", "pull", "delete", "info", "preview"] as const;
 export type ToolOp = (typeof TOOL_OPS)[number];
 
 /** The fields of one delegated task. */
@@ -101,6 +101,10 @@ export interface ToolParams {
 	force?: boolean;
 	// delete
 	confirm?: boolean;
+	// preview
+	port?: number;
+	/** preview: end previews instead of starting one. */
+	stop?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +167,10 @@ export interface ToolCloud {
 	sendIrc(detail: ThreadDetail, text: string): Promise<{ receipt: IrcReceiptKind; turn: number | null }>;
 	/** `agent://<id>` of the thread as omp's own handler resolves it, with the finished turn it names; undefined when omp cannot serve it (no finished turn, no router). */
 	readAgent(thread: string): Promise<{ id: string; text: string; turn: number } | undefined>;
+	/** The `preview` op's start: the `http://localhost:<lp>/` address of the forwarder of `port` of `thread`, one the user or the model started before when it runs. The caller checked the capability. */
+	startPreview(ctx: Host, thread: string, port: number): Promise<string>;
+	/** The `preview` op's stop: ends the previews of `thread` (every one when omitted), of `port` only when given; how many were running. Shared with `/cloud preview stop`. */
+	stopPreviews(thread?: string, port?: number): number;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +254,8 @@ export type OpDetails =
 	| { op: "wait"; until?: "any" | "all"; at: number; outcomes: ops.WaitDetail[]; failures: ThreadFailure[] }
 	| { op: "pull"; thread: string; mode: string; branch: string; head: string; path: string; commits: number | null; checkedOutMoved: boolean; movedIn: string | null; session: string }
 	| { op: "delete"; deleted: string[]; failures: ThreadFailure[] }
+	| { op: "preview"; thread: string; port: number; url: string }
+	| { op: "preview"; stopped: number }
 	| {
 			op: "info";
 			service: ServiceInfo;
@@ -306,6 +316,7 @@ export const TOOL_DESCRIPTION = [
 	"- wait {thread?, until?, on?, timeoutSec?}: block until threads settle (done, failed or a question); without thread it waits on every thread you started in this session that is working or waiting. A thread waiting for an answer is not working: answer it first.",
 	"- pull {thread, apply?, into?, force?}: bring the result into the local repository: fetch (default: branch omp-cloud/<thread>, working tree untouched), merge (fast-forward the current branch; clean tree only) or worktree (a new checkout). Refuses a repository the thread did not start from unless force. A scratch thread is cloned into the new directory `into`.",
 	"- delete {thread | [threads], confirm: true, force?}: remove threads for good; a thread you did not start in this session also needs force. info: the service version, capabilities, models, limits and spend.",
+	"- preview {thread, port} | {stop: true, thread?, port?}: look at a web app or dev server a cloud agent runs in its VM (ask it to start the server detached first, e.g. `setsid nohup <command> >/dev/null 2>&1 &`). It opens that port of the thread's VM on a local address, `http://localhost:<lp>/`, and returns it: open it with your browser tool to screenshot, click or read the page. A paused VM wakes on the first request; WebSockets are not forwarded. `stop: true` ends every preview, or only those of `thread` (and `port`). A preview the user started with `/cloud preview` is reused, and `/cloud preview stop` ends yours too.",
 	"",
 	"`thread` is the 12-character id, an id suffix of 4 or more characters, the start of the thread's name, or the id of its running job. Errors carry a code (invalid, not_found, ambiguous_ref, conflict, forbidden, unauthorized, unreachable, timeout, ambiguous_outcome, too_large, rate_limited, unavailable, version_skew, …) and say whether retrying can help; `ambiguous_outcome` means the request may have taken effect: check with list or status before repeating it.",
 ].join("\n");
@@ -324,6 +335,7 @@ export function toolApproval(args: unknown): "read" | "write" | { tier: "exec"; 
 		case "info":
 			return "read";
 		case "send":
+		case "preview":
 		case "answer":
 		case "stop":
 		case "pull":
@@ -454,6 +466,8 @@ export function registerCloudTool(pi: ExtensionAPI, cloud: ToolCloud): void {
 			into: z.string().optional().describe("pull: the new directory of a worktree, or where a scratch thread is cloned"),
 			force: z.boolean().optional().describe("pull: fetch into a repository the thread did not start from; delete: delete a thread you did not start in this session"),
 			confirm: z.boolean().optional().describe("delete: must be true"),
+			port: z.number().int().min(1).max(65535).optional().describe("preview: the port of the VM's web server (not 49983, the VM's own agent)"),
+			stop: z.boolean().optional().describe("preview: true ends previews instead of starting one: every one, or only those of `thread` (and `port`)"),
 		}),
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			// The host validated `params` against the schema above; the guard narrows what its typing leaves unknown.

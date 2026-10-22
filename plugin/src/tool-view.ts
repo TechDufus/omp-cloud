@@ -381,5 +381,7 @@ export function describeResult(result: ViewResult, options: Pick<RenderResultOpt
 			return diffView(details, text);
 		case "files":
 			return filesView(details, text);
+		case "preview":
+			return textView("preview", text);
 	}
 }

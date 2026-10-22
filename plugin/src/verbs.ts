@@ -279,7 +279,7 @@ export class Cloud implements CardActions, ToolCloud {
 		this.#updates.stop();
 		this.#autoAsk.close();
 		this.#agents.dispose();
-		this.#stopPreviews();
+		this.stopPreviews();
 	}
 
 	/** The host's pi-tui, once imported; the hub overlay and the live widget need it. */
@@ -307,7 +307,7 @@ export class Cloud implements CardActions, ToolCloud {
 	/** Stops the dashboard forwarder of a paired connection and every preview, if any run. */
 	stopForwarder(): void {
 		this.#forwarder?.stop();
-		this.#stopPreviews();
+		this.stopPreviews();
 	}
 
 	async handle(args: string, ctx: CommandHost): Promise<void> {
@@ -596,7 +596,7 @@ export class Cloud implements CardActions, ToolCloud {
 			return;
 		}
 		if (parsed.kind === "previewStop") {
-			const stopped = this.#stopPreviews();
+			const stopped = this.stopPreviews();
 			ctx.ui.notify(stopped === 0 ? "☁ no previews are running" : `☁ stopped ${plural(stopped, "preview")}`, "info");
 			return;
 		}
@@ -833,17 +833,21 @@ export class Cloud implements CardActions, ToolCloud {
 		return this.#forwarder;
 	}
 
-	/** Stops every preview forwarder; how many were running. */
-	#stopPreviews(): number {
-		const running = [...this.#previews.values()].filter(p => !p.forwarder.stopped);
-		for (const { forwarder } of this.#previews.values()) forwarder.stop();
-		this.#previews.clear();
-		return running.length;
+	/** Stops the preview forwarders of `thread` (every one when omitted), of `port` only when given; how many were running. */
+	stopPreviews(thread?: string, port?: number): number {
+		let running = 0;
+		for (const [key, { forwarder }] of this.#previews) {
+			if (thread !== undefined && forwarder.thread !== thread) continue;
+			if (port !== undefined && forwarder.target !== port) continue;
+			if (!forwarder.stopped) running++;
+			forwarder.stop();
+			this.#previews.delete(key);
+		}
+		return running;
 	}
 
-	/** `/cloud preview <id> <port>`: relays a port of the thread's VM to a loopback address of this machine and opens it in the TUI's browser. */
-	async #preview(ctx: Host, s: Session, thread: string, port: number): Promise<void> {
-		await s.client.requireCapability("threads.preview");
+	/** The forwarder of `port` of `thread` on `s`'s connection: the running one (the user's or the model's), else a new one. */
+	#previewFor(s: Session, thread: string, port: number): PreviewForwarder {
 		const key = `${thread}:${port}`;
 		let entry = this.#previews.get(key);
 		if (!entry || entry.forwarder.stopped || entry.connection !== s.key) {
@@ -852,7 +856,19 @@ export class Cloud implements CardActions, ToolCloud {
 			entry = { forwarder: PreviewForwarder.start({ upstream, base: s.conn.url, token: s.conn.token, thread, port }), connection: s.key };
 			this.#previews.set(key, entry);
 		}
-		const url = entry.forwarder.url;
+		return entry.forwarder;
+	}
+
+	/** The `cloud` tool's `preview`: the address of the forwarder of `port` of `thread` (started now, or already running). The caller checked the capability. */
+	async startPreview(ctx: Host, thread: string, port: number): Promise<string> {
+		this.#ctx = ctx;
+		return this.#previewFor(await this.#session(ctx, "full"), thread, port).url;
+	}
+
+	/** `/cloud preview <id> <port>`: relays a port of the thread's VM to a loopback address of this machine and opens it in the TUI's browser. */
+	async #preview(ctx: Host, s: Session, thread: string, port: number): Promise<void> {
+		await s.client.requireCapability("threads.preview");
+		const url = this.#previewFor(s, thread, port).url;
 		ctx.ui.notify([`☁ preview of port ${port} on ${this.#tag(thread)}: ${url}`, "  /cloud preview stop ends it"].join("\n"), "info");
 		// Only the interactive TUI opens a browser: never RPC or print mode. The address was printed either way.
 		if (ctx.mode === "tui") this.#open(url);

@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { writeConnectionFile, type PairedConnection } from "../src/connection";
+import { runTool, type ToolParams, type ToolResult } from "../src/tool";
 import { Cloud } from "../src/verbs";
 import { detail, summary, whoami } from "./builders";
 import { cloudEnv, fakeHost, fakePi, type FakeHost, type FakeHostOptions } from "./fakes";
@@ -173,5 +174,112 @@ describe("/cloud preview", () => {
 		const res = await fetch(`${urlOf(r.notes())}dir`, { redirect: "manual" });
 		expect(res.status).toBe(302);
 		expect(res.headers.get("location")).toBe("/dir/");
+	});
+});
+
+describe("the cloud tool's preview op", () => {
+	const run = (r: Rig, params: ToolParams): Promise<ToolResult> => runTool({ cloud: r.cloud, ctx: r.host.host, toolCallId: "call_1" }, params);
+	const text = (res: ToolResult): string => res.content.map(c => c.text).join("\n");
+	const alive = async (url: string): Promise<boolean> => (await fetch(url).catch(() => undefined))?.status === 200;
+
+	test("starts a forwarder that relays to the service's ports route with the owner token, and says how to use and stop it", async () => {
+		const svc = plainService(service(["threads.preview"], () => new Response("<h1>Directory listing</h1>", { headers: { "content-type": "text/html" } })));
+		const r = await rig(`url: ${svc.origin}\ntoken: tok-secret\n`);
+		const res = await run(r, { op: "preview", thread: THREAD.slice(-6), port: 8000 });
+		expect(res.isError).toBeUndefined();
+		const url = urlOf(text(res));
+		expect(text(res).split("\n")[0]).toBe(`cloud preview: ok ${url} → port 8000 of ${THREAD} (dev server)`);
+		expect(text(res)).toContain("browser tool");
+		expect(text(res)).not.toContain("tok-secret");
+
+		expect(await (await fetch(`${url}index.html`)).text()).toBe("<h1>Directory listing</h1>");
+		expect(svc.seen.find(s => s.path.includes("/ports/"))).toMatchObject({ path: `/api/v1/threads/${THREAD}/ports/8000/index.html`, authorization: "Bearer tok-secret" });
+		expect(opened).toEqual([]);
+	});
+
+	test("a second call, and the slash verb, reuse the running forwarder", async () => {
+		const svc = plainService(service(["threads.preview"], () => new Response("ok")));
+		const r = await rig(`url: ${svc.origin}\ntoken: tok\n`);
+		const a = urlOf(text(await run(r, { op: "preview", thread: THREAD, port: 8000 })));
+		expect(urlOf(text(await run(r, { op: "preview", thread: THREAD, port: 8000 })))).toBe(a);
+		await r.run(`preview ${THREAD} 8000`);
+		expect(urlOf(r.notes())).toBe(a);
+		const b = urlOf(text(await run(r, { op: "preview", thread: THREAD, port: 3000 })));
+		expect(b).not.toBe(a);
+
+		// A preview the user started is the model's too.
+		await r.run(`preview ${THREAD} 5000`);
+		const user = urlOf(r.host.notes.at(-1)?.[0] ?? "");
+		expect(urlOf(text(await run(r, { op: "preview", thread: THREAD, port: 5000 })))).toBe(user);
+	});
+
+	test("stop with a thread and port ends that one, with a thread ends its previews, without either ends all", async () => {
+		const svc = plainService(service(["threads.preview"], () => new Response("ok")));
+		const r = await rig(`url: ${svc.origin}\ntoken: tok\n`);
+		const start = async (port: number): Promise<string> => urlOf(text(await run(r, { op: "preview", thread: THREAD, port })));
+		const [a, b, c] = [await start(8000), await start(3000), await start(5000)] as [string, string, string];
+
+		const one = await run(r, { op: "preview", stop: true, thread: THREAD.slice(-6), port: 3000 });
+		expect(text(one)).toBe("cloud preview: ok stopped 1 preview");
+		expect(await alive(a)).toBe(true);
+		expect(await alive(b)).toBe(false);
+		expect(await alive(c)).toBe(true);
+
+		expect(text(await run(r, { op: "preview", stop: true, port: 5000 }))).toBe("cloud preview: ok stopped 1 preview");
+		expect(await alive(c)).toBe(false);
+		expect(await alive(a)).toBe(true);
+
+		expect(text(await run(r, { op: "preview", stop: true, thread: THREAD }))).toBe("cloud preview: ok stopped 1 preview");
+		expect(await alive(a)).toBe(false);
+		expect(text(await run(r, { op: "preview", stop: true }))).toBe("cloud preview: ok stopped 0 previews");
+
+		const d = await start(8000);
+		const e = await start(3000);
+		expect(text(await run(r, { op: "preview", stop: true }))).toBe("cloud preview: ok stopped 2 previews");
+		expect(await alive(d)).toBe(false);
+		expect(await alive(e)).toBe(false);
+	});
+
+	test("`/cloud preview stop`, session shutdown and disconnect end the previews the tool started", async () => {
+		const svc = plainService(service(["threads.preview"], () => new Response("ok")));
+		const r = await rig(`url: ${svc.origin}\ntoken: tok\n`);
+		const a = urlOf(text(await run(r, { op: "preview", thread: THREAD, port: 8000 })));
+		const b = urlOf(text(await run(r, { op: "preview", thread: THREAD, port: 3000 })));
+		expect(await alive(a)).toBe(true);
+		await r.run("preview stop");
+		expect(r.host.notes.at(-1)).toEqual(["☁ stopped 2 previews", "info"]);
+		expect(await alive(a)).toBe(false);
+		expect(await alive(b)).toBe(false);
+
+		const c = urlOf(text(await run(r, { op: "preview", thread: THREAD, port: 8000 })));
+		r.cloud.stopForwarder();
+		expect(await alive(c)).toBe(false);
+
+		const d = urlOf(text(await run(r, { op: "preview", thread: THREAD, port: 8000 })));
+		r.cloud.shutdown();
+		expect(await alive(d)).toBe(false);
+	});
+
+	test("a service without threads.preview is a version_skew error and nothing listens", async () => {
+		const svc = plainService(service([], () => new Response("never")));
+		const r = await rig(`url: ${svc.origin}\ntoken: tok\n`);
+		const res = await run(r, { op: "preview", thread: THREAD, port: 8000 });
+		expect(res.isError).toBe(true);
+		expect(text(res).split("\n")[0]).toContain("cloud preview: error version_skew");
+		expect(text(res)).toContain("does not support threads.preview");
+		await r.run("preview stop");
+		expect(r.host.notes.at(-1)).toEqual(["☁ no previews are running", "info"]);
+	});
+
+	test("a bad port is refused before anything starts", async () => {
+		const svc = plainService(service(["threads.preview"], () => new Response("never")));
+		const r = await rig(`url: ${svc.origin}\ntoken: tok\n`);
+		for (const port of [0, 65536, 49983]) {
+			const res = await run(r, { op: "preview", thread: THREAD, port });
+			expect(res.isError).toBe(true);
+			expect(text(res)).toContain("port must be 1 to 65535 and not 49983");
+		}
+		await r.run("preview stop");
+		expect(r.host.notes.at(-1)).toEqual(["☁ no previews are running", "info"]);
 	});
 });

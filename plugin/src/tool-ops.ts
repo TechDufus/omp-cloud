@@ -6,6 +6,7 @@ import type { CloudJobThread } from "./cloud-job";
 import { CloudError, cloudErrorText } from "./errors";
 import { clip, diffstat, formatAge, formatCost, formatTokens, metricsLine, plural, pushedText, threadTag, truncateText } from "./format";
 import { asCloudError, MAX_BATCH_TASKS, modelServed, type LaunchFailure, type LaunchProgress, type LaunchTask } from "./launch";
+import { AGENT_PORT } from "./commands";
 import type { PullApply } from "./pull";
 import { repoLabel } from "./repo-key";
 import { asEnvelope, type DelegateDetail, type OpDetails, type OpOutput, type ThreadFailure, type ToolCloud, type ToolParams, type ToolSession } from "./tool";
@@ -734,6 +735,38 @@ export async function remove(env: Env): Promise<OpOutput> {
 }
 
 // ---------------------------------------------------------------------------
+// preview
+// ---------------------------------------------------------------------------
+
+/** `preview`: opens a port of a thread's VM on a local address (`http://localhost:<lp>/`) for the model's browser tool, or, with `stop`, ends previews. The registry is the one `/cloud preview` uses. */
+export async function preview(env: Env): Promise<OpOutput> {
+	const p = env.params;
+	const port = p.port;
+	if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535 || port === AGENT_PORT)) throw invalid(`port must be 1 to 65535 and not ${AGENT_PORT}`);
+	if (p.stop === true) {
+		const refs = p.thread === undefined ? [] : refsOf(env, "preview");
+		if (refs.length > 1) throw invalid("preview takes one thread");
+		const thread = refs[0] === undefined ? undefined : await env.cloud.resolve(env.ctx, refs[0], env.signal);
+		const stopped = env.cloud.stopPreviews(thread, port);
+		return { summary: `stopped ${plural(stopped, "preview")}`, lines: [], details: { op: "preview", stopped } };
+	}
+	const refs = refsOf(env, "preview");
+	if (refs.length > 1 || !refs[0]) throw invalid("preview takes one thread");
+	if (port === undefined) throw invalid("preview needs port: the port of the web server in the VM", "ask the cloud agent which port its server listens on");
+	const { client } = env.session;
+	await client.requireCapability("threads.preview");
+	const id = await env.cloud.resolve(env.ctx, refs[0], env.signal);
+	const d = await client.thread(id, { signal: env.signal });
+	const name = d.name || clip(d.title, 60);
+	const url = await env.cloud.startPreview(env.ctx, id, port);
+	return {
+		summary: `${url} → port ${port} of ${id}${name === "" ? "" : ` (${name})`}`,
+		lines: [`open it with your browser tool to see, screenshot or click through the page; a paused VM wakes on the first request; WebSockets are not forwarded; end it with ${callText({ op: "preview", stop: true, thread: id, port })}`],
+		details: { op: "preview", thread: id, port, url },
+	};
+}
+
+// ---------------------------------------------------------------------------
 // pull
 // ---------------------------------------------------------------------------
 
@@ -883,5 +916,7 @@ export function run(env: Env): Promise<OpOutput> {
 			return remove(env);
 		case "info":
 			return info(env);
+		case "preview":
+			return preview(env);
 	}
 }

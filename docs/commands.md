@@ -69,7 +69,7 @@ A failed merge is a warning, `☁ could not merge the cloud memories of <id>: <r
 - **The agent starts the server.** A thread with no VM yet answers `409` `the thread has no VM; send it a message first`; port 49983 is refused. Ask the agent to run the server detached so it survives its command (`setsid nohup <command> >/dev/null 2>&1 &`).
 - A service without the capability `threads.preview` is refused with `version_skew`.
 
-Both forms work from a paired device. More in [Environments and previews](environments.md#previews) and [API](api.md#environments-and-previews).
+Both forms work from a paired device. The `cloud` tool's `preview` op starts and stops the same forwarders for the model, so it can open the page with its own browser tool ([The `cloud` tool](cloud-tool.md)). More in [Environments and previews](environments.md#previews) and [API](api.md#environments-and-previews).
 
 ## Where results go
 

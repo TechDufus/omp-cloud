@@ -121,7 +121,7 @@ function parseConnect(rest: string): Parsed {
 }
 
 /** The VM's own agent port: the service refuses it, so it is refused here as well. */
-const AGENT_PORT = 49983;
+export const AGENT_PORT = 49983;
 
 /** `/cloud preview <id> <port>` or `/cloud preview stop`. */
 function parsePreview(rest: string): Parsed {

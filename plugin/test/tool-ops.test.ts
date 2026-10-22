@@ -169,6 +169,11 @@ interface Rig {
 	ircs: { thread: ThreadDetail; text: string }[];
 	/** The threads whose `agent://<id>` the tool asked omp for. */
 	agentReads: string[];
+	/** The previews the tool started: the thread and port. */
+	previews: { thread: string; port: number }[];
+	/** What the tool asked `stopPreviews` to end, and how many the fake reports running. */
+	previewStops: { thread: string | undefined; port: number | undefined }[];
+	previewRunning: number;
 	behaviour: {
 		delegate: (request: DelegateRequest, run: DelegateRun) => DelegateResult;
 		pull: (thread: string, request: PullRequest) => PullResult & { thread: string };
@@ -195,6 +200,9 @@ function rig(): Rig {
 		pulls: [],
 		waits: [],
 		ircs: [],
+		previews: [],
+		previewStops: [],
+		previewRunning: 0,
 		agentReads: [],
 		behaviour: {
 			delegate: () => ({ defaultWorkspace: "repo", outcomes: [] }),
@@ -248,6 +256,14 @@ function rig(): Rig {
 		readAgent: async thread => {
 			r.agentReads.push(thread);
 			return r.behaviour.readAgent(thread);
+		},
+		startPreview: async (_ctx, thread, port) => {
+			r.previews.push({ thread, port });
+			return `http://localhost:${40000 + port}/`;
+		},
+		stopPreviews: (thread, port) => {
+			r.previewStops.push({ thread, port });
+			return r.previewRunning;
 		},
 	};
 	return r;
@@ -902,6 +918,81 @@ describe("stop", () => {
 	});
 });
 
+describe("preview", () => {
+	const withPreview = (): Rig => {
+		const r = rig();
+		r.w.who = whoami({ capabilities: [...CAPS, "threads.preview"] });
+		const d = r.w.threads.get(ID);
+		if (d) r.w.threads.set(ID, { ...d, name: "dev server" });
+		return r;
+	};
+
+	test("starts a preview of the resolved thread and tells the model to open the address with its browser tool", async () => {
+		const r = withPreview();
+		const res = await call(r, { op: "preview", thread: ID.slice(-6), port: 8000 });
+		expect(first(res)).toBe(`cloud preview: ok http://localhost:48000/ → port 8000 of ${ID} (dev server)`);
+		expect(text(res)).toContain("browser tool");
+		expect(text(res)).toContain("paused VM wakes on the first request");
+		expect(text(res)).toContain("WebSockets are not forwarded");
+		expect(text(res)).toContain(`cloud {"op":"preview","stop":true,"thread":"${ID}","port":8000}`);
+		expect(r.previews).toEqual([{ thread: ID, port: 8000 }]);
+		expect(res.details).toEqual({ op: "preview", thread: ID, port: 8000, url: "http://localhost:48000/" });
+	});
+
+	test("a thread without a name is labelled by its title", async () => {
+		const r = rig();
+		r.w.who = whoami({ capabilities: [...CAPS, "threads.preview"] });
+		expect(first(await call(r, { op: "preview", thread: ID, port: 3000 }))).toBe(`cloud preview: ok http://localhost:43000/ → port 3000 of ${ID} (Add Greet)`);
+	});
+
+	test("stop ends every preview, or only those of a thread and port, and says how many ran", async () => {
+		const r = withPreview();
+		r.previewRunning = 2;
+		const all = await call(r, { op: "preview", stop: true });
+		expect(first(all)).toBe("cloud preview: ok stopped 2 previews");
+		expect(all.details).toEqual({ op: "preview", stopped: 2 });
+		r.previewRunning = 1;
+		expect(first(await call(r, { op: "preview", stop: true, thread: ID.slice(-6), port: 8000 }))).toBe("cloud preview: ok stopped 1 preview");
+		expect(r.previewStops).toEqual([
+			{ thread: undefined, port: undefined },
+			{ thread: ID, port: 8000 },
+		]);
+		expect(r.previews).toEqual([]);
+		expect(calls(r, "requireCapability")).toEqual([]);
+	});
+
+	test("a service without threads.preview is refused as version_skew and nothing starts", async () => {
+		const r = rig();
+		const res = await call(r, { op: "preview", thread: ID, port: 8000 });
+		expect(errorOf(res)).toMatchObject({ code: "version_skew" });
+		expect(first(res)).toContain("does not support threads.preview");
+		expect(r.previews).toEqual([]);
+	});
+
+	test("a bad port, a missing port or thread, and the VM's own port are refused before the service is asked", async () => {
+		const r = withPreview();
+		for (const port of [0, 65536, 49983, 1.5]) {
+			const res = await call(r, { op: "preview", thread: ID, port });
+			expect(errorOf(res)).toMatchObject({ code: "invalid", message: "port must be 1 to 65535 and not 49983" });
+		}
+		expect(errorOf(await call(r, { op: "preview", thread: ID })).message).toContain("needs port");
+		expect(errorOf(await call(r, { op: "preview", port: 8000 })).message).toContain("needs a thread");
+		expect(errorOf(await call(r, { op: "preview", stop: true, port: 49983 })).code).toBe("invalid");
+		expect(r.previews).toEqual([]);
+		expect(calls(r, "requireCapability")).toEqual([]);
+	});
+
+	test("an unknown thread is not_found and starts nothing", async () => {
+		const r = withPreview();
+		expect(errorOf(await call(r, { op: "preview", thread: "zzzz", port: 8000 })).code).toBe("not_found");
+		expect(r.previews).toEqual([]);
+	});
+
+	test("a preview is a write: it opens a listener on this machine", () => {
+		expect(toolApproval({ op: "preview", thread: ID, port: 8000 })).toBe("write");
+	});
+});
+
 describe("wait", () => {
 	test("without thread it waits for this session's working and waiting tool threads, with the contract's defaults", async () => {
 		const r = rig();
@@ -1235,7 +1326,7 @@ describe("registration, approval and the description", () => {
 		const exec = { tier: "exec", reason: "ships the repository, this conversation and your omp setup to a cloud agent" };
 		const cases: [unknown, unknown][] = [
 			...["list", "status", "read", "events", "diff", "files", "wait", "info"].map(op => [{ op }, "read"] as [unknown, unknown]),
-			...["send", "answer", "stop", "pull", "delete"].map(op => [{ op }, "write"] as [unknown, unknown]),
+			...["send", "answer", "stop", "pull", "delete", "preview"].map(op => [{ op }, "write"] as [unknown, unknown]),
 			[{ op: "delegate", task: "t" }, exec],
 			[{ op: "format-disk" }, exec],
 			[undefined, exec],

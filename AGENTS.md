@@ -23,7 +23,7 @@ Self-hosted cloud agents for omp on vibemon (`vmon`) microVMs. `docs/*.md` and `
 - Plugin internals worth knowing:
   - `errors.ts` is the one error type (`CloudError` with `code`, `retriable`, `outcomeKnown`; `api.ts` retries and throws only that).
   - `resolve.ts` resolves thread references through the service; `Cloud.waitFor` is in `verbs.ts` and `wait.ts` decides which states end a wait.
-  - `tool.ts` (schema, descriptions, error envelope) with `tool-ops.ts` (the 14 ops) is the `cloud` tool; `launch.ts` is the batch handoff; `ssh.ts` is the only code that runs `ssh`.
+  - `tool.ts` (schema, descriptions, error envelope) with `tool-ops.ts` (the 15 ops) is the `cloud` tool; `launch.ts` is the batch handoff; `ssh.ts` is the only code that runs `ssh`.
   - `plugin/test/helpers.ts` exports `FAST_RETRY`: pass it as `Cloud`'s `tuning` argument in tests that hit an unreachable service, or they wait out the retry backoff.
   - `CloudClient.irc` retries an ambiguous send up to 4 POSTs with one message id (the service dedupes by id); `sendMessage` and the other non-idempotent posts (`applyUpdate`) are never retried.
 - Updates and releases (contract in `docs/api.md`, "Updates"):
