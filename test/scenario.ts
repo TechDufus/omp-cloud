@@ -6,7 +6,8 @@
  *
  *  A  create a thread from a one-commit bundle: first turn replies, omp has a pid in the VM; the conversation is
  *     already the runner's export, under the thread's export session id, holding the reply
- *  B  `ASK:` message: the thread waits, the question is answered, the turn finishes with the answer
+ *  B  `ASK:` message: the thread waits with a question (`kind`, `expiresAt` = asked + the timeout, also in the list summary), the question
+ *     is answered (its expiry gone), the turn finishes with the answer
  *  C  `BASH:` message: the turn changes a file; the result branch is recorded and served as a bundle; the export
  *     keeps its session id and now holds the `DONE=` reply too
  *  D  the idle VM pauses; the next message resumes the same omp process
@@ -24,6 +25,8 @@
  *  N2 signed result (`git.sign` ssh, the service's signing key): a turn made unsigned stays as pushed; after `POST /signing/key` only the
  *     new commits carry signatures that `git verify-commit` accepts, the push is a fast-forward of the unsigned head, the VM adopted the
  *     signed tip (the next turn's first parent), and a cold restore after a killed sandbox still descends from it and pushes fast-forward
+ *  N3 read-only (`policy.readOnly`): a read-only thread's change is not pushed (no remote branch, a `not pushed` push event) and its VM
+ *     gets no MCP server (no `mcp.json`, a `vm` event, the read-only prompt line)
  *  O  push refusals: a protected branch, then a diverged remote branch (never force-pushed)
  *  P  cold restore: the thread's sandbox is killed; the next message restores it on a new VM from the stored bundles and export
  *  P2 archive: with a tiny `lifecycle.archiveAfterDays` the sweep snapshots the idle thread and releases its VM (no sandbox,
@@ -44,7 +47,7 @@
  *  Y  scratch thread end to end: the turn runs, `diff`/`tree`/`files` show what the agent wrote, `result` downloads, `git.push: auto`
  *     still never pushes or asks, a turn's own diff is only its change
  *  Z  turn text paging (`reply`/`error`/`text`, bounds) and events as JSON (paging, `after`, `kind`, `turn`, bounds; SSE unchanged)
- *  AA question meta: an `ask` question carries `kind` and `expiresAt` (asked + the timeout); answered, the expiry is gone
+ *  AA a thread the model started (origin tool) has no `ask` tool: `ASK:` ends the turn with the tool's error as the answer, no question
  *  AB interrupting send: the running turn is stopped (`stopped by owner`), every queued turn is cancelled and listed in `cancelled`,
  *     the new turn runs next; on an idle thread `interrupted` is false and `cancelled` empty; a bad mode is 400
  *  AC list: meta fields, filters, `total`, paging by cursor, bad parameters, deleted threads never listed, a replayed repo create
@@ -599,8 +602,22 @@ async function run(): Promise<void> {
 		const waiting = await waitFor("the question", 120_000, t => t.phase === "waiting" && isRecord(t.question));
 		const question = obj(waiting.question, "question");
 		expectContains("question text", text(question.text), "pick a color");
+		expectEqual("question.kind", question.kind, "ask");
+		const asked = Date.parse(text(question.askedAt));
+		const expires = Date.parse(text(question.expiresAt));
+		if (Number.isNaN(asked) || Number.isNaN(expires)) throw new Error(`the question has no askedAt/expiresAt dates: ${JSON.stringify(question)}`);
+		// runner.questionTimeoutSeconds is 120 in this scenario.
+		expectEqual("expiresAt - askedAt", expires - asked, 120_000);
+		const summary = (await listThreads("")).threads.find(t => t.id === id);
+		const listed = obj(summary?.question, "the list summary's question");
+		expectEqual("list summary question.kind", listed.kind, "ask");
+		expectEqual("list summary question.expiresAt", listed.expiresAt, question.expiresAt);
 		await apiJson("POST", `/threads/${id}/turns/${question.turn}/questions/${question.id}/answer`, 200, { selected: ["blue"] });
 		const thread = await waitTurnIdle(turn, 120_000);
+		const answered = rows(turnOf(thread, turn).questions, "turn questions");
+		expectEqual("answered questions", answered.length, 1);
+		expectEqual("answered question kind", answered[0]?.kind, "ask");
+		expectEqual("answered question expiresAt", answered[0]?.expiresAt, null);
 		const reply = text(latestOf(thread)?.reply);
 		expectContains("reply", reply, "ANSWER=");
 		expectContains("reply", reply, "blue");
@@ -981,6 +998,41 @@ async function run(): Promise<void> {
 		await waitGone(signId);
 		const gone = await apiJson("GET", "/signing", 200);
 		expectEqual("GET /signing publicKey after DELETE /signing/key", gone.publicKey, null);
+	}, () => `thread ${threadId}`);
+
+	// Its own thread, as N2's: the same remote, `git.push` auto (N left it), now read-only and shipping an MCP server.
+	await report.step("N3 read-only: a read-only thread's change is not pushed and its VM gets no MCP server", async () => {
+		const handoffDelta = (await git(deltaRepo, "rev-parse", "refs/omp-cloud/handoff")).trim();
+		const readOnlyId = await createThread(handoffDelta, join(dir, "delta.bundle"), null, {
+			request: {
+				repo: { name: "scenario-readonly", remoteURL: remoteUrl, baseRef: "main", baseCommit: deltaBase, handoffCommit: handoffDelta, localBranch: "main" },
+				policy: { readOnly: true },
+				mcp: [{ name: "probe", type: "stdio", command: "true" }],
+			},
+		});
+		try {
+			await waitTurnIdle(1, 240_000);
+			const turn = await sendMessage("BASH: printf 'ro\\n' > ro.txt && test ! -e ~/.omp/agent/mcp.json && grep -q '^- Read-only:' ~/.omp-cloud/system-prompt.md && echo read-only-ok");
+			const done = await waitTurnIdle(turn, 180_000);
+			expectEqual("reply", text(latestOf(done)?.reply), "DONE=read-only-ok");
+			const result = obj(done.result, "result");
+			expectEqual("result.pushed", result.pushed, false);
+			expectEqual("result.pushRef", result.pushRef, "");
+			expectEqual("remote branch", await remoteBranch(bareRepo, `omp-cloud/${readOnlyId}`), "");
+			expectEqual("turn questions", rows(turnOf(done, turn).questions, "turn questions").length, 0);
+			const events = await readEvents(2000);
+			const pushEvents = events.filter(e => e.kind === "push").map(e => e.text);
+			if (!pushEvents.includes("not pushed: the thread is read-only")) throw new Error(`no "not pushed: the thread is read-only" push event: ${JSON.stringify(pushEvents)}`);
+			const vmEvents = events.filter(e => e.kind === "vm").map(e => e.text);
+			if (!vmEvents.some(e => e.startsWith("MCP servers not delivered: the thread is read-only"))) {
+				throw new Error(`no "MCP servers not delivered: the thread is read-only" vm event: ${JSON.stringify(vmEvents)}`);
+			}
+			expectEqual("detail().policy", JSON.stringify((await detail()).policy), JSON.stringify({ readOnly: true }));
+		} finally {
+			threadId = delta;
+		}
+		// Deleting the thread kills its sandbox, whose address the paused VM of `delta` may hold: O resumes that VM, which must not hang.
+		await waitGone(readOnlyId);
 	}, () => `thread ${threadId}`);
 
 	await report.step("O push refusals: a protected branch, then a diverged remote branch", async () => {
@@ -1537,27 +1589,14 @@ async function run(): Promise<void> {
 		return `${everything.length} events, reply of ${full.length} characters in ${pages} pages`;
 	}, shown => shown);
 
-	await report.step("AA question meta: an ask question has a kind and an expiry; answered, the expiry is gone", async () => {
+	await report.step("AA a thread the model started has no ask tool: the question is never asked and the turn ends with the tool's error", async () => {
 		threadId = scratchId;
 		const turn = await sendMessage("ASK: pick a color");
-		const waiting = await waitFor("the question", 120_000, t => t.phase === "waiting" && isRecord(t.question));
-		const question = obj(waiting.question, "question");
-		expectEqual("question.kind", question.kind, "ask");
-		const asked = Date.parse(text(question.askedAt));
-		const expires = Date.parse(text(question.expiresAt));
-		if (Number.isNaN(asked) || Number.isNaN(expires)) throw new Error(`the question has no askedAt/expiresAt dates: ${JSON.stringify(question)}`);
-		// runner.questionTimeoutSeconds is 120 in this scenario.
-		expectEqual("expiresAt - askedAt", expires - asked, 120_000);
-		const listed = obj((await listThreads(`ref=${SCRATCH_REF}`)).threads[0]?.question, "the list summary's question");
-		expectEqual("list summary question.kind", listed.kind, "ask");
-		expectEqual("list summary question.expiresAt", listed.expiresAt, question.expiresAt);
-		await answerQuestion(question, "blue");
+		// The thread never waits: omp has no `ask` tool, so the fake model's call fails and its text echoes the tool result.
 		const done = await waitTurnIdle(turn, 120_000);
-		const answered = rows(turnOf(done, turn).questions, "turn questions");
-		expectEqual("answered questions", answered.length, 1);
-		expectEqual("answered question kind", answered[0]?.kind, "ask");
-		expectEqual("answered question expiresAt", answered[0]?.expiresAt, null);
-		expectContains("reply", text(latestOf(done)?.reply), "blue");
+		expectEqual("turn state", turnOf(done, turn).state, "done");
+		expectEqual("turn questions", rows(turnOf(done, turn).questions, "turn questions").length, 0);
+		expectContains("reply", text(latestOf(done)?.reply), "ANSWER=");
 	});
 
 	await report.step("AB interrupting send: the running turn is stopped, the queued turn is cancelled, the new turn runs next", async () => {
@@ -1791,7 +1830,7 @@ async function run(): Promise<void> {
 		expectEqual("service.version", service.version, pkg.version);
 		expectContains("service.version", text(service.version), ".");
 		expectEqual("service.api", service.api, API_VERSION);
-		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.preview", "threads.setup"];
+		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.preview", "threads.setup", "threads.readonly", "threads.subagent"];
 		expectEqual("capabilities", JSON.stringify((Array.isArray(who.capabilities) ? who.capabilities.map(text) : []).sort()), JSON.stringify([...expected].sort()));
 		const limits = obj(who.limits, "whoami.limits");
 		expectEqual("limits", JSON.stringify([limits.maxMessageBytes, limits.maxAnswerBytes, limits.listMax, limits.maxTurns]), JSON.stringify([32768, 4000, 200, 200]));

@@ -218,7 +218,7 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 		);
 		await exec(`chmod 600 ${q(modelsFile)}`);
 		// The MCP servers the thread ships: http ones through the service's proxy under a per-provisioning token (the upstream headers stay on the service), stdio ones as they are.
-		if (thread.mcpServers.length > 0) {
+		if (thread.mcpServers.length > 0 && !input.policy.readOnly) {
 			const servers: Record<string, unknown> = {};
 			let mcpToken = "";
 			for (const server of secrets?.mcp ?? []) {
@@ -247,7 +247,15 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 		for (const file of configFiles) configYamls.push((await sandbox.files.exists(file)) ? await sandbox.files.read(file) : null);
 		await sandbox.files.write(
 			OVERLAY_FILE,
-			overlayConfigYaml({ model, thinking: thread.thinking, configYamls, routable, policy: input.policy, maskSecrets }),
+			overlayConfigYaml({
+				model,
+				thinking: thread.thinking,
+				configYamls,
+				routable,
+				policy: input.policy,
+				maskSecrets,
+				ask: thread.origin !== "tool",
+			}),
 		);
 		await sandbox.files.write(
 			SYSTEM_PROMPT_FILE,
@@ -259,6 +267,9 @@ export async function provisionVm(sandbox: Sandbox, input: ProvisionInput): Prom
 				secretFiles: thread.secretFiles,
 				mcpServers: mcpNames,
 				parentId: parentIdentity(thread).id,
+				origin: thread.origin,
+				secretEnv: Object.keys(env).sort(),
+				readOnly: input.policy.readOnly,
 			}),
 		);
 

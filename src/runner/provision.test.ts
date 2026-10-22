@@ -143,7 +143,7 @@ describe("provisionVm", () => {
 		models: MODELS,
 		served,
 		questionTimeoutSeconds: 60,
-		policy: { bashPatterns: [], toolApproval: {}, fetch: true, webSearch: true, browser: true },
+		policy: { bashPatterns: [], toolApproval: {}, fetch: true, webSearch: true, browser: true, readOnly: false },
 		serviceEnv: {},
 		mcpListen: null,
 	});
@@ -220,6 +220,20 @@ describe("provisionVm", () => {
 			expect(written.has(MCP_FILE)).toBe(false);
 			expect(provisioned).toMatchObject({ mcpNames: [], mcpSkipped: [] });
 			expect(written.get(`${VM_CLOUD_DIR}/system-prompt.md`)).not.toContain("MCP servers");
+		});
+
+		test("a read-only thread gets no mcp.json and no proxy token, and its prompt says it is read-only", async () => {
+			const thread = await shipping([DOCS, LOCAL]);
+			const { sandbox, written } = fakeSandbox({});
+			const policy = { ...input(thread, []).policy, readOnly: true };
+			store.setMcpToken(thread.id, sha256Hex("earlier"));
+			const provisioned = await provisionVm(sandbox, { ...input(thread, []), policy, mcpListen: "10.254.254.1:4100" });
+			expect(written.has(MCP_FILE)).toBe(false);
+			expect(provisioned).toMatchObject({ mcpNames: [], mcpSkipped: [] });
+			expect(store.threadByMcpToken(sha256Hex("earlier"))?.id).toBe(thread.id);
+			const prompt = written.get(`${VM_CLOUD_DIR}/system-prompt.md`) ?? "";
+			expect(prompt).toContain("- Read-only:");
+			expect(prompt).not.toContain("MCP servers");
 		});
 	});
 
@@ -366,6 +380,7 @@ describe("provisionVm", () => {
 			fetch: false,
 			webSearch: true,
 			browser: true,
+			readOnly: false,
 		};
 		await provisionVm(sandbox, { ...input(thread, ["anthropic"]), policy });
 		const overlay = parse(written.get(OVERLAY_FILE));
@@ -377,6 +392,29 @@ describe("provisionVm", () => {
 		]);
 		expect(overlay.tools).toEqual({ approvalMode: "yolo", approval: { eval: "deny" } });
 		expect(overlay.fetch).toEqual({ enabled: false });
+	});
+
+	test("a thread the model started runs without the ask tool, as a subagent", async () => {
+		const thread = await createThread({ origin: "tool" });
+		const { sandbox, written } = fakeSandbox({});
+		await provisionVm(sandbox, input(thread, []));
+		expect(parse(written.get(OVERLAY_FILE)).ask).toEqual({ enabled: false, timeout: 0 });
+		expect(written.get(`${VM_CLOUD_DIR}/system-prompt.md`)).toContain("You are a cloud subagent");
+	});
+
+	test("a thread a person started keeps the ask tool", async () => {
+		const thread = await createThread({ origin: "user" });
+		const { sandbox, written } = fakeSandbox({});
+		await provisionVm(sandbox, input(thread, []));
+		expect(parse(written.get(OVERLAY_FILE)).ask).toEqual({ timeout: 0 });
+		expect(written.get(`${VM_CLOUD_DIR}/system-prompt.md`)).toContain("use the `ask` tool");
+	});
+
+	test("the prompt of a thread the model started names the VM's secret environment variables, sorted", async () => {
+		const thread = await createThread({ origin: "tool" });
+		const { sandbox, written } = fakeSandbox({});
+		await provisionVm(sandbox, { ...input(thread, []), serviceEnv: { ZED_KEY: "z", API_TOKEN: "a" } });
+		expect(written.get(`${VM_CLOUD_DIR}/system-prompt.md`)).toContain("never print or commit their values: API_TOKEN, ZED_KEY.");
 	});
 
 	describe("a delta thread", () => {

@@ -18,6 +18,8 @@ export interface EffectivePolicy {
 	fetch: boolean;
 	webSearch: boolean;
 	browser: boolean;
+	/** `policy.readOnly` of the service or the thread. */
+	readOnly: boolean;
 	/** Empty leaves the network open. */
 	egress: readonly string[];
 	/** 0 is no cap. */
@@ -60,6 +62,7 @@ export function globalPolicy(settings: Pick<Settings, "get">): PolicyValues {
 		fetch: settings.get("policy.fetch"),
 		webSearch: settings.get("policy.webSearch"),
 		browser: settings.get("policy.browser"),
+		readOnly: settings.get("policy.readOnly"),
 		egress: settings.get("policy.egress"),
 		"spend.turnUSD": settings.get("policy.spend.turnUSD"),
 		"spend.threadUSD": settings.get("policy.spend.threadUSD"),
@@ -87,6 +90,7 @@ function tighterCap(global: number, thread: number | undefined): number {
  * - `tools.approval`: per tool the stricter of the two (`allow` < `prompt` < `deny`); a thread's `allow` for a tool the
  *   service does not name is dropped, it would override what the shipped configuration says.
  * - `fetch`, `webSearch`, `browser`: allowed only when both allow.
+ * - `readOnly`: on when either turns it on.
  * - `egress`: the service's list is the thread's when it is empty, and the thread's list is the service's when it is empty;
  *   with both non-empty it is the thread's entries the service's list holds ({@link egressWidens} is what create refuses),
  *   or, when the service's list changed since the create and holds none of them, the service's list.
@@ -128,6 +132,7 @@ export function tightenPolicy(global: PolicyValues, thread: ThreadPolicy): Effec
 		fetch: global.fetch && (thread.fetch ?? true),
 		webSearch: global.webSearch && (thread.webSearch ?? true),
 		browser: global.browser && (thread.browser ?? true),
+		readOnly: global.readOnly || thread.readOnly === true,
 		egress,
 		spend: {
 			turn: tighterCap(global["spend.turnUSD"], thread["spend.turnUSD"]),

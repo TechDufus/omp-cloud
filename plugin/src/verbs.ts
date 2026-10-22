@@ -11,16 +11,17 @@ import { resolveParsed, resolveRef } from "./resolve";
 import { openPath } from "@oh-my-pi/pi-coding-agent/utils/open";
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { DETAILS_REPLY_MAX, inventoryCard, loginCard, noticeCard, patternProviders, QUESTIONS, threadBranch, updateCard, type CardAct, type CardActions, type NoticeCard, type TuiModule } from "./cards";
-import { completions, parseCommand, shortName, USAGE_CONNECT, type Command, type Completion } from "./commands";
-import { readConfig, resolveConnection, statusLines, type CloudConfig, type Connection, type DeliverMode, type Env } from "./config";
-import { runConnect } from "./connect";
+import { CLOUD_SOURCES, completions, parseCommand, shortName, USAGE_CONNECT, type Command, type Completion } from "./commands";
+import { cloudLines, knownClouds, readConfig, resolveConnection, statusLines, tilde, type CloudConfig, type CloudsView, type Connection, type ConnectionSource, type DeliverMode, type Env } from "./config";
+import { runConnect, type ConnectOutcome } from "./connect";
 import { readConnectionFile, type PairedConnection } from "./connection";
 import { runDashboard, showForwardedDashboard } from "./dashboard";
-import { CloudAgents } from "./cloud-agents";
+import { CloudAgents, planModeFromEntries } from "./cloud-agents";
 import { CloudJobs } from "./cloud-jobs";
-import { Deliverer, launchCard, threadsFromEntries } from "./deliver";
+import { Deliverer, launchCard, originsFromEntries, threadsFromEntries } from "./deliver";
 import { devicesCard, runDisconnect, runRevoke } from "./devices";
 import { clip, metricsLine, plural, threadHeading, threadTag, truncateText } from "./format";
+import { isRecord } from "./guards";
 import { DashboardForwarder } from "./forwarder";
 import { PreviewForwarder } from "./preview";
 import { HubComponent, type HubResult } from "./hub";
@@ -44,6 +45,20 @@ import { PLUGIN_VERSION } from "./version";
 
 /** Idle threads of a session that become cloud agents when the session starts: the newest of the ones its cards name. */
 const FOLLOWED_IDLE_MAX = 16;
+
+/** The `custom` session entry that records which cloud (`/cloud use`) the session picked. */
+const TARGET_ENTRY = "omp-cloud-target";
+
+/** The cloud the newest `omp-cloud-target` entry names; undefined when there is none or it names nothing this plugin knows. */
+export function targetFromEntries(entries: readonly unknown[]): ConnectionSource | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i];
+		if (!isRecord(e) || e.type !== "custom" || e.customType !== TARGET_ENTRY) continue;
+		const cloud = isRecord(e.data) ? e.data.cloud : undefined;
+		return CLOUD_SOURCES.find(source => source === cloud);
+	}
+	return undefined;
+}
 
 const PAIR_NEEDS_UI = "☁ /cloud pair needs omp's interactive UI";
 
@@ -169,6 +184,10 @@ export class Cloud implements CardActions, ToolCloud {
 	#forwarderKey = "";
 	/** The running previews, keyed `<thread id>:<port>`; each remembers the connection it was started on. */
 	readonly #previews = new Map<string, { forwarder: PreviewForwarder; connection: string }>();
+	/** The cloud each session picked, by session id; read from the session's entries on first use. */
+	readonly #targets = new Map<string, ConnectionSource | undefined>();
+	/** The threads each session started or adopted in this process, by session id: the cards that record them may not be posted yet. */
+	readonly #used = new Map<string, Set<string>>();
 	readonly #chains = new Map<string, Promise<unknown>>();
 	/** Threads with a watched-turn save queued but not started, and the newest host that asked. */
 	readonly #waiting = new Map<string, Host>();
@@ -325,7 +344,7 @@ export class Cloud implements CardActions, ToolCloud {
 	async #session(ctx: Host, patience: "quick" | "full"): Promise<Session> {
 		const { cfg, root } = await this.#config(ctx);
 		this.#deliverMode = cfg.deliver;
-		const conn = await resolveConnection(cfg);
+		const conn = await resolveConnection(cfg, this.#targetOf(ctx));
 		return { cfg, conn, client: clientFor(conn, patience === "quick" ? quickTuning(this.#tuning) : this.#tuning), root, key: connectionKey(conn) };
 	}
 
@@ -375,6 +394,7 @@ export class Cloud implements CardActions, ToolCloud {
 	follow(thread: string, opts: { origin: ThreadOrigin }): void {
 		const ctx = this.#ctx;
 		const was = ctx ? this.#deliver.originOf(ctx, thread) : undefined;
+		if (ctx && opts.origin === "tool") this.#markUsed(ctx, thread);
 		if (was !== "tool") {
 			this.#deliver.setOrigin(thread, opts.origin);
 			// A running job of the user's thread was set up to deliver nothing to the model: now one path must.
@@ -597,6 +617,15 @@ export class Cloud implements CardActions, ToolCloud {
 			ctx.setTimeout(() => void this.#launchFromCommand(ctx, task), 0);
 			return;
 		}
+		if (parsed.kind === "use") {
+			if (parsed.cloud === undefined) {
+				ctx.ui.notify(`☁ ${(await this.clouds(ctx)).lines.join("\n  ")}`, "info");
+				return;
+			}
+			const view = await this.#switchCloud(ctx, parsed.cloud);
+			ctx.ui.notify(`☁ this session uses ${parsed.cloud} (${view.known.find(c => c.source === parsed.cloud)?.url ?? ""})`, "info");
+			return;
+		}
 		if (parsed.kind === "status") return this.#status(ctx);
 		if (parsed.kind === "connect") return this.#connect(ctx, parsed);
 		if (parsed.kind === "disconnect") return this.#disconnect(ctx, parsed.force);
@@ -712,11 +741,17 @@ export class Cloud implements CardActions, ToolCloud {
 		let conn: Connection | undefined;
 		let failure: unknown;
 		try {
-			conn = await resolveConnection(cfg);
+			conn = await resolveConnection(cfg, this.#targetOf(ctx));
 		} catch (e) {
 			failure = e;
 		}
 		const lines = ["☁ omp-cloud", ...statusLines(cfg, conn)];
+		const known = await knownClouds(cfg);
+		const chosen = this.#targetOf(ctx) !== undefined;
+		if (known.length > 1 || chosen) {
+			lines.push(...cloudLines(cfg, known, conn?.source, chosen).map(l => `  ${l}`));
+			if (known.some(c => c.source !== conn?.source)) lines.push("  switch: /cloud use <name> (only before this session has threads)");
+		}
 		if (!conn) {
 			ctx.ui.notify([...lines, `  ${errorText(failure)}`].join("\n"), "error");
 			return;
@@ -748,7 +783,6 @@ export class Cloud implements CardActions, ToolCloud {
 
 	/** `/cloud connect`: pairs this machine from a code or over ssh (prompted for when none was typed, which keeps a code out of the prompt history). */
 	async #connect(ctx: CommandHost, o: { target: string | undefined; name: string | undefined; replace: boolean; allowPublic: boolean }): Promise<void> {
-		const { cfg } = await this.#config(ctx);
 		let target = o.target;
 		if (target === undefined) {
 			if (!ctx.ui.input) throw new UserError(USAGE_CONNECT);
@@ -758,8 +792,62 @@ export class Cloud implements CardActions, ToolCloud {
 				return;
 			}
 		}
-		const card = await runConnect({ target, name: o.name, replace: o.replace, allowPublic: o.allowPublic }, { connectionFile: cfg.connectionFile, ui: ctx.ui });
+		await this.#connectCloud(ctx, { target, name: o.name, replace: o.replace, allowPublic: o.allowPublic }, { confirm: false });
+	}
+
+	/**
+	 * Pairs this machine with the server `o.target` names, posts the card and, when this session has no threads yet, makes
+	 * the pairing its cloud. `confirm` asks the user first and refuses to replace a pairing: the model's `connect` is never
+	 * the user's own typed command.
+	 */
+	async #connectCloud(
+		ctx: Host,
+		o: { target: string; name: string | undefined; replace: boolean; allowPublic: boolean },
+		how: { confirm: boolean; signal?: AbortSignal },
+	): Promise<ConnectOutcome> {
+		const { cfg } = await this.#config(ctx);
+		if (how.confirm) {
+			const existing = await readConnectionFile(cfg.connectionFile);
+			if (existing) {
+				throw new CloudError({
+					code: "conflict",
+					message: `this machine is already paired with ${serverHostOf(existing) ?? existing.server.fingerprint}; cloud use {cloud: "paired"} uses it, and replacing a pairing is the user's /cloud connect --replace`,
+					retriable: false,
+					outcomeKnown: true,
+				});
+			}
+			let confirmed = false;
+			try {
+				confirmed = await ctx.ui.confirm("Connect to omp-cloud?", `Pair this machine with ${o.target} as one of its devices? Cloud agents this session starts will then run there.`);
+			} catch {
+				// A dialog that cannot be shown is no confirmation.
+			}
+			if (!confirmed) {
+				throw new CloudError({ code: "forbidden", message: `the user did not confirm connecting to ${o.target}`, retriable: false, outcomeKnown: true });
+			}
+		}
+		const card = await runConnect(o, { connectionFile: cfg.connectionFile, ui: ctx.ui, signal: how.signal });
+		const paired = await readConnectionFile(cfg.connectionFile);
+		if (!paired) throw new UserError(`☁ connected, but ${tilde(cfg.connectionFile, cfg.home)} cannot be read back`);
+		let using = false;
+		if (this.#sessionThreads(ctx).size === 0) {
+			try {
+				await this.#switchCloud(ctx, "paired");
+				using = true;
+				card.lines.push("this session uses it now");
+			} catch (e) {
+				card.lines.push(`this session keeps its cloud: ${errorText(e)}`);
+			}
+		} else {
+			const current = await resolveConnection(cfg, this.#targetOf(ctx)).catch(() => undefined);
+			card.lines.push(`this session keeps ${current?.source ?? "its cloud"}: it already works with threads there`);
+		}
+		if (cfg.url !== undefined) {
+			const first = cfg.urlFrom === "env" ? "OMP_CLOUD_URL" : `url in ${tilde(cfg.personalFile, cfg.home)}`;
+			card.lines.push(`new sessions use ${first} first: /cloud use paired switches a session; removing url and token from ${tilde(cfg.personalFile, cfg.home)} makes the pairing the default`);
+		}
 		this.#deliver.post(ctx, card);
+		return { lines: card.lines, using, server: serverHostOf(paired) ?? paired.server.fingerprint, device: paired.device.name };
 	}
 
 	/** `/cloud pair`: the overlay with the code (copied to the clipboard), on the server machine's owner connection. Needs the TUI. */
@@ -1288,10 +1376,34 @@ export class Cloud implements CardActions, ToolCloud {
 		return ctx.sessionManager.getSessionId?.() ?? "";
 	}
 
+	/** The cloud this session picked (`/cloud use`, `/cloud connect`); undefined while it takes the default. Read from the session's entries once. */
+	#targetOf(ctx: Host): ConnectionSource | undefined {
+		const id = this.#sessionId(ctx);
+		if (!this.#targets.has(id)) this.#targets.set(id, targetFromEntries(ctx.sessionManager.getEntries?.() ?? []));
+		return this.#targets.get(id);
+	}
+
+	/** Remembers that this session works with `thread`: the launch card that records it may not be posted yet. */
+	#markUsed(ctx: Host, thread: string): void {
+		const id = this.#sessionId(ctx);
+		const used = this.#used.get(id) ?? new Set<string>();
+		used.add(thread);
+		this.#used.set(id, used);
+	}
+
+	/**
+	 * The threads this session launched or adopted: those its launch cards name, and those it started in this process.
+	 * The watcher's and the agents' threads are not part of it, because they outlive `/new`.
+	 */
+	#sessionThreads(ctx: Host): Set<string> {
+		return new Set([...originsFromEntries(ctx.sessionManager.getEntries?.() ?? []).keys(), ...(this.#used.get(this.#sessionId(ctx)) ?? [])]);
+	}
+
 	/** What a created thread gets in this session: it leads the cached list, its launch card is posted (not for a replayed create: the card exists already) and it is followed for `origin`. The host job of its first turn, when it is one already. */
 	#announce(ctx: Host, origin: ThreadOrigin, prompt: string, o: LaunchedThread): string | undefined {
 		const id = o.response.id;
 		this.#threads = [o.response, ...this.#threads.filter(t => t.id !== id)];
+		this.#markUsed(ctx, id);
 		if (!o.replayed) this.#deliver.post(ctx, launchCard({ origin, thread: id, name: o.response.name, prompt, summary: o.summary, warnings: o.warnings }));
 		this.follow(id, { origin });
 		return this.#jobs?.jobId(id);
@@ -1365,6 +1477,77 @@ export class Cloud implements CardActions, ToolCloud {
 		return { client: (await this.#session(ctx, "full")).client, sessionId: this.#sessionId(ctx) };
 	}
 
+	/** The clouds this machine knows and the one this session uses. */
+	async clouds(ctx: Host): Promise<CloudsView> {
+		const { cfg } = await this.#config(ctx);
+		const choice = this.#targetOf(ctx);
+		const known = await knownClouds(cfg);
+		const active = (await resolveConnection(cfg, choice).catch(() => undefined))?.source;
+		return { known, active, chosen: choice !== undefined, lines: cloudLines(cfg, known, active, choice !== undefined) };
+	}
+
+	/** The tool's `use`: this session uses `source` from now on, which needs a session without threads (they live on one cloud). Returns the clouds as they stand after. */
+	useCloud(ctx: Host, source: ConnectionSource): Promise<CloudsView> {
+		this.#ctx = ctx;
+		return this.#switchCloud(ctx, source);
+	}
+
+	/** The tool's `connect`: pairs this machine with `target` after the user confirms, and makes the pairing this session's cloud when it has no threads yet. Never replaces a pairing and never allows a public address. */
+	connectCloud(ctx: Host, target: string, signal?: AbortSignal): Promise<ConnectOutcome> {
+		this.#ctx = ctx;
+		return this.#connectCloud(ctx, { target, name: undefined, replace: false, allowPublic: false }, { confirm: true, signal });
+	}
+
+	/** Records `source` as this session's cloud, unless it is already. */
+	#choose(ctx: Host, source: ConnectionSource): void {
+		if (this.#targetOf(ctx) === source) return;
+		this.#targets.set(this.#sessionId(ctx), source);
+		this.#pi.appendEntry(TARGET_ENTRY, { cloud: source });
+	}
+
+	/**
+	 * `/cloud use` and the tool's `use`. The same connection as the session's current one only records the choice. A
+	 * different one needs a session without threads: the watcher and the agent refs follow the connection, and a thread
+	 * lives on the cloud that created it.
+	 */
+	async #switchCloud(ctx: Host, source: ConnectionSource): Promise<CloudsView> {
+		const { cfg } = await this.#config(ctx);
+		const entry = (await knownClouds(cfg)).find(c => c.source === source);
+		if (!entry || entry.url === "") {
+			throw new CloudError({
+				code: "invalid",
+				message: `no usable ${source} cloud on this machine; cloud info or /cloud use lists the clouds${entry ? ` (${entry.where})` : ""}`,
+				retriable: false,
+				outcomeKnown: true,
+			});
+		}
+		let next: Connection;
+		try {
+			next = await resolveConnection(cfg, source);
+		} catch (e) {
+			if (!(e instanceof UserError)) throw e;
+			throw new CloudError({ code: "invalid", message: e.message.replace(/^☁ /, ""), retriable: false, outcomeKnown: true });
+		}
+		const current = await resolveConnection(cfg, this.#targetOf(ctx)).catch(() => undefined);
+		if (!current || connectionKey(current) !== connectionKey(next)) {
+			const threads = [...this.#sessionThreads(ctx)];
+			if (threads.length > 0) {
+				const shown = `${threads.slice(0, 5).join(", ")}${threads.length > 5 ? ", …" : ""}`;
+				throw new CloudError({
+					code: "conflict",
+					message: `this session already works with ${plural(threads.length, "cloud thread")} (${shown}) on ${current?.source ?? "its cloud"}; start a new omp session to use ${source}`,
+					retriable: false,
+					outcomeKnown: true,
+				});
+			}
+			// The agents of other sessions' threads belong to the cloud being left; `followSession` restores them on a switch back.
+			this.#agents.retainOnly(new Set());
+			this.#threads = [];
+		}
+		this.#choose(ctx, source);
+		return this.clouds(ctx);
+	}
+
 	/**
 	 * Delegation by the local model: one snapshot, conversation and setup for the whole batch, one create per task. Serialized
 	 * with the user's launches of the same repository. Each created thread is announced and followed so its results wake the model.
@@ -1391,9 +1574,27 @@ export class Cloud implements CardActions, ToolCloud {
 				signal: run.signal,
 				onProgress: run.onProgress,
 			});
-			const outcomes = batch.outcomes.map(o => (o.ok ? { ...o, job: this.#announce(ctx, "tool", request.tasks[o.index]?.task ?? "", o) } : o));
+			// An agent of the model's, as `task` has: its id is known as soon as the thread is, so the call can name it.
+			const outcomes: DelegateResult["outcomes"] = [];
+			for (const o of batch.outcomes) {
+				if (!o.ok) {
+					outcomes.push(o);
+					continue;
+				}
+				const job = this.#announce(ctx, "tool", request.tasks[o.index]?.task ?? "", o);
+				if (job === undefined && this.#agents.agentId(o.response.id) === undefined) {
+					const detail = await s.client.thread(o.response.id).catch(() => undefined);
+					if (detail) this.#agents.observe(detail);
+				}
+				outcomes.push({ ...o, job, agent: this.#agents.agentId(o.response.id) ?? job });
+			}
 			return { defaultWorkspace: batch.defaultWorkspace, outcomes };
 		});
+	}
+
+	/** Whether the session is in plan mode: omp's own state, else the last `mode_change` entry of the session file. */
+	planning(ctx: Host): boolean {
+		return this.#agents.ownerPlanning() ?? planModeFromEntries(ctx.sessionManager.getEntries?.() ?? []);
 	}
 
 	/** Drops what the session holds of a thread the service deleted: its follower and job end without a word, since the model that deleted it knows. */

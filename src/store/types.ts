@@ -403,7 +403,7 @@ export interface NewThread {
 	session?: string;
 	/** Marks a scratch thread; absent means false. */
 	scratch?: boolean;
-	/** The create request's `Idempotency-Key` and the SHA-256 (hex) of its prompt; absent means no key. The key is unique per owner among live threads. */
+	/** The create request's `Idempotency-Key` and the SHA-256 (hex) of its prompt and `policy.readOnly`; absent means no key. The key is unique per owner among live threads. */
 	idempotency?: { key: string; fingerprint: string };
 	/** Names of the MCP servers the create request ships; absent means none. */
 	mcpServers?: string[];

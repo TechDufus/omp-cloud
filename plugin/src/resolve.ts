@@ -74,7 +74,7 @@ export async function resolveRef(client: Pick<CloudClient, "thread" | "listThrea
  * command that says so; any other failure (the service down, a bad token) is thrown.
  */
 export async function resolveParsed(parsed: Parsed, client: Pick<CloudClient, "thread" | "listThreadsPage">, opts: ResolveOptions = {}): Promise<Command> {
-	if (parsed.kind === "launch" || parsed.kind === "error" || parsed.kind === "login" || parsed.kind === "connect" || parsed.kind === "devices" || parsed.kind === "disconnect") return parsed;
+	if (parsed.kind === "launch" || parsed.kind === "error" || parsed.kind === "login" || parsed.kind === "connect" || parsed.kind === "use" || parsed.kind === "devices" || parsed.kind === "disconnect") return parsed;
 	if (!("token" in parsed)) return { kind: parsed.kind };
 	let thread: string;
 	try {

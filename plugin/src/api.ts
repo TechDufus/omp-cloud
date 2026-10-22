@@ -54,6 +54,7 @@ import {
 	parseRevoked,
 	parseIrcReceipt,
 	parseSentMessage,
+	parseSettings,
 	parseThreadDetail,
 	parseThreadsPage,
 	parseTree,
@@ -647,6 +648,11 @@ export class CloudClient {
 	/** Cancels an offer unless it is finished; idempotent. */
 	async cancelPairing(id: string, opts: CallOptions = {}): Promise<void> {
 		await this.#send("DELETE", `/api/v1/pairing/offers/${encodeURIComponent(id)}`, opts);
+	}
+
+	/** The service's settings with their current values; a device token may read them. */
+	async settings(opts: CallOptions = {}): Promise<{ key: string; value: unknown }[]> {
+		return this.#call("GET", "/api/v1/settings", parseSettings, opts);
 	}
 
 	async devices(opts: CallOptions = {}): Promise<Device[]> {

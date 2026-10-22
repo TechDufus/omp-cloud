@@ -5,6 +5,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { cardContent, cardPlain, loadTui, type CardDetails } from "../src/cards";
 import { run } from "../src/exec";
+import { cloudJobId } from "../src/cloud-job";
 import { git } from "../src/snapshot";
 import { describeResult } from "../src/tool-view";
 import { runTool, type ToolParams } from "../src/tool";
@@ -49,7 +50,7 @@ function reset(): void {
 		defaultModel: "anthropic/claude-sonnet-5-5",
 		vms: { running: 1, paused: 2 },
 		threads: { starting: 0, working: 1, waiting: 1, idle: 3, failed: 0 },
-		capabilities: ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch"],
+		capabilities: ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "threads.subagent"],
 	});
 	state.listed = [summary({ id: ID, title: "Add Greet", phase: "waiting", question: pending({ turn: 1, id: 2, text: "Which database?" }) })];
 	state.detail = detail({ id: ID, title: "Add Greet", phase: "idle", turns: [turn(1)] });
@@ -298,11 +299,11 @@ describe("delegation", () => {
 		host.idle = false; // a tool runs while the agent streams
 		state.detail = detail({ id: ID, phase: "working", turns: [turn(1, { state: "running" })] });
 
-		const out = await call(cloud, host, { op: "delegate", task: "port the build to bazel" }, "call_9");
+		const out = await call(cloud, host, { op: "delegate", task: "port the build to bazel", conversation: "full" }, "call_9");
 		const lines = out.content[0]?.text.split("\n") ?? [];
 		expect(lines[0]).toBe(`cloud delegate: ok started ${ID}`);
 		expect(lines).toContain("workspace: repo by default (this directory is inside a git repository)");
-		expect(lines).toContain(`task 1: thread ${TAG} started`);
+		expect(lines).toContain(`task 1: agent \`${cloudJobId(state.detail)}\` (thread ${ID}) started`);
 		expect(lines).toContain(`  branch: omp-cloud/${ID}`);
 		expect(lines).toContain("  warnings: model x is not available; using y");
 		expect(out.details).toMatchObject({ op: "delegate", defaultWorkspace: "repo", outcomes: [{ ok: true, index: 0, thread: ID, replayed: false, workspace: "repo", warnings: ["model x is not available; using y"] }] });
@@ -363,10 +364,11 @@ describe("delegation", () => {
 	});
 
 	test("a model whose provider the cloud does not run is refused before anything is uploaded", async () => {
+		state.who = { ...state.who, defaultModel: "" };
 		const { cloud, host } = await setup({ hostOpts: { model: { provider: "google", id: "gemini-3" } } });
 		const out = await call(cloud, host, { op: "delegate", task: "x" });
 		expect(out.isError).toBe(true);
-		expect(out.content[0]?.text).toStartWith("cloud delegate: error invalid: the cloud cannot run google models yet: /cloud login google");
+		expect(out.content[0]?.text).toStartWith("cloud delegate: error invalid: this cloud does not serve google/gemini-3");
 		expect(state.reqs.some(r => r.method === "POST")).toBe(false);
 	});
 
@@ -587,5 +589,94 @@ describe("the hub as native nodes in a TUI", () => {
 		await cloud.handle("", host.host as never);
 		expect(described?.p?.role).toBe("omp.cloud.hub");
 		expect(JSON.stringify(described)).toContain(ID);
+	});
+});
+
+describe("choosing a cloud through the tool", () => {
+	const TARGET_ENTRY = "omp-cloud-target";
+	const text = (out: Awaited<ReturnType<typeof call>>): string => out.content[0]?.text ?? "";
+
+	/** The cloud the personal file names: it answers whoami and nothing else. */
+	let personal: Bun.Server<undefined>;
+	beforeAll(() => {
+		personal = Bun.serve({ port: 0, fetch: req => (new URL(req.url).pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "other" })) : Response.json({ error: "not found" }, { status: 404 })) });
+	});
+	afterAll(() => personal.stop(true));
+
+	/** The environment names the fake service (`OMP_CLOUD_URL`); the personal file names `personal`. Both known, the environment the default. */
+	async function twoClouds(hostOpts: Parameters<typeof fakeHost>[0] = {}): Promise<{ cloud: Cloud; host: FakeHost; pi: FakePi; file: string }> {
+		const f = await remoteFixture();
+		const { agentDir } = await isolateOmp();
+		const settings = await fakeSettings({ agentDir, cwd: f.work });
+		const env = await cloudEnv(`url: http://127.0.0.1:${personal.port}\ntoken: other\n`, { PI_CODING_AGENT_DIR: agentDir, OMP_CLOUD_URL: `http://127.0.0.1:${server.port}`, OMP_CLOUD_TOKEN: "tok" });
+		const pi = fakePi({ settings });
+		const cloud = new Cloud(pi.pi, "/own", env);
+		const host = fakeHost({ cwd: f.work, entries: pi.entries, ...hostOpts });
+		live.push({ cloud, host });
+		return { cloud, host, pi, file: join(env.XDG_CONFIG_HOME ?? "", "omp-cloud", "connection.json") };
+	}
+
+	test("info lists both clouds, the environment's the default; use refuses once the session has a thread, and picks the other before that, recording the choice in the session", async () => {
+		const { cloud, host, pi } = await twoClouds();
+		const info = text(await call(cloud, host, { op: "info" }));
+		expect(info).toContain(`cloud: env · http://127.0.0.1:${server.port} · the default (OMP_CLOUD_URL is set)`);
+		expect(info).toContain(`other clouds: personal http://127.0.0.1:${personal.port} (url in `);
+
+		const started = await call(cloud, host, { op: "delegate", task: "x", workspace: "scratch" });
+		expect(started.isError).toBeUndefined();
+		const refused = await call(cloud, host, { op: "use", cloud: "personal" });
+		expect(refused.isError).toBe(true);
+		expect(text(refused)).toStartWith("cloud use: error conflict: this session already works with 1 cloud thread (");
+		expect(pi.entries).toEqual([]);
+
+		// A session that has started nothing may pick the other cloud; the pick is the session's own.
+		const fresh = await twoClouds();
+		const picked = await call(fresh.cloud, fresh.host, { op: "use", cloud: "personal" });
+		expect(text(picked).split("\n")[0]).toBe("cloud use: ok personal");
+		expect(fresh.pi.entries).toEqual([{ type: "custom", customType: TARGET_ENTRY, data: { cloud: "personal" } }]);
+		expect(picked.details).toMatchObject({ op: "use", cloud: "personal", url: `http://127.0.0.1:${personal.port}` });
+		// It is in use now: info reaches the personal cloud, and says the session chose it.
+		const after = await call(fresh.cloud, fresh.host, { op: "info" });
+		expect(after.isError).toBeUndefined();
+		expect(text(after)).toContain(`cloud: personal · http://127.0.0.1:${personal.port} · this session's choice`);
+		expect(text(after)).toContain("you are owner (other)");
+	});
+
+	test("the choice follows the session: a later omp session of this one reads it back from its entries", async () => {
+		const first = await twoClouds();
+		await call(first.cloud, first.host, { op: "use", cloud: "personal" });
+		const resumed = await twoClouds({ entries: first.pi.entries });
+		const info = await call(resumed.cloud, resumed.host, { op: "info" });
+		expect(text(info)).toContain(`cloud: personal · http://127.0.0.1:${personal.port} · this session's choice`);
+	});
+
+	test("use of a cloud this machine lacks is invalid and changes nothing", async () => {
+		const { cloud, host, pi } = await twoClouds();
+		const out = await call(cloud, host, { op: "use", cloud: "paired" });
+		expect(out.isError).toBe(true);
+		expect(text(out)).toStartWith("cloud use: error invalid: no usable paired cloud on this machine");
+		expect(pi.entries).toEqual([]);
+	});
+
+	test("connect asks the user in a dialog; a refusal is forbidden and writes no pairing", async () => {
+		const { cloud, host, file } = await twoClouds({ confirm: false });
+		const out = await call(cloud, host, { op: "connect", target: "dev@omp.example" });
+		expect(out.isError).toBe(true);
+		expect(text(out)).toStartWith("cloud connect: error forbidden");
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	test("with nothing configured info is not_configured, says so, and names connect as the way forward", async () => {
+		const { agentDir } = await isolateOmp();
+		const env = await cloudEnv(undefined, { PI_CODING_AGENT_DIR: agentDir });
+		const pi = fakePi({ settings: await fakeSettings({ agentDir, cwd: undefined }) });
+		const cloud = new Cloud(pi.pi, "/own", env);
+		const host = fakeHost({ cwd: "/x" });
+		live.push({ cloud, host });
+		const out = await call(cloud, host, { op: "info" });
+		expect(out.isError).toBe(true);
+		expect(text(out)).toStartWith("cloud info: error not_configured");
+		expect(text(out)).toContain("cloud connect {target} pairs it");
+		expect(text(out)).toContain("cloud: none configured on this machine");
 	});
 });

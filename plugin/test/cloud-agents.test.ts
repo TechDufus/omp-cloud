@@ -729,10 +729,9 @@ describe("wake relay", () => {
 		expect(r.main.messages).toHaveLength(1);
 		const relay = r.main.messages[0];
 		expect(relay).toMatchObject({ id: `${JOB}-2-5000`, from: JOB, to: "Main", replyTo: "m1", wakeRelay: true });
-		expect(relay?.body).toContain("Turn 2 done: Greeting fixed");
-		expect(relay?.body).toContain(`<cloud-output thread="${ID}" turn="2">`);
+		expect(relay?.body).toStartWith(`<task-result id="${JOB}" agent="cloud" status="completed"`);
 		expect(relay?.body).toContain("The fix is in");
-		expect(relay?.body).toContain(`agent://${JOB}`);
+		expect(relay?.body).toContain(`thread ${ID} · turn 2`);
 		expect(r.agents.relayed(ID, 2)).toBe(true);
 		expect(r.agents.relayed(ID, 1)).toBe(false);
 
@@ -744,21 +743,22 @@ describe("wake relay", () => {
 	test("failed and cancelled turns relay too", async () => {
 		const failed = await woken();
 		failed.agents.observe(idle([turn(1), ircTurn(2, "m1", { state: "failed", error: "boom", reply: "" })]));
-		expect(failed.main.messages[0]?.body).toContain("Turn 2 failed: Greeting fixed");
+		expect(failed.main.messages[0]?.body).toStartWith(`<task-result id="${JOB}" agent="cloud" status="failed"`);
 		expect(failed.main.messages[0]?.body).toContain("boom");
 
 		const cancelled = await woken();
 		cancelled.agents.observe(idle([turn(1), ircTurn(2, "m1", { state: "cancelled", reply: "", error: "" })]));
-		expect(cancelled.main.messages[0]?.body).toContain("Turn 2 was stopped");
+		expect(cancelled.main.messages[0]?.body).toStartWith(`<task-result id="${JOB}" agent="cloud" status="cancelled"`);
 		expect(cancelled.agents.relayed(ID, 2)).toBe(true);
 	});
 
-	test("the relay is cut at 8000 characters", async () => {
+	test("a long reply is relayed as a preview that points at the full result", async () => {
 		const r = await woken();
 		r.agents.observe(idle([turn(1), ircTurn(2, "m1", { reply: "x".repeat(9000) })]));
 		const body = r.main.messages[0]?.body ?? "";
-		expect(body).toContain(`${"x".repeat(8000)}…`);
-		expect(body).not.toContain("x".repeat(8001));
+		expect(body).toContain(`<preview full-output="agent://${JOB}">`);
+		expect(body).toContain("x".repeat(5000));
+		expect(body).not.toContain("x".repeat(5001));
 	});
 
 	test("a relay or a broadcast is never relayed back", async () => {

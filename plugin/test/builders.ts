@@ -161,6 +161,7 @@ export function detail(over: Partial<ThreadDetail> = {}): ThreadDetail {
 		repo: { name: "app", remoteURL: "", baseRef: "main", baseCommit: "", handoffCommit: "", localBranch: "main" },
 		paths: { home: "/home/ada", workspace: "/home/ada/app" },
 		configOverlays: [],
+		readOnly: false,
 		vm: null,
 		turns: [turn(1)],
 		...over,

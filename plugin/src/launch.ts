@@ -7,7 +7,7 @@ import type { CloudConfig, Env } from "./config";
 import { MAX_CONVERSATION_BYTES, packConversation, type ConversationResult } from "./conversation";
 import { CloudError, toCloudError } from "./errors";
 import { planExtensions } from "./extensions";
-import { loginHint } from "./login";
+import { loginHint, userLoginStep } from "./login";
 import { generateName, type TitleGenerator } from "./naming";
 import { sessionOverlays } from "./overlays";
 import { refusePairingCode } from "./pairing";
@@ -24,7 +24,7 @@ export const MAX_CONCURRENT_CREATES = 4;
 /** Name of a scratch thread's synthesized repository. */
 export const SCRATCH_NAME = "scratch";
 
-const POLICY_KEYS: readonly string[] = ["spend.turnUSD", "spend.threadUSD", "egress", "fetch", "webSearch", "browser"];
+const POLICY_KEYS: readonly string[] = ["spend.turnUSD", "spend.threadUSD", "egress", "fetch", "webSearch", "browser", "readOnly"];
 const REF_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/;
 
@@ -39,6 +39,8 @@ export interface TaskPolicy {
 	fetch?: boolean;
 	webSearch?: boolean;
 	browser?: boolean;
+	/** `true`: a read-only agent; nothing it changes is pushed or opened as a pull request, and it gets no MCP servers. Plan mode sets it. */
+	readOnly?: boolean;
 }
 
 /** One task of a handoff. */
@@ -55,7 +57,7 @@ export interface LaunchTask {
 	policy?: TaskPolicy;
 	/** Omitted: `repo` inside a git repository, else `scratch`. */
 	workspace?: Workspace;
-	/** `none` ships no conversation. Default `full`. */
+	/** `none` ships no conversation; default `full` for the user's handoff, `none` for the model's delegation. */
 	conversation?: "full" | "none";
 	/** `false` ships no uncommitted work. Default `true`. */
 	wip?: boolean;
@@ -95,6 +97,8 @@ export interface HandoffSummary {
 	setup: { cacheFiles: string[] | undefined } | null;
 	/** The keys of `policy` the handoff asked for. */
 	policy: string[];
+	/** The thread is a read-only agent: nothing it changes is pushed, and it has no MCP servers. */
+	readOnly: boolean;
 }
 
 export interface LaunchBatchInput {
@@ -165,11 +169,25 @@ export function modelServed(patterns: readonly string[], model: string): boolean
 	return patterns.some(p => p === "*" || p === model || (p.endsWith("/*") && model.startsWith(p.slice(0, -1))));
 }
 
-/** Stops a handoff whose model the cloud cannot run, before anything is packed or uploaded. */
-export function assertModelServed(who: Pick<Whoami, "modelPatterns">, model: string, serverHost?: string): void {
-	if (model === "" || modelServed(who.modelPatterns, model)) return;
+/**
+ * The model a task runs and the warning to show when it is not the one asked for. The user's own handoff stops (with a login
+ * offer) when the cloud cannot run the session's model; the model's delegation falls back to the cloud's default model when it
+ * named none, and otherwise fails with what the user or the model must do.
+ */
+function resolveModel(who: Whoami, requested: string, sessionModel: string, origin: ThreadOrigin, serverHost: string | undefined): { model: string; warning: string } {
+	const model = requested !== "" ? requested : sessionModel;
+	if (model === "" || modelServed(who.modelPatterns, model)) return { model, warning: "" };
 	const provider = model.split("/")[0] ?? model;
-	throw new UserError(`☁ the cloud cannot run ${provider} models yet: ${loginHint(provider, serverHost)}`);
+	if (origin === "user") throw new UserError(`☁ the cloud cannot run ${provider} models yet: ${loginHint(provider, serverHost)}`);
+	if (who.modelPatterns.length === 0) {
+		throw new CloudError({ code: "not_configured", message: "this cloud has no model login yet", hint: `ask the user to ${userLoginStep(provider, serverHost)}`, retriable: false, outcomeKnown: true });
+	}
+	if (requested === "" && who.defaultModel !== "" && modelServed(who.modelPatterns, who.defaultModel)) {
+		return { model: who.defaultModel, warning: `this session's model ${sessionModel} is not served by this cloud; it runs the cloud's default model ${who.defaultModel}` };
+	}
+	const ids = who.models.map(m => m.id);
+	const served = ids.length > 0 ? ` (${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""})` : "";
+	throw invalid(`this cloud does not serve ${model}`, `pass model with one it serves${served}, or ask the user to ${userLoginStep(provider, serverHost)}`);
 }
 
 function invalid(message: string, hint?: string): CloudError {
@@ -217,7 +235,7 @@ function keyReused(error: CloudError, plan: Plan): CloudError {
 	const message =
 		plan.task.ref === undefined
 			? `an earlier attempt of this call already made thread ${thread}, which holds a different task`
-			: `ref "${plan.task.ref}" already names thread ${thread}, which has a different task; use another ref (or none)`;
+			: `ref "${plan.task.ref}" already names thread ${thread}, which has a different task or read-only setting; use another ref (or none)`;
 	return new CloudError({ code: "conflict", status: 409, message, retriable: false, outcomeKnown: true }, { cause: error });
 }
 
@@ -229,6 +247,8 @@ interface Plan {
 	model: string;
 	thinking: string;
 	policy: Record<string, unknown>;
+	/** Shown with the launch: set when the model is not the one asked for. */
+	warning: string;
 	key: string;
 }
 
@@ -247,15 +267,15 @@ function planTask(input: LaunchBatchInput, who: Whoami, index: number, fallback:
 		if (!POLICY_KEYS.includes(key)) throw invalid(`policy key "${key}" is not one of ${POLICY_KEYS.join(", ")}`);
 	}
 	if (task.thinking !== undefined && !THINKING_LEVELS.includes(task.thinking)) throw invalid(`thinking must be one of ${THINKING_LEVELS.join(", ")}`);
-	let model = sessionModel;
 	let thinking = task.thinking ?? sessionThinking;
+	let requested = "";
 	if (task.model !== undefined && task.model.trim() !== "") {
 		const split = splitModel(task.model.trim());
 		if (!MODEL_PATTERN.test(split.id)) throw invalid(`model "${task.model}" is not provider/id`, "cloud info lists the models the cloud can run");
-		model = split.id;
+		requested = split.id;
 		thinking = task.thinking ?? split.thinking;
 	}
-	assertModelServed(who, model, input.serverHost);
+	const { model, warning } = resolveModel(who, requested, sessionModel, input.origin, input.serverHost);
 	const workspace = task.workspace ?? fallback;
 	if (workspace === "repo" && fallback === "scratch") {
 		throw invalid(`${input.host.cwd} is not a git repository with at least one commit, which workspace "repo" needs`, `use workspace "scratch" for work that is not tied to a repository`);
@@ -268,6 +288,7 @@ function planTask(input: LaunchBatchInput, who: Whoami, index: number, fallback:
 		model,
 		thinking,
 		policy: { ...input.cfg.policy, ...task.policy },
+		warning,
 		key: idempotencyKey(task, input.sessionId, input.toolCallId, index),
 	};
 }
@@ -320,6 +341,7 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 	const meta = who.capabilities.includes("threads.meta");
 	const idempotent = who.capabilities.includes("threads.idempotency");
 	const setupSupported = who.capabilities.includes("threads.setup");
+	const subagent = who.capabilities.includes("threads.subagent");
 	const sessionModel = sessionModelOf(host);
 	const level = input.pi.getThinkingLevel();
 	const sessionThinking = level !== undefined && THINKING_LEVELS.includes(level) ? level : "";
@@ -411,15 +433,18 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 			const { index, task } = plan;
 			try {
 				signal?.throwIfAborted();
-				const conv: ConversationResult = task.conversation === "none" ? { kind: "none" } : await packed();
+				const conv: ConversationResult = task.conversation === "full" || (task.conversation === undefined && input.origin === "user") ? await packed() : { kind: "none" };
 				const wip = task.wip !== false;
+				const readOnly = plan.policy.readOnly === true;
 				const local: string[] = [];
+				if (plan.warning !== "") local.push(plan.warning);
+				if (input.origin === "tool" && !subagent) local.push("this service predates subagent threads: its agents may ask questions, which arrive as [cloud] messages (answer with cloud answer)");
 				if (conv.kind === "too-large") local.push(`conversation is over ${MAX_CONVERSATION_BYTES / (1024 * 1024)} MiB; the cloud agent starts without it`);
 				const name = await names.get(index);
 				let snap: Snapshot | undefined = plan.workspace === "repo" ? await snapshot(wip, false) : undefined;
 				const made = await setupFor(plan.workspace, snap?.root ?? tmp);
 				local.push(...made.warnings);
-				const shippedMcp = await mcp();
+				const shippedMcp = readOnly ? { servers: [], summary: [], warnings: [] } : await mcp();
 				local.push(...shippedMcp.warnings);
 				if (!snap && cfg.secretFiles.length > 0) local.push("secretFiles are files of a repository: none shipped to a scratch thread");
 				const shipSetup = snap !== undefined && cfg.setup !== undefined && setupSupported;
@@ -486,6 +511,7 @@ export async function launchBatch(input: LaunchBatchInput): Promise<LaunchBatch>
 					mcp: shippedMcp.summary,
 					setup: shipSetup && cfg.setup !== undefined ? { cacheFiles: cfg.setup.cacheFiles } : null,
 					policy: Object.keys(plan.policy),
+					readOnly,
 				};
 				return { ok: true, index, response: created.summary, replayed: created.replayed, workspace: plan.workspace, key: plan.key, warnings: [...local, ...(snap?.warnings ?? []), ...created.summary.warnings], summary };
 			} catch (e) {

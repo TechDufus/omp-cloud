@@ -10,6 +10,7 @@ const OPEN: PolicyValues = {
 	fetch: true,
 	webSearch: true,
 	browser: true,
+	readOnly: false,
 	egress: [],
 	"spend.turnUSD": 0,
 	"spend.threadUSD": 0,
@@ -36,6 +37,7 @@ describe("tightenPolicy with no thread policy", () => {
 			fetch: true,
 			webSearch: true,
 			browser: true,
+			readOnly: false,
 			egress: [],
 			spend: { turn: 0, thread: 0, day: 0 },
 			modelsAllowed: [],
@@ -49,6 +51,7 @@ describe("tightenPolicy with no thread policy", () => {
 			fetch: false,
 			webSearch: true,
 			browser: false,
+			readOnly: false,
 			egress: ["example.com"],
 			"spend.turnUSD": 1,
 			"spend.threadUSD": 2,
@@ -61,6 +64,7 @@ describe("tightenPolicy with no thread policy", () => {
 			fetch: false,
 			webSearch: true,
 			browser: false,
+			readOnly: false,
 			egress: ["example.com"],
 			spend: { turn: 1, thread: 2, day: 3 },
 			modelsAllowed: [["anthropic/*"]],
@@ -164,6 +168,16 @@ describe("fetch, webSearch and browser", () => {
 	test("each switch is independent", () => {
 		const effective = tightenPolicy({ ...OPEN, webSearch: false }, { fetch: false });
 		expect([effective.fetch, effective.webSearch, effective.browser]).toEqual([false, false, true]);
+	});
+});
+
+describe("readOnly", () => {
+	test("is on when the service or the thread turns it on, and a thread's false never clears the service's true", () => {
+		expect(tightenPolicy(OPEN, {}).readOnly).toBe(false);
+		expect(tightenPolicy(OPEN, { readOnly: false }).readOnly).toBe(false);
+		expect(tightenPolicy(OPEN, { readOnly: true }).readOnly).toBe(true);
+		expect(tightenPolicy({ ...OPEN, readOnly: true }, {}).readOnly).toBe(true);
+		expect(tightenPolicy({ ...OPEN, readOnly: true }, { readOnly: false }).readOnly).toBe(true);
 	});
 });
 

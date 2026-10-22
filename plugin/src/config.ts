@@ -38,6 +38,10 @@ export interface CloudConfig {
 	/** `token` as configured: a literal, an environment variable name or a `!command`. Never shown; {@link resolveConnection} resolves it. */
 	token: string | undefined;
 	tokenFrom: Origin | undefined;
+	/** The personal file's own `url` (trailing slashes removed), whether or not `OMP_CLOUD_URL` beat it: `/cloud use personal` reaches it. */
+	personalUrl: string | undefined;
+	/** The personal file's own `token`, as configured. */
+	personalToken: string | undefined;
 	/** `url` and `token` as the repository file set them and that therefore lost: a cloned repository must not redirect handoffs or swap the token. */
 	ignored: IgnoredKey[];
 	/** Extension names (an entry of `<agent dir>/extensions`, or the basename of any other shipped extension) that stay on this machine. */
@@ -230,6 +234,8 @@ export async function readConfig(input: ConfigInput): Promise<CloudConfig> {
 	const url = envUrl ?? personal.url;
 	return {
 		url: url?.replace(/\/+$/, ""),
+		personalUrl: personal.url?.replace(/\/+$/, ""),
+		personalToken: personal.token,
 		urlFrom: envUrl !== undefined ? "env" : personal.url !== undefined ? "personal" : undefined,
 		token: envToken ?? personal.token,
 		tokenFrom: envToken !== undefined ? "env" : personal.token !== undefined ? "personal" : undefined,
@@ -289,7 +295,7 @@ export function statusLines(cfg: CloudConfig, connection?: Connection): string[]
 /** What the user sees when the cloud is not configured, with the repository keys that were ignored. */
 export function notConfigured(cfg: CloudConfig): string {
 	const lines = [
-		`☁ omp-cloud is not configured: set url and token in ${tilde(cfg.personalFile, cfg.home)} (for example token: "!cat ~/.config/omp-cloud/service.token"), or OMP_CLOUD_URL and OMP_CLOUD_TOKEN; or pair this machine with /cloud connect <code>`,
+		`☁ omp-cloud is not configured: set url and token in ${tilde(cfg.personalFile, cfg.home)} (for example token: "!cat ~/.config/omp-cloud/service.token"), or OMP_CLOUD_URL and OMP_CLOUD_TOKEN; or pair this machine with /cloud connect <code | user@host>`,
 	];
 	for (const key of cfg.ignored) lines.push(`  ${key} in ${cfg.repoFile} is ignored: a repository never redirects the cloud or supplies its token`);
 	return lines.join("\n");
@@ -315,27 +321,110 @@ function checkConfiguredUrl(url: string): void {
 	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new UserError("☁ url must start with https:// (or http:// on this machine)");
 }
 
-/**
- * The service address and its credential, from one source, never mixed. `OMP_CLOUD_URL`, else the personal file's `url`,
- * decides: the token is then `OMP_CLOUD_TOKEN`, else the file's `token`, through omp's `resolveConfigValue` (`!command`,
- * environment variable name or literal). With no url at all, the paired connection (`connection.json`) is used whole: its
- * pinned certificate, addresses and device token. A token from the environment or the file is then ignored, and says so.
- * A connection file that does not validate is an error, never a fallback.
- */
-export async function resolveConnection(cfg: CloudConfig): Promise<Connection> {
-	if (cfg.url === undefined) {
-		const paired = await readConnectionFile(cfg.connectionFile);
-		const address = paired?.server.addresses[0];
-		if (!paired || address === undefined) throw new UserError(notConfigured(cfg));
-		return { url: `https://${address}`, token: paired.token, source: "paired", paired, ignoredToken: cfg.tokenFrom };
-	}
-	if (!cfg.token || cfg.urlFrom === undefined) throw new UserError(notConfigured(cfg));
-	checkConfiguredUrl(cfg.url);
+/** The paired connection of `connection.json`, `ignoredToken` being what a token set beside it is called; undefined when there is no file or it names no address. */
+async function pairedConnection(cfg: CloudConfig, ignoredToken: Origin | undefined): Promise<Connection | undefined> {
+	const paired = await readConnectionFile(cfg.connectionFile);
+	const address = paired?.server.addresses[0];
+	if (!paired || address === undefined) return undefined;
+	return { url: `https://${address}`, token: paired.token, source: "paired", paired, ignoredToken };
+}
+
+/** A connection from a configured `url` and `token` (through omp's `resolveConfigValue`: `!command`, environment variable name or literal), whose token `tokenFrom` says where it was set. */
+async function configuredConnection(cfg: CloudConfig, url: string, token: string, source: Origin, tokenFrom: Origin | undefined): Promise<Connection> {
+	checkConfiguredUrl(url);
 	// omp's `resolveConfigValue` runs a `!command` with `/bin/sh -c` (omp's embedded shell on Windows) under a 10 s limit, caches a success for the process and retries a failure after 30 s.
-	const token = text(await resolveConfigValue(cfg.token));
-	if (!token) {
-		const from = cfg.tokenFrom === undefined ? "" : ` (${originLabel(cfg, cfg.tokenFrom)})`;
+	const resolved = text(await resolveConfigValue(token));
+	if (!resolved) {
+		const from = tokenFrom === undefined ? "" : ` (${originLabel(cfg, tokenFrom)})`;
 		throw new UserError(`☁ token${from} resolved to nothing; if it is a !command, run it by hand to see why it prints no token`);
 	}
-	return { url: cfg.url, token, source: cfg.urlFrom, paired: undefined, ignoredToken: undefined };
+	return { url, token: resolved, source, paired: undefined, ignoredToken: undefined };
+}
+
+/**
+ * The service address and its credential, from one source, never mixed. Without `choice`: `OMP_CLOUD_URL`, else the
+ * personal file's `url`, decides: the token is then `OMP_CLOUD_TOKEN`, else the file's `token`. With no url at all, the
+ * paired connection (`connection.json`) is used whole: its pinned certificate, addresses and device token. A token from
+ * the environment or the file is then ignored, and says so. A connection file that does not validate is an error, never a fallback.
+ *
+ * `choice` is the source a session picked (`/cloud use`): `env` is `OMP_CLOUD_URL` with its token, `personal` the
+ * personal file's own `url` and `token`, `paired` the pairing. A source this machine no longer has is an error.
+ */
+export async function resolveConnection(cfg: CloudConfig, choice?: ConnectionSource): Promise<Connection> {
+	const gone = (source: ConnectionSource): UserError =>
+		new UserError(`☁ omp-cloud is not configured for this session: it uses ${source}, which this machine no longer has (/cloud use picks another, /cloud connect pairs a server)`);
+	if (choice === undefined) {
+		if (cfg.url === undefined) {
+			const paired = await pairedConnection(cfg, cfg.tokenFrom);
+			if (!paired) throw new UserError(notConfigured(cfg));
+			return paired;
+		}
+		if (!cfg.token || cfg.urlFrom === undefined) throw new UserError(notConfigured(cfg));
+		return configuredConnection(cfg, cfg.url, cfg.token, cfg.urlFrom, cfg.tokenFrom);
+	}
+	if (choice === "paired") {
+		const paired = await pairedConnection(cfg, cfg.url === undefined ? cfg.tokenFrom : undefined);
+		if (!paired) throw gone(choice);
+		return paired;
+	}
+	if (choice === "personal") {
+		if (cfg.personalUrl === undefined) throw gone(choice);
+		if (!cfg.personalToken) {
+			throw new UserError(`☁ url in ${tilde(cfg.personalFile, cfg.home)} has no token: set token there (for example token: "!cat ~/.config/omp-cloud/service.token")`);
+		}
+		return configuredConnection(cfg, cfg.personalUrl, cfg.personalToken, "personal", "personal");
+	}
+	if (cfg.urlFrom !== "env" || cfg.url === undefined) throw gone(choice);
+	if (!cfg.token) throw new UserError(notConfigured(cfg));
+	return configuredConnection(cfg, cfg.url, cfg.token, "env", cfg.tokenFrom);
+}
+
+/** One cloud this machine can use: where it is configured (`where` for the user), and its address; `url` is `""` for a pairing that does not validate, which `/cloud use` cannot pick. */
+export interface KnownCloud {
+	source: ConnectionSource;
+	url: string;
+	where: string;
+}
+
+/** The clouds of this machine and the one a session uses; `lines` is what `/cloud use` and the tool's `info` show. */
+export interface CloudsView {
+	known: KnownCloud[];
+	/** The source the session uses; undefined when the connection does not resolve. */
+	active: ConnectionSource | undefined;
+	/** The session picked `active` itself (`/cloud use`, `/cloud connect`), rather than taking the default. */
+	chosen: boolean;
+	lines: string[];
+}
+
+/** The clouds this machine knows, in the order `env`, `personal`, `paired`. Never resolves a token. */
+export async function knownClouds(cfg: CloudConfig): Promise<KnownCloud[]> {
+	const known: KnownCloud[] = [];
+	if (cfg.urlFrom === "env" && cfg.url !== undefined) known.push({ source: "env", url: cfg.url, where: "OMP_CLOUD_URL" });
+	if (cfg.personalUrl !== undefined) known.push({ source: "personal", url: cfg.personalUrl, where: `url in ${tilde(cfg.personalFile, cfg.home)}` });
+	const file = tilde(cfg.connectionFile, cfg.home);
+	try {
+		const paired = await readConnectionFile(cfg.connectionFile);
+		const address = paired?.server.addresses[0];
+		if (paired) known.push({ source: "paired", url: address === undefined ? "" : `https://${address}`, where: `paired device ${paired.device.name}, ${file}` });
+	} catch (e) {
+		known.push({ source: "paired", url: "", where: `${file} does not validate: ${e instanceof Error ? e.message : String(e)}` });
+	}
+	return known;
+}
+
+/** The `cloud:` and `other clouds:` rows: the cloud a session uses, why, and the others it could `/cloud use`. */
+export function cloudLines(cfg: CloudConfig, clouds: readonly KnownCloud[], active: ConnectionSource | undefined, chosen: boolean): string[] {
+	if (clouds.length === 0) return ["cloud: none configured on this machine"];
+	const current = clouds.find(c => c.source === active);
+	const why = chosen
+		? "this session's choice"
+		: active === "env"
+			? "the default (OMP_CLOUD_URL is set)"
+			: active === "personal"
+				? `the default (url in ${tilde(cfg.personalFile, cfg.home)})`
+				: "the default (the paired server; no url configured)";
+	const lines = [active === undefined || !current ? "cloud: none usable yet" : `cloud: ${active} · ${current.url} · ${why}`];
+	const others = clouds.filter(c => c.source !== active).map(c => `${c.source}${c.url === "" ? "" : ` ${c.url}`} (${c.where})`);
+	if (others.length > 0) lines.push(`other clouds: ${others.join("; ")}`);
+	return lines;
 }

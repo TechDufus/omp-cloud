@@ -56,6 +56,7 @@ function summary(over: Partial<HandoffSummary> = {}): HandoffSummary {
 		mcp: [],
 		setup: null,
 		policy: [],
+		readOnly: false,
 		...over,
 	};
 }

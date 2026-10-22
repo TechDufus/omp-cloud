@@ -35,6 +35,17 @@ export interface ConnectInput {
 	allowPublic: boolean;
 }
 
+/** What the tool's `connect` reports: the card's lines plus what the pairing wrote and whether this session switched to it. */
+export interface ConnectOutcome {
+	lines: string[];
+	/** This session uses the new pairing now. */
+	using: boolean;
+	/** The server's host, as `/cloud status` names it. */
+	server: string;
+	/** This device's name on the server. */
+	device: string;
+}
+
 export interface ConnectDeps {
 	/** Where `connection.json` lives. */
 	connectionFile: string;

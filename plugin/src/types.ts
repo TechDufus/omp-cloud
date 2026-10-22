@@ -303,6 +303,8 @@ export interface ThreadTurn {
 
 /** In the detail view `turns` is the turn list; the summary's count is its length. */
 export interface ThreadDetail extends Omit<ThreadSummary, "turns" | "warnings" | "repo" | "workspace"> {
+	/** `policy.readOnly` the thread itself set; the service's own setting is not part of the detail. */
+	readOnly: boolean;
 	repo: ThreadRepoSummary & {
 		baseCommit: string;
 		handoffCommit: string;
@@ -657,6 +659,8 @@ export type DeliverAs = "steer" | "followUp" | "nextTurn" | "aside";
 
 export interface PiHost {
 	getThinkingLevel(): string | undefined;
+	/** Appends a `custom` entry to the session file (omp's `ExtensionAPI.appendEntry`); `getEntries()` returns it. It is not sent to the model. */
+	appendEntry(customType: string, data?: unknown): void;
 	sendMessage(
 		message: { customType: string; content: string; display: boolean; details?: unknown; attribution?: "user" | "agent" },
 		options?: { triggerTurn?: boolean; deliverAs?: DeliverAs },

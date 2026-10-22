@@ -28,17 +28,16 @@ import { MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { AgentProgress, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
-import { cloudFence } from "./cards";
 import { turnPayload } from "./cloud-agents";
 import { CloudChildren, freeId, isChildEvent } from "./cloud-children";
 import { cloudJobId, cloudJobLiveWidget, cloudJobStage } from "./cloud-job";
 import { shortName } from "./commands";
 import { EventLog, runningText } from "./event-lines";
-import { clip, metricsLine, threadHeading } from "./format";
+import { clip, metricsLine, spanBetween, threadHeading } from "./format";
 import { cloudJobViews } from "./job-widgets";
 import { TurnProgress } from "./turn-progress";
 import type { ThreadActivity, ThreadDetail, ThreadEvent, ThreadMetrics, ThreadTurn } from "./types";
-import { resultLine } from "./watch";
+import { taskResultText } from "./task-result";
 
 /** The part of omp's event bus the frames use. */
 export interface SubagentBus {
@@ -285,13 +284,19 @@ export class CloudJobs {
 			else live.outcome.reject(new Error(pointer));
 		} else {
 			const structured: StructuredSubagentOutput = { source: "none", mode: "permissive", status: "valid", data: turnPayload(detail, turn, REPLY_MAX) };
-			if (turn.state === "done") {
-				const body = turn.reply.trim() === "" ? [] : [`Reply: ${clip(turn.reply, REPLY_MAX)}`];
-				live.outcome.resolve({ text: [head, ...cloudFence(detail.id, turn.id, body), resultLine(detail.result)].join("\n"), structured });
-			} else {
-				const body = turn.error.trim() === "" ? [] : [`Error: ${clip(turn.error, REPLY_MAX)}`];
-				live.outcome.reject(new AsyncJobError([head, ...cloudFence(detail.id, turn.id, body)].join("\n"), structured));
-			}
+			const text = taskResultText({
+				id: live.agent,
+				status: turn.state === "done" ? "completed" : turn.state === "failed" ? "failed" : "cancelled",
+				duration: spanBetween(turn.startedAt, turn.completedAt),
+				reply: turn.reply,
+				error: turn.state === "done" ? "" : turn.error,
+				thread: detail.id,
+				turn: turn.id,
+				result: detail.result,
+				pr: detail.pr?.url ?? "",
+			});
+			if (turn.state === "done") live.outcome.resolve({ text, structured });
+			else live.outcome.reject(new AsyncJobError(text, structured));
 		}
 		return { id: live.id, waited, native };
 	}

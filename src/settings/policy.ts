@@ -11,6 +11,7 @@ export const POLICY_KEYS = [
 	"fetch",
 	"webSearch",
 	"browser",
+	"readOnly",
 	"egress",
 	"spend.turnUSD",
 	"spend.threadUSD",

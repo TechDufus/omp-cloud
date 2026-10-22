@@ -7,6 +7,7 @@ import {
 	USAGE_LAUNCH,
 	USAGE_LOGIN,
 	USAGE_SEND,
+	USAGE_USE,
 	type Command,
 	type ThreadRef,
 } from "../src/commands";
@@ -128,6 +129,29 @@ describe("/cloud dashboard", () => {
 	test("is completed as a verb but takes no thread id", () => {
 		expect(completions("da", THREADS)?.map(c => c.value)).toEqual(["dashboard"]);
 		expect(completions("dashboard ", THREADS)).toBeNull();
+	});
+});
+
+describe("/cloud use", () => {
+	test("without a word lists the clouds; with env, personal or paired (any case) picks one", async () => {
+		expect(await run("use", [])).toEqual({ kind: "use", cloud: undefined });
+		expect(await run("use paired", [])).toEqual({ kind: "use", cloud: "paired" });
+		expect(await run("USE Personal", [])).toEqual({ kind: "use", cloud: "personal" });
+		expect(await run("use env", [])).toEqual({ kind: "use", cloud: "env" });
+	});
+
+	test("any other word is the usage error, so a task that begins with use needs /cloud new", async () => {
+		const usage = { kind: "error" as const, message: USAGE_USE };
+		expect(await run("use foo", [])).toEqual(usage);
+		expect(await run("use paired now", [])).toEqual(usage);
+		expect(await run("new use the new API", [])).toEqual({ kind: "launch", task: "use the new API" });
+	});
+
+	test("is completed as a verb and completes the three clouds, never a thread id", () => {
+		expect(completions("us", THREADS)?.map(c => c.value)).toEqual(["use"]);
+		expect(completions("use ", THREADS)?.map(c => c.value)).toEqual(["use env", "use personal", "use paired"]);
+		expect(completions("use pa", THREADS)?.map(c => c.value)).toEqual(["use paired"]);
+		expect(completions("use paired ", THREADS)).toBeNull();
 	});
 });
 

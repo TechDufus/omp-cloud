@@ -274,6 +274,7 @@ describe("the thread policy", () => {
 		["fetch", "no", "policy.fetch must be true or false"],
 		["webSearch", 0, "policy.webSearch must be true or false"],
 		["browser", null, "policy.browser must be true or false"],
+		["readOnly", "yes", "policy.readOnly must be true or false"],
 		["egress", ["https://example.com"], "policy.egress entries are IPv4 addresses, CIDRs or domains"],
 		["spend.turnUSD", -1, "policy.spend.turnUSD must be a number from 0 to"],
 		["spend.threadUSD", "5", "policy.spend.threadUSD must be a number from 0 to"],

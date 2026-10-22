@@ -1,6 +1,7 @@
 /** `/cloud` argument parsing, thread-id resolution and completion. Pure: no I/O. */
 
 import { cloudJobId } from "./cloud-job";
+import type { ConnectionSource } from "./config";
 
 export const VERBS = [
 	"new",
@@ -23,6 +24,7 @@ export const VERBS = [
 	"pair",
 	"devices",
 	"disconnect",
+	"use",
 	"help",
 ] as const;
 export type Verb = (typeof VERBS)[number];
@@ -39,6 +41,10 @@ export const USAGE_PULL = "☁ usage: /cloud pull <id> [--into <dir>]";
 export const USAGE_DEVICES = "☁ usage: /cloud devices [revoke <name|id-prefix>]";
 export const USAGE_DISCONNECT = "☁ usage: /cloud disconnect [--force]";
 export const USAGE_PREVIEW = "☁ usage: /cloud preview <id> <port> | /cloud preview stop";
+export const USAGE_USE = "☁ usage: /cloud use [env | personal | paired]";
+
+/** The clouds `/cloud use` picks by: where each is configured. */
+export const CLOUD_SOURCES: readonly ConnectionSource[] = ["env", "personal", "paired"];
 
 /** What the user typed, before thread ids are resolved. */
 export type Parsed =
@@ -47,6 +53,7 @@ export type Parsed =
 	| { kind: "preview"; token: string; port: number }
 	| { kind: "hub" | "list" | "unwatch" | "status" | "update" | "dashboard" | "pair" | "previewStop" | "help" }
 	| { kind: "connect"; target: string | undefined; name: string | undefined; replace: boolean; allowPublic: boolean }
+	| { kind: "use"; cloud: ConnectionSource | undefined }
 	| { kind: "devices"; revoke: string | undefined }
 	| { kind: "disconnect"; force: boolean }
 	| { kind: IdVerb; token: string; text: string; /** `pull --into`. */ into?: string }
@@ -59,6 +66,7 @@ export type Command =
 	| { kind: "preview"; thread: string; port: number }
 	| { kind: "hub" | "list" | "unwatch" | "status" | "update" | "dashboard" | "pair" | "previewStop" | "help" }
 	| { kind: "connect"; target: string | undefined; name: string | undefined; replace: boolean; allowPublic: boolean }
+	| { kind: "use"; cloud: ConnectionSource | undefined }
 	| { kind: "devices"; revoke: string | undefined }
 	| { kind: "disconnect"; force: boolean }
 	| { kind: Exclude<IdVerb, "send" | "answer" | "pull">; thread: string }
@@ -143,6 +151,13 @@ function parseDevices(rest: string): Parsed {
 	return sub.toLowerCase() === "revoke" && unquoted !== "" ? { kind: "devices", revoke: unquoted } : { kind: "error", message: USAGE_DEVICES };
 }
 
+/** `/cloud use` lists the clouds; `/cloud use env|personal|paired` picks one for this session. */
+function parseUse(rest: string): Parsed {
+	if (rest === "") return { kind: "use", cloud: undefined };
+	const cloud = CLOUD_SOURCES.find(source => source === rest.toLowerCase());
+	return cloud === undefined ? { kind: "error", message: USAGE_USE } : { kind: "use", cloud };
+}
+
 /**
  * The first token, lowercased, is a verb or the task starts here. Empty args open the hub;
  * `new` launches the rest even when it begins with a verb word.
@@ -160,6 +175,7 @@ export function parseCommand(args: string): Parsed {
 	}
 	if (verb === "preview") return parsePreview(rest);
 	if (verb === "connect") return parseConnect(rest);
+	if (verb === "use") return parseUse(rest);
 	if (verb === "devices") return parseDevices(rest);
 	if (verb === "disconnect") {
 		const flags = words(rest);
@@ -260,6 +276,7 @@ const VERB_HELP: Record<Verb, string> = {
 	delete: "delete a thread",
 	login: "log the cloud broker in to a provider (second login, never a copy of yours)",
 	status: "show the connection and what the cloud can run",
+	use: "pick the cloud this session uses",
 	update: "check the cloud service for a newer omp-cloud; when one is ready, restart the service to update (the owner confirms)",
 	dashboard: "open the dashboard (prints a one-time sign-in link)",
 	connect: "pair this machine with a cloud service: a pairing code (from /cloud pair on the server machine), or an ssh target (user@host) where omp-cloud is installed",
@@ -272,6 +289,7 @@ const VERB_HELP: Record<Verb, string> = {
 /** The words that complete after a verb's name. */
 const ARGUMENT_COMPLETIONS: Partial<Record<Verb, readonly string[]>> = {
 	connect: ["--name", "--replace", "--allow-public"],
+	use: CLOUD_SOURCES,
 	devices: ["revoke"],
 	disconnect: ["--force"],
 };
@@ -300,7 +318,7 @@ export function completions(prefix: string, cachedThreads: readonly ThreadRef[])
 		const typedFlag = p.slice(start).toLowerCase();
 		const given = p.slice(0, start).trim().split(/\s+/);
 		const items = flags
-			.filter(f => f.startsWith(typedFlag) && !given.includes(f) && (verb !== "devices" || given.length === 1))
+			.filter(f => f.startsWith(typedFlag) && !given.includes(f) && ((verb !== "devices" && verb !== "use") || given.length === 1))
 			.map(f => ({ value: `${p.slice(0, start)}${f}`, label: f }));
 		return items.length > 0 ? items : null;
 	}

@@ -202,6 +202,10 @@ function money(n: number): string {
 	return formatCost(n) || "$0";
 }
 
+function yesNo(v: boolean): string {
+	return v ? "yes" : "no";
+}
+
 function infoView(d: Extract<OpDetails, { op: "info" }>): NativeToolView {
 	const l = d.limits;
 	const spend = d.spend === null ? "not reported" : `${money(d.spend.todayUSD)} today${d.spend.dayCapUSD > 0 ? ` of ${money(d.spend.dayCapUSD)}` : ""}`;
@@ -209,11 +213,16 @@ function infoView(d: Extract<OpDetails, { op: "info" }>): NativeToolView {
 		head: head("info", `omp-cloud ${d.service.version || "?"}`),
 		tone: "info",
 		body: factsOf([
+			["cloud", d.active === null ? "none usable" : `${d.active} · ${d.clouds.find(c => c.source === d.active)?.url ?? ""}${d.chosen ? " · this session's choice" : ""}${d.clouds.length > 1 ? ` · ${d.clouds.length} known` : ""}`],
 			["service", `omp-cloud ${d.service.version || "unknown"} (api ${d.service.api})`],
 			["caller", `${d.caller.kind} ${d.caller.name}`],
 			["default model", d.defaultModel || "none"],
 			["models", d.models.length === 0 ? "none yet" : `${d.models.slice(0, 6).join(", ")}${d.models.length > 6 ? ` and ${d.models.length - 6} more` : ""}`],
 			["capabilities", d.capabilities.length === 0 ? "none reported" : d.capabilities.join(", ")],
+			["agents may", d.agents === null ? "" : `fetch ${yesNo(d.agents.fetch)} · web search ${yesNo(d.agents.webSearch)} · browser ${yesNo(d.agents.browser)} · egress ${d.agents.egress.length === 0 ? "open" : plural(d.agents.egress.length, "destination")}${d.agents.readOnly ? " · read-only" : ""}`],
+			["toolchain", d.agents === null ? "" : d.agents.packages.join(", ")],
+			["results", d.agents === null ? "" : [d.agents.push && `git.push ${d.agents.push}`, d.agents.pr && `pull requests ${d.agents.pr}`, d.agents.sign && `signing ${d.agents.sign}`].filter(Boolean).join(" · ")],
+			["plan mode", d.planning ? "on: delegations are read-only" : ""],
 			["limits", `message ${l.maxMessageBytes} B · answer ${l.maxAnswerBytes} B · list ${l.listMax} · turns per thread ${l.maxTurns}`],
 			["spend", spend],
 			["VMs", `${d.vms.running} running · ${d.vms.paused} paused`],
@@ -234,7 +243,8 @@ function delegateView(d: Extract<OpDetails, { op: "delegate" }>): NativeToolView
 					["branch", o.branch],
 					["workspace", o.workspace],
 					["ref", o.ref],
-					["job", o.job ?? ""],
+					["agent", o.agent ?? o.job ?? ""],
+					["read-only", o.readOnly ? "yes" : ""],
 					["replayed", o.replayed ? "yes: its idempotency key had created it" : ""],
 					["warnings", o.warnings.join("; ")],
 				])
@@ -360,7 +370,7 @@ export function describeResult(result: ViewResult, options: Pick<RenderResultOpt
 		case "list":
 			return typeof details.at === "number" && details.threads.every(t => isRecord(t.card)) ? listView(details) : textView("list", text);
 		case "info":
-			return infoView(details);
+			return Array.isArray(details.clouds) ? infoView(details) : textView("info", text);
 		case "delegate":
 			return delegateView(details);
 		case "send":
@@ -381,6 +391,9 @@ export function describeResult(result: ViewResult, options: Pick<RenderResultOpt
 			return diffView(details, text);
 		case "files":
 			return filesView(details, text);
+		case "use":
+		case "connect":
+			return textView(details.op, text);
 		case "preview":
 			return textView("preview", text);
 	}

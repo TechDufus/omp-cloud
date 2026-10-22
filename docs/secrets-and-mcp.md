@@ -64,6 +64,8 @@ omp reads MCP servers from `mcp.json` in its agent directory. At handoff the plu
 
 A service that lacks the proxy capability takes none: `the cloud service cannot take MCP servers; none are shipped`. One that has the capability but is not listening ([the proxy](#the-proxy)) takes only stdio servers: `the cloud has no MCP proxy; http MCP servers are not shipped`.
 
+A read-only thread (`policy.readOnly`, which the plugin sets on every delegation the model makes in plan mode) takes none: the plugin does not even resolve the servers' `!command` headers, and a service that is handed some anyway writes no `mcp.json` and no proxy token for it (`MCP servers not delivered: the thread is read-only (<names>)`). The `cloud` tool's delegate result names the servers that did ship (`mcp servers: <name> (through the service | in the VM)`).
+
 ### http servers go through the service
 
 The plugin resolves each header the way omp does (`${VAR}` and `${VAR:-default}` from your environment first, then a `!command`, an environment variable name or a literal) and sends the result with the request. A header that does not resolve keeps the server home: `<name> is not shipped: header <H> did not resolve`. The service keeps the headers in the thread's `secrets.json`, which is never served.

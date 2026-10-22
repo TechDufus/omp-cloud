@@ -117,6 +117,7 @@ describe("get and list", () => {
 			["policy.fetch", "bool"],
 			["policy.webSearch", "bool"],
 			["policy.browser", "bool"],
+			["policy.readOnly", "bool"],
 			["policy.egress", "string[]"],
 			["policy.spend.turnUSD", "number"],
 			["policy.spend.threadUSD", "number"],

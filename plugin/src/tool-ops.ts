@@ -9,7 +9,7 @@ import { asCloudError, MAX_BATCH_TASKS, modelServed, type LaunchFailure, type La
 import { AGENT_PORT } from "./commands";
 import type { PullApply } from "./pull";
 import { repoLabel } from "./repo-key";
-import { asEnvelope, type DelegateDetail, type OpDetails, type OpOutput, type ThreadFailure, type ToolCloud, type ToolParams, type ToolSession } from "./tool";
+import { asEnvelope, type AgentsDetail, type DelegateDetail, type DelegatedThread, type OpDetails, type OpOutput, type ThreadFailure, type ToolCloud, type ToolParams, type ToolSession } from "./tool";
 import { updateLine } from "./update";
 import type { Host, IrcReceiptKind, ThreadDetail, ThreadPhase, ThreadSummary, ThreadTurn, TurnPart } from "./types";
 
@@ -52,6 +52,9 @@ export interface Env {
 function invalid(message: string, hint?: string): CloudError {
 	return new CloudError({ code: "invalid", message, retriable: false, outcomeKnown: true, hint });
 }
+
+/** What the calls that need no connection (`use`, `connect`) take: an {@link Env} without a session. */
+export type SessionlessEnv = Omit<Env, "session">;
 
 function conflict(message: string, hint?: string): CloudError {
 	return new CloudError({ code: "conflict", message, retriable: false, outcomeKnown: true, hint });
@@ -158,7 +161,7 @@ function followLabel(state: { followed: boolean; origin: string; stale: boolean 
 function followText(label: "wake" | "silent" | "stale" | "no"): string {
 	switch (label) {
 		case "wake":
-			return "wake (its results and questions arrive here as [cloud] messages)";
+			return "wake (its results arrive here like a subagent's; [cloud] messages bring approvals and notices)";
 		case "silent":
 			return "silent (its results go to the user's tray, not to you; cloud wait or cloud status shows them)";
 		case "stale":
@@ -179,7 +182,69 @@ async function activeOwnThreads(env: Env): Promise<ThreadSummary[]> {
 // info
 // ---------------------------------------------------------------------------
 
+/** The value of setting `key` when it is a boolean; `fallback` when the service did not report it. */
+function settingBool(values: ReadonlyMap<string, unknown>, key: string, fallback: boolean): boolean {
+	const v = values.get(key);
+	return typeof v === "boolean" ? v : fallback;
+}
+
+function settingStrings(values: ReadonlyMap<string, unknown>, key: string): string[] | undefined {
+	const v = values.get(key);
+	return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined;
+}
+
+function settingText(values: ReadonlyMap<string, unknown>, key: string): string {
+	const v = values.get(key);
+	return typeof v === "string" ? v : "";
+}
+
+/** `git.push` as the model needs it: what happens to a thread's commits. */
+function pushText(mode: string): string {
+	switch (mode) {
+		case "never":
+			return "kept for the user to pull (git.push never)";
+		case "ask":
+			return "pushed when the user approves each push (git.push ask)";
+		case "auto":
+			return "pushed after every turn (git.push auto)";
+		default:
+			return `git.push ${mode}`;
+	}
+}
+
+/** The agents' lines of `info` and the details that go with them. */
+interface AgentsReport {
+	detail: AgentsDetail;
+	lines: string[];
+}
+
+/** What `info` says of the agents (what they may do, their toolchain, what happens to their work), from the service's settings. */
+function agentsOf(settings: { key: string; value: unknown }[], gitHosts: string[]): AgentsReport {
+	const values = new Map(settings.map(s => [s.key, s.value]));
+	const egress = settingStrings(values, "policy.egress") ?? [];
+	const packages = settingStrings(values, "vm.packages");
+	const push = settingText(values, "git.push");
+	const pr = settingText(values, "git.pr");
+	const sign = settingText(values, "git.sign");
+	const fetch = settingBool(values, "policy.fetch", true);
+	const webSearch = settingBool(values, "policy.webSearch", true);
+	const browser = settingBool(values, "policy.browser", true);
+	const readOnly = settingBool(values, "policy.readOnly", false);
+	const yes = (v: boolean): string => (v ? "yes" : "no");
+	const lines = [`agents may: fetch ${yes(fetch)} · web search ${yes(webSearch)} · browser ${yes(browser)} · egress ${egress.length === 0 ? "open" : `${egress.length} destinations`}${readOnly ? " · read-only" : ""} (a delegation's policy can only tighten these)`];
+	if (packages !== undefined) lines.push(`agent toolchain: ${packages.length > 0 ? packages.join(", ") : "no extra packages"} (vm.packages; Debian with git, curl, jq and sudo)`);
+	const results = [
+		...(push === "" ? [] : [pushText(push)]),
+		...(pr === "" ? [] : [`pull requests ${pr} after a push to a github.com repository with the GitHub App`]),
+		...(sign === "" ? [] : [`signing ${sign}`]),
+		`push credentials for ${gitHosts.length > 0 ? gitHosts.join(", ") : "no host"}`,
+	];
+	lines.push(`agent results: ${results.join(" · ")}`);
+	return { detail: { fetch, webSearch, browser, egress, readOnly, packages: packages ?? [], push, pr, sign }, lines };
+}
+
 export async function info(env: Env): Promise<OpOutput> {
+	const view = await env.cloud.clouds(env.ctx);
 	const who = await env.session.client.whoami({ signal: env.signal });
 	const version = who.service.version === "" ? `unknown (api ${who.service.api})` : `${who.service.version} (api ${who.service.api})`;
 	const caller = who.device ? `device ${who.device.name}` : "owner";
@@ -189,13 +254,33 @@ export async function info(env: Env): Promise<OpOutput> {
 	const l = who.limits;
 	const spend = who.spend === null ? "not reported by this service" : `${money(who.spend.todayUSD)} today, ${who.spend.dayCapUSD > 0 ? `day cap ${money(who.spend.dayCapUSD)}` : "no day cap"}`;
 	// A device cannot log the broker in: its owner does that on the server machine.
-	const loginOwner = who.device ? "the owner logs the server in with `omp-cloud login <provider>` on the server machine" : "the owner can run /cloud login <provider>";
+	const loginOwner = who.device ? "ask the user to run omp-cloud login <provider> on the server machine" : "ask the user to run /cloud login <provider>";
+	const defaultServed = who.defaultModel !== "" && modelServed(who.modelPatterns, who.defaultModel);
+	const sessionModel =
+		model === ""
+			? "none"
+			: modelServed(who.modelPatterns, model)
+				? `${model} (served)`
+				: `${model} (not served: ${defaultServed ? `delegations run the default model ${who.defaultModel}` : `pass model with one the cloud serves, or ${loginOwner}`})`;
+	const planning = env.cloud.planning(env.ctx);
+	// The settings are the owner's and a device may read them; a service that will not tell leaves the lines out.
+	let agents: AgentsReport | undefined;
+	let agentsError = "";
+	try {
+		const settings = await env.session.client.settings({ signal: env.signal });
+		if (settings.length > 0) agents = agentsOf(settings, who.gitHosts);
+	} catch (e) {
+		agentsError = asCloudError(e).code;
+	}
 	const lines = [
+		...view.lines,
 		`service: omp-cloud ${version} · you are ${caller} (${who.user})`,
 		`capabilities: ${who.capabilities.length > 0 ? who.capabilities.join(", ") : "none reported"}`,
 		`models: ${ids.length > 0 ? `${shown}${ids.length > MODELS_LISTED ? ` and ${ids.length - MODELS_LISTED} more` : ""}` : `none yet (${loginOwner})`}`,
-		`default model: ${who.defaultModel || "none"} (used only for a delegation that names no model; a delegation runs this session's model unless model is set)`,
-		`this session's model: ${model || "none"}${model !== "" ? (modelServed(who.modelPatterns, model) ? " (the cloud can run it)" : ` (the cloud cannot run it yet: delegate with another model, or ${loginOwner})`) : ""}`,
+		`default model: ${who.defaultModel || "none"} (runs when a delegation names no model and this session's model is not served)`,
+		`this session's model: ${sessionModel}`,
+		...(agents ? agents.lines : agentsError !== "" ? [`agents: not reported (${agentsError})`] : []),
+		...(planning ? ["plan mode: on: every delegation runs read-only; pull, and messages to agents that are not read-only, are refused until the plan is approved"] : []),
 		`limits: message ${l.maxMessageBytes} bytes · answer ${l.maxAnswerBytes} bytes · upload ${formatTokens(l.maxUploadBytes)}B · list ${l.listMax} · turns per thread ${l.maxTurns}`,
 		`spend: ${spend}`,
 		`vms: ${who.vms.running} running, ${who.vms.paused} paused`,
@@ -210,6 +295,9 @@ export async function info(env: Env): Promise<OpOutput> {
 			op: "info",
 			service: who.service,
 			caller: who.device ? { kind: "device", name: who.device.name } : { kind: "owner", name: who.user },
+			clouds: view.known,
+			active: view.active ?? null,
+			chosen: view.chosen,
 			capabilities: who.capabilities,
 			models: ids,
 			defaultModel: who.defaultModel,
@@ -217,6 +305,8 @@ export async function info(env: Env): Promise<OpOutput> {
 			spend: who.spend,
 			vms: who.vms,
 			threads: who.threads,
+			planning,
+			agents: agents?.detail ?? null,
 		},
 	};
 }
@@ -277,7 +367,7 @@ function nextStep(d: ThreadDetail, follow: "wake" | "silent" | "stale" | "no"): 
 			: `the user answers this ${q.kind === "push" ? "push approval" : "tool approval"} (${HUMAN_ANSWER_HINT.replace("the user answers it: ", "")}); tell them, do not wait on it`;
 	}
 	if (d.phase === "starting" || d.phase === "working") {
-		return follow === "wake" ? `${callText({ op: "wait", thread: d.id })} blocks until it settles; its result also arrives as a [cloud] message` : `${callText({ op: "wait", thread: d.id })} blocks until it settles (${follow === "silent" ? "its result goes to the user's tray, not to you" : "this session is not woken for it"})`;
+		return follow === "wake" ? `${callText({ op: "wait", thread: d.id })} blocks until it settles; its result also arrives on its own` : `${callText({ op: "wait", thread: d.id })} blocks until it settles (${follow === "silent" ? "its result goes to the user's tray, not to you" : "this session is not woken for it"})`;
 	}
 	if (d.phase === "failed") return `${callText({ op: "read", thread: d.id, part: "error" })} for the error; a failed thread takes no more messages, delegate again`;
 	const latest = [...d.turns].reverse().find(t => t.state === "done" || t.state === "failed");
@@ -559,6 +649,15 @@ export async function send(env: Env): Promise<OpOutput> {
 	if (mode === "interrupt") await client.requireCapability("messages.interrupt");
 	const id = await env.cloud.resolve(env.ctx, refs[0], env.signal);
 	const before = await client.thread(id, { signal: env.signal });
+	if (!before.readOnly && env.cloud.planning(env.ctx)) {
+		throw new CloudError({
+			code: "forbidden",
+			message: `plan mode: ${id} is not read-only, so a message could make it change and push work`,
+			hint: "message it after the plan is approved; agents delegated now are read-only and take messages",
+			retriable: false,
+			outcomeKnown: true,
+		});
+	}
 	if (before.phase === "failed") {
 		throw conflict(`${id} has failed and takes no more messages`, `${callText({ op: "read", thread: id, part: "error" })} shows why; ${callText({ op: "pull", thread: id })} brings what it committed; delegate again to start over`);
 	}
@@ -579,7 +678,10 @@ export async function send(env: Env): Promise<OpOutput> {
 	lines.push(`following: ${followText(follow)}`);
 	if (before.archivedAt) lines.push("restoring: the thread was archived; its VM restores from the archive first (about a minute)");
 	if (state.jobId) lines.push(`job: ${state.jobId} (the host's job list shows the running turn)`);
-	lines.push(follow === "wake" ? `next: the reply arrives as a [cloud] message; ${callText({ op: "wait", thread: id })} blocks until it does` : `next: ${callText({ op: "wait", thread: id })} blocks until the turn ends; the reply is not delivered to you on its own`);
+	if (follow !== "wake") lines.push(`next: ${callText({ op: "wait", thread: id })} blocks until the turn ends; the reply is not delivered to you on its own`);
+	else if (sent.receipt === null) lines.push(`next: turn ${sent.turn}'s result arrives like a subagent's; omp's wait returns when it does`);
+	else if (sent.receipt === "injected") lines.push("next: it reads the message at its next step; the turn's result arrives as usual");
+	else lines.push("next: its reply comes back to you as a message from the agent, like a subagent you woke; omp's wait returns when it does");
 	return {
 		summary: `${id} ${sent.turn === null ? sent.receipt : `turn ${sent.turn}`}`,
 		lines,
@@ -771,6 +873,9 @@ export async function preview(env: Env): Promise<OpOutput> {
 // ---------------------------------------------------------------------------
 
 export async function pull(env: Env): Promise<OpOutput> {
+	if (env.cloud.planning(env.ctx)) {
+		throw new CloudError({ code: "forbidden", message: "plan mode: pull changes this repository", hint: "pull after the plan is approved; diff and files read the result now", retriable: false, outcomeKnown: true });
+	}
 	const refs = refsOf(env, "pull");
 	if (refs.length > 1 || !refs[0]) throw invalid("pull takes one thread");
 	const apply: PullApply = env.params.apply ?? "fetch";
@@ -835,7 +940,26 @@ function progressText(p: LaunchProgress): string {
 }
 
 export async function delegate(env: Env): Promise<OpOutput> {
-	const tasks = delegateTasks(env.params);
+	let tasks = delegateTasks(env.params);
+	// Plan mode: every delegation is a read-only agent, as omp's own subagents are; a service that cannot run one is told so before anything is uploaded.
+	if (env.cloud.planning(env.ctx)) {
+		try {
+			await env.session.client.requireCapability("threads.readonly");
+		} catch (e) {
+			if (!(e instanceof CloudError) || e.code !== "version_skew") throw e;
+			throw new CloudError(
+				{
+					code: "version_skew",
+					message: "plan mode delegates read-only cloud agents, and this service cannot run them",
+					hint: "ask the user to update the service (/cloud update), or delegate after the plan is approved",
+					retriable: false,
+					outcomeKnown: true,
+				},
+				{ cause: e },
+			);
+		}
+		tasks = tasks.map(t => ({ ...t, policy: { ...t.policy, readOnly: true } }));
+	}
 	const result = await env.cloud.delegate(env.ctx, { tasks, context: env.params.context }, { toolCallId: env.toolCallId, signal: env.signal, onProgress: p => env.progress(progressText(p)) });
 	const lines: string[] = [];
 	const usedDefault = tasks.some(t => t.workspace === undefined);
@@ -846,6 +970,8 @@ export async function delegate(env: Env): Promise<OpOutput> {
 				: "workspace: scratch by default (this directory is not a git repository with a commit): the cloud agent works in an empty repository and nothing of this machine's files was shipped",
 		);
 	}
+	const shipped = result.outcomes.find((o): o is DelegatedThread => o.ok && !o.summary.readOnly && o.summary.mcp.length > 0);
+	if (shipped) lines.push(`mcp servers: ${shipped.summary.mcp.map(s => `${s.name} (${s.via === "service" ? "through the service" : "in the VM"})`).join(", ")}`);
 	const details: DelegateDetail[] = [];
 	let started = 0;
 	for (const o of result.outcomes) {
@@ -865,24 +991,47 @@ export async function delegate(env: Env): Promise<OpOutput> {
 		started++;
 		const r = o.response;
 		const task = tasks[o.index];
-		lines.push(`task ${n}: thread ${threadTag(r)}${o.replayed ? " (replayed)" : " started"}`);
+		const identity = o.agent !== undefined ? `agent \`${o.agent}\` (thread ${r.id})` : `thread ${threadTag(r)}`;
+		lines.push(`task ${n}: ${identity}${o.replayed ? (o.agent !== undefined ? " found again (replayed)" : " (replayed)") : " started"}`);
 		if (o.replayed) lines.push(`  replayed: ${o.key} had already created this thread; nothing was created or uploaded`);
 		lines.push(`  workspace: ${o.workspace === "scratch" ? "scratch" : `repo ${o.summary.repo.name}${o.summary.base === "" ? " (full history" : ` (changes since ${o.summary.base}`}${o.summary.wip.files > 0 ? `, ${plural(o.summary.wip.files, "uncommitted file")}` : ""})`}`);
 		lines.push(`  model: ${o.summary.model || "service default"}${o.summary.thinking ? ` · thinking ${o.summary.thinking}` : ""}`);
 		lines.push(`  branch: ${threadBranch(r.id)}`);
 		if (task?.ref !== undefined) lines.push(`  ref: ${task.ref}`);
-		if (o.job) lines.push(`  job: ${o.job} (the host's job list shows the running turn)`);
-		if (o.summary.conversation !== "included") lines.push(`  conversation: ${o.summary.conversation === "too-large" ? "too large, not shipped" : "not shipped"}`);
+		if (o.summary.readOnly) lines.push("  read-only: nothing it changes is pushed, and it has no MCP servers");
+		if (o.summary.conversation === "included") lines.push("  conversation: forked from this session");
+		else if (o.summary.conversation === "too-large") lines.push("  conversation: too large, not shipped");
 		if (o.warnings.length > 0) lines.push(`  warnings: ${o.warnings.join("; ")}`);
-		details.push({ ok: true, index: o.index, thread: r.id, name: r.name, job: o.job ?? null, model: o.summary.model, branch: threadBranch(r.id), ref: task?.ref ?? "", key: o.key, replayed: o.replayed, workspace: o.workspace, warnings: o.warnings });
+		details.push({ ok: true, index: o.index, thread: r.id, name: r.name, job: o.job ?? null, agent: o.agent ?? null, model: o.summary.model, branch: threadBranch(r.id), ref: task?.ref ?? "", key: o.key, replayed: o.replayed, workspace: o.workspace, readOnly: o.summary.readOnly, warnings: o.warnings });
 	}
-	if (started > 0) lines.push("next: results and questions arrive as [cloud] messages; do not poll. cloud wait blocks until they settle; cloud status <thread> shows one");
+	if (started > 0) lines.push("next: results auto-deliver as <task-result>; NEVER poll. Completely blocked? Call wait. agent://<id> reads a result; write agent://<id> messages an agent");
 	const first = result.outcomes.find((o): o is LaunchFailure => !o.ok);
 	const outputDetails: OpDetails = { op: "delegate", defaultWorkspace: result.defaultWorkspace, outcomes: details };
 	if (started === 0 && first) return { lines, details: outputDetails, error: first.error };
 	const only = result.outcomes.length === 1 ? result.outcomes[0] : undefined;
 	const summary = only?.ok ? `${only.replayed ? "found existing thread" : "started"} ${only.response.id}` : `${started} of ${result.outcomes.length} started`;
 	return { summary, lines, details: outputDetails };
+}
+
+/** `use`: this session's cloud from now on. */
+async function useCloud(env: SessionlessEnv): Promise<OpOutput> {
+	const source = env.params.cloud;
+	if (source === undefined) throw invalid("use needs cloud: env, personal or paired", "cloud info lists the clouds this machine knows");
+	const view = await env.cloud.useCloud(env.ctx, source);
+	return { summary: source, lines: view.lines, details: { op: "use", cloud: source, url: view.known.find(k => k.source === source)?.url ?? "" } };
+}
+
+/** `connect`: pairs this machine with a server the user named, after they confirm in a dialog. */
+async function connectCloud(env: SessionlessEnv): Promise<OpOutput> {
+	const target = env.params.target?.trim() ?? "";
+	if (target === "") throw invalid("connect needs target: the server as user@host, host or ssh://[user@]host[:port], or a pairing code", "only a cloud the user asked you to connect to");
+	const outcome = await env.cloud.connectCloud(env.ctx, target, env.signal);
+	return { summary: `paired with ${outcome.server}`, lines: outcome.lines, details: { op: "connect", server: outcome.server, device: outcome.device, using: outcome.using } };
+}
+
+/** The ops that need no connection of their own: they choose or make one. */
+export function runSessionless(env: SessionlessEnv): Promise<OpOutput> {
+	return env.params.op === "connect" ? connectCloud(env) : useCloud(env);
 }
 
 /** Runs the call's op. */
@@ -916,6 +1065,9 @@ export function run(env: Env): Promise<OpOutput> {
 			return remove(env);
 		case "info":
 			return info(env);
+		case "use":
+		case "connect":
+			return runSessionless(env);
 		case "preview":
 			return preview(env);
 	}

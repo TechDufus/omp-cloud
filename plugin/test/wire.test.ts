@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseIrcPayload, parseIrcReceipt, parseThreadDetail, parseThreadSummary } from "../src/wire";
+import { parseIrcPayload, parseIrcReceipt, parseSettings, parseThreadDetail, parseThreadSummary } from "../src/wire";
 
 const result = { branch: "omp-cloud/a", head: "0123456789", base: "main", filesChanged: 1, insertions: 2, deletions: 3, pushed: true, pushError: "", updatedAt: "" };
 const turn = { id: 1, state: "done", pushed: true, pushError: "", questions: [] };
@@ -129,6 +129,21 @@ describe("the IRC fields of a turn", () => {
 			const d = parseThreadDetail({ id: "a", turns: [t] });
 			expect(d.turns[0]).toMatchObject({ origin: "", ircFrom: "", ircId: "", ircReplyTo: "" });
 		}
+	});
+});
+
+describe("read-only threads and the service's settings", () => {
+	test("a detail is read-only when its own policy says `readOnly: true`; a missing policy, another value or another type is writable", () => {
+		expect(parseThreadDetail({ id: "a", policy: { readOnly: true } }).readOnly).toBe(true);
+		for (const body of [{ id: "a" }, { id: "a", policy: {} }, { id: "a", policy: { readOnly: false } }, { id: "a", policy: { readOnly: "yes" } }, { id: "a", policy: "readOnly" }]) {
+			expect(parseThreadDetail(body).readOnly).toBe(false);
+		}
+	});
+
+	test("the settings are the key and the current value of each entry, whatever else it carries", () => {
+		const settings = parseSettings({ settings: [{ key: "git.push", value: "auto", type: "enum", doc: "…", source: "owner" }, { key: "vm.packages", value: ["nodejs"] }] });
+		expect(settings).toEqual([{ key: "git.push", value: "auto" }, { key: "vm.packages", value: ["nodejs"] }]);
+		expect(parseSettings({})).toEqual([]);
 	});
 });
 

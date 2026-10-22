@@ -59,7 +59,7 @@ export interface UploadOptions {
 	sentBy?: string;
 	/** Runs right before the thread is written; throws to refuse (a revoked device's upload), which removes what was stored. */
 	beforeCreate?: () => void;
-	/** The create request's `Idempotency-Key`, stored on the thread with the fingerprint of the prompt (`createThreadIdempotent` sets it). */
+	/** The create request's `Idempotency-Key`, stored on the thread with the fingerprint of the prompt and `policy.readOnly` (`createThreadIdempotent` sets it). */
 	idempotencyKey?: string;
 	/** The service's own addresses (the gateway's and the MCP proxy's): an http MCP server may not point at them. */
 	mcpSelfHosts?: readonly string[];
@@ -150,9 +150,13 @@ async function readRequestPart(req: Request, limits: UploadLimits): Promise<{ re
 	}
 }
 
-/** The SHA-256 (hex) of a prompt exactly as the request carried it: what an `Idempotency-Key` is bound to. */
-function promptFingerprint(prompt: string): string {
-	return new Bun.CryptoHasher("sha256").update(prompt).digest("hex");
+/**
+ * The SHA-256 (hex) of a request's prompt exactly as the request carried it, with a `\0readOnly` suffix when it asked for
+ * `policy.readOnly`: what an `Idempotency-Key` is bound to. A request without `readOnly` hashes the prompt alone, so keys
+ * stored before the flag existed still replay.
+ */
+function requestFingerprint(prompt: string, readOnly: boolean): string {
+	return new Bun.CryptoHasher("sha256").update(readOnly ? `${prompt}\0readOnly` : prompt).digest("hex");
 }
 
 /**
@@ -228,7 +232,10 @@ export async function createThreadFromUpload(
 		// A delta thread keeps the normalized https remote: the one its base was fetched from, and the VM's `origin`.
 		const stored = delta ? { ...request.thread, repo: { ...repo, remoteURL: options.git.normalize(repo.remoteURL) } } : { ...request.thread, repo: { ...repo, handoffCommit } };
 		options.beforeCreate?.();
-		const idempotency = options.idempotencyKey === undefined ? undefined : { key: options.idempotencyKey, fingerprint: promptFingerprint(request.thread.prompt) };
+		const idempotency =
+			options.idempotencyKey === undefined
+				? undefined
+				: { key: options.idempotencyKey, fingerprint: requestFingerprint(request.thread.prompt, request.thread.policy.readOnly === true) };
 		return store.createThread(id, { ...stored, owner, ompVersion, sentBy: options.sentBy, idempotency }).thread;
 	} catch (error) {
 		await store.removeBlobs(id);
@@ -246,10 +253,11 @@ const IN_PROGRESS = "a request with this Idempotency-Key is still in progress";
 
 /**
  * POST /api/v1/threads: `createThreadFromUpload`, made idempotent by the `Idempotency-Key` header. The first request with
- * a key creates the thread (`replayed` false) and binds the key to the request's prompt. A later one by the same owner,
- * while that thread is not deleted, answers the existing thread (`replayed` true) when its prompt is the same, reading
- * only the `request` part of the upload; with another prompt it is 409 and creates nothing. One that arrives while the
- * first is still being created is 409 too; a malformed key is 400. Without the header it is a plain create.
+ * a key creates the thread (`replayed` false) and binds the key to the request's prompt and `policy.readOnly`. A later one
+ * by the same owner, while that thread is not deleted, answers the existing thread (`replayed` true) when its prompt and
+ * `policy.readOnly` are the same, reading only the `request` part of the upload; with another prompt or read-only setting
+ * it is 409 and creates nothing. One that arrives while the first is still being created is 409 too; a malformed key is
+ * 400. Without the header it is a plain create.
  */
 export async function createThreadIdempotent(
 	store: Store,
@@ -272,7 +280,7 @@ export async function createThreadIdempotent(
 		const { raw } = await readRequestPart(req, uploadLimits(options));
 		const prompt = isRecord(raw) ? raw.prompt : undefined;
 		if (typeof prompt !== "string") throw new ApiError(400, "prompt must be a string");
-		if (promptFingerprint(prompt) !== existing.fingerprint) {
+		if (requestFingerprint(prompt, isRecord(raw) && isRecord(raw.policy) && raw.policy.readOnly === true) !== existing.fingerprint) {
 			throw new ApiError(409, `Idempotency-Key ${key} was used for a different request (thread ${existing.thread.id})`);
 		}
 		return { thread: existing.thread, replayed: true };

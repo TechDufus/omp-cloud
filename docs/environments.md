@@ -17,6 +17,8 @@ Every VM is created from a template that the service builds once per omp version
 
 Edit both on the dashboard's Settings page or with `PUT /api/v1/settings`; they are typed settings like any other, audited and part of the settings export.
 
+The `cloud` tool's `info` shows the model this toolchain (`agent toolchain: <vm.packages>`), so it knows what a cloud agent can run.
+
 | Setting | Type | Default | Rules |
 |---|---|---|---|
 | `vm.packages` | list of strings | the eight packages above | Each entry is a Debian package name: lower-case letters, digits and `+ . -`, starting with a letter or digit, at most 100 characters. At most 200 entries |
@@ -100,6 +102,6 @@ One forwarder serves one thread and port, so `/cloud preview <id> 3000` and `/cl
 
 The local model can do the same through the `cloud` tool's `preview` op (`{op: "preview", thread, port}`; `{op: "preview", stop: true}` ends them): it gets the `http://localhost:<lp>/` address and opens it with omp's browser tool to take screenshots, click and read the page. The tool and the slash command share one list of forwarders, so each reuses the other's, and `/cloud preview stop` ends the model's too. See [The `cloud` tool](cloud-tool.md).
 
-What the service does: it resolves the thread's VM, resumes it if it is paused, and relays the request to the port through vibemon's ingress. Every request postpones the idle pause (`runner.idleTimeoutSeconds`), so a VM you are looking at stays awake. The server has to keep running after the agent's command ends, so ask the agent to start it detached (`setsid nohup <command> >/dev/null 2>&1 &`). A thread with no VM yet answers `409` `the thread has no VM; send it a message first`. Port 49983 is the VM's own control port and is never forwarded. The full contract is in [API](api.md#environments-and-previews).
+What the service does: it resolves the thread's VM, resumes it if it is paused, and relays the request to the port through vibemon's ingress. Every request postpones the idle pause (`runner.idleTimeoutSeconds`), so a VM you are looking at stays awake. The server has to keep running after the agent's command ends, so ask the agent to start it detached (`setsid nohup <command> >/dev/null 2>&1 &`); the system prompt of an agent the model started tells it to, and to name the port in its result. A thread with no VM yet answers `409` `the thread has no VM; send it a message first`. Port 49983 is the VM's own control port and is never forwarded. The full contract is in [API](api.md#environments-and-previews).
 
 Limits are under [Known limitations](architecture.md#known-limitations).

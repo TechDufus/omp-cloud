@@ -48,8 +48,8 @@ modelRoles:
 defaultThinkingLevel: high
 theme: dark
 `;
-	const OPEN: OverlayPolicy = { bashPatterns: [], toolApproval: {}, fetch: true, webSearch: true, browser: true };
-	const base = { model: "anthropic/claude-x", thinking: "", configYamls: [user], routable: ["anthropic", "openai", "fake"], policy: OPEN, maskSecrets: false };
+	const OPEN: OverlayPolicy = { bashPatterns: [], toolApproval: {}, fetch: true, webSearch: true, browser: true, readOnly: false };
+	const base = { model: "anthropic/claude-x", thinking: "", configYamls: [user], routable: ["anthropic", "openai", "fake"], policy: OPEN, maskSecrets: false, ask: true };
 
 	test("keeps roles whose provider is routable and replaces every other role with the thread's model", () => {
 		expect(roles(overlayConfigYaml(base))).toEqual({
@@ -64,6 +64,11 @@ theme: dark
 
 	test("forces the default role to the thread's model even when its provider is routable", () => {
 		expect(parse(overlayConfigYaml(base)).modelRoles).toMatchObject({ default: "anthropic/claude-x" });
+	});
+
+	test("ask off writes ask.enabled false; ask on leaves the tool's switch alone", () => {
+		expect(parse(overlayConfigYaml({ ...base, ask: false })).ask).toEqual({ enabled: false, timeout: 0 });
+		expect(parse(overlayConfigYaml(base)).ask).toEqual({ timeout: 0 });
 	});
 
 	test("without a user config the only role is default", () => {
@@ -237,7 +242,18 @@ tools:
 });
 
 describe("cloudSystemPrompt", () => {
-	const base = { repoName: "app", branch: "omp-cloud/aaaaaaaaaaaa", localBranch: "", questionTimeoutSeconds: 1800, secretFiles: [], mcpServers: [], parentId: "Parent" };
+	const base: Parameters<typeof cloudSystemPrompt>[0] = {
+		repoName: "app",
+		branch: "omp-cloud/aaaaaaaaaaaa",
+		localBranch: "",
+		questionTimeoutSeconds: 1800,
+		secretFiles: [],
+		mcpServers: [],
+		parentId: "Parent",
+		origin: "",
+		secretEnv: [],
+		readOnly: false,
+	};
 
 	test("names the repository, workspace, branch and question timeout", () => {
 		const prompt = cloudSystemPrompt(base);
@@ -287,5 +303,44 @@ describe("cloudSystemPrompt", () => {
 		expect(cloudSystemPrompt({ ...base, questionTimeoutSeconds: 5400 })).toContain("within 1h30m ");
 		expect(cloudSystemPrompt({ ...base, questionTimeoutSeconds: 45 })).toContain("within 45s ");
 		expect(cloudSystemPrompt({ ...base, questionTimeoutSeconds: 0 })).toContain("If nobody answers in time");
+	});
+
+	describe("a thread the model started", () => {
+		const tool = { ...base, origin: "tool" as const, secretEnv: ["NPM_TOKEN"], mcpServers: ["wiki"] };
+
+		test("is a subagent without the ask tool, with preview, parent and secret-env guidance", () => {
+			const prompt = cloudSystemPrompt(tool);
+			expect(prompt).toContain("You are a cloud subagent: the omp agent `Parent` delegated this work to you.");
+			expect(prompt).not.toContain("use the `ask` tool");
+			expect(prompt).not.toContain("go through `ask`");
+			expect(prompt).toContain("setsid nohup");
+			expect(prompt).toContain('path: "agent://Parent"');
+			expect(prompt).toContain("environment variables hold secrets; use them and never print or commit their values: NPM_TOKEN.");
+			expect(prompt).toContain("- MCP servers: wiki; the http ones are reached through the service, never print their tokens.");
+		});
+
+		test("names the environment variables and the MCP servers only when there are some", () => {
+			const prompt = cloudSystemPrompt({ ...tool, secretEnv: [], mcpServers: [] });
+			expect(prompt).not.toContain("environment variables");
+			expect(prompt).not.toContain("MCP servers");
+		});
+
+		test("keeps the commit and push guidance", () => {
+			expect(cloudSystemPrompt(tool)).toContain("Never push and never add or change git remotes");
+		});
+	});
+
+	test("a person's thread keeps the ask guidance and names no environment variables", () => {
+		const prompt = cloudSystemPrompt({ ...base, origin: "user", secretEnv: ["NPM_TOKEN"] });
+		expect(prompt).toContain("use the `ask` tool");
+		expect(prompt).not.toContain("NPM_TOKEN");
+	});
+
+	test("a read-only thread of either origin gets the read-only line instead of the commit line", () => {
+		for (const origin of ["", "user", "tool"] as const) {
+			const prompt = cloudSystemPrompt({ ...base, origin, readOnly: true });
+			expect(prompt).toContain("- Read-only: your parent is planning.");
+			expect(prompt).not.toContain("Commit as you go");
+		}
 	});
 });

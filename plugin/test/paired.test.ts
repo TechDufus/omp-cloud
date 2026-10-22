@@ -3,8 +3,7 @@ import { chmod, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CloudClient } from "../src/api";
-import type { CardDetails } from "../src/cards";
-import { loadTui } from "../src/cards";
+import { CARD_VERSION, loadTui, type CardDetails } from "../src/cards";
 import { readConfig, resolveConnection } from "../src/config";
 import { readConnectionFile, writeConnectionFile, type PairedConnection } from "../src/connection";
 import { runTool, TOOL_OPS } from "../src/tool";
@@ -142,7 +141,9 @@ describe("which credential is used", () => {
 		expect(configured.seen).toEqual([{ method: "GET", path: "/api/v1/whoami", authorization: "Bearer env-token", body: "" }]);
 		expect(paired.seen).toEqual([]);
 		expect(notes(r)).toContain(`url: ${configured.origin}`);
-		expect(notes(r)).not.toContain("paired device");
+		expect(notes(r)).not.toContain("source: paired device");
+		expect(notes(r)).toContain("cloud: personal ·");
+		expect(notes(r)).toContain(`other clouds: paired https://${paired.address} (paired device laptop-2,`);
 	});
 
 	test("OMP_CLOUD_URL wins over the connection file as well", async () => {
@@ -244,8 +245,8 @@ describe("launch text that holds a pairing code", () => {
 		expect(svc.seen).toEqual([]);
 	});
 
-	test("the cloud tool has no pairing operation", () => {
-		for (const verb of ["connect", "pair", "devices", "disconnect", "revoke"]) expect(TOOL_OPS as readonly string[]).not.toContain(verb);
+	test("the cloud tool pairs only through connect: no pair, devices, disconnect or revoke operation", () => {
+		for (const verb of ["pair", "devices", "disconnect", "revoke"]) expect(TOOL_OPS as readonly string[]).not.toContain(verb);
 	});
 });
 
@@ -270,15 +271,16 @@ describe("provider login on a paired device", () => {
 		expect(notes(r)).not.toContain(r.connection.token);
 	});
 
-	test("a handoff of a model the cloud cannot run says the same, and uploads nothing", async () => {
-		const svc = fakeTls(cert, (_req, url) => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", device: PAIRING_DEVICE, capabilities: ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch"] })) : Response.json({ error: "not found" }, { status: 404 })));
+	test("a handoff of a model the cloud does not serve names the device's way to log the server in, and uploads nothing", async () => {
+		const svc = fakeTls(cert, (_req, url) => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", device: PAIRING_DEVICE, defaultModel: "", capabilities: ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch"] })) : Response.json({ error: "not found" }, { status: 404 })));
 		const r = await pairedRig([svc.address], cert, undefined, {}, { model: { provider: "google", id: "gemini-3" } });
 
 		const out = await runTool({ cloud: r.cloud, ctx: r.host.host, toolCallId: "call-1" }, { op: "delegate", task: "x" });
 
 		expect(out.isError).toBe(true);
 		const text = out.content[0]?.text ?? "";
-		expect(text).toContain("the cloud cannot run google models yet: log the server in: run omp-cloud login google on 127.0.0.1 (over ssh: ssh -t <user>@127.0.0.1 '~/.local/bin/omp-cloud login google')");
+		expect(text).toContain("this cloud does not serve google/gemini-3");
+		expect(text).toContain("run omp-cloud login google on 127.0.0.1 (over ssh: ssh -t <user>@127.0.0.1 '~/.local/bin/omp-cloud login google')");
 		expect(text).not.toContain("/cloud login");
 		expect(svc.seen.some(s => s.method === "POST")).toBe(false);
 	});
@@ -536,6 +538,53 @@ describe("/cloud connect", () => {
 		await run(r, "status");
 		expect(notes(r)).toContain("source: paired device");
 		expect(notes(r)).toContain("user: owner");
+	});
+
+	test("a session without threads uses the new pairing from then on, and the choice is recorded", async () => {
+		const svc = pairingService(cert);
+		svc.claims.splice(0, 2);
+		const r = await rig();
+		await run(r, `connect ${pairingCode(cert, [svc.address])} --name laptop`);
+
+		expect(r.pi.sent[0]?.message.content).toContain("this session uses it now");
+		expect(r.pi.entries).toEqual([{ type: "custom", customType: "omp-cloud-target", data: { cloud: "paired" } }]);
+		r.host.notes.length = 0;
+		await run(r, "status");
+		expect(notes(r)).toContain("cloud: paired ·");
+		expect(notes(r)).toContain("this session's choice");
+	});
+
+	test("with a url configured the card says new sessions still start there, and this session switches to the pairing", async () => {
+		const svc = pairingService(cert);
+		svc.claims.splice(0, 2);
+		const configured = plainService(answerWhoami);
+		const r = await rig(`url: ${configured.origin}\ntoken: cfg-token\n`);
+		await run(r, `connect ${pairingCode(cert, [svc.address])} --name laptop`);
+
+		const card = r.pi.sent[0]?.message.content ?? "";
+		expect(card).toContain("this session uses it now");
+		expect(card).toContain("new sessions use url in ");
+		expect(card).toContain("/cloud use paired switches a session");
+		r.host.notes.length = 0;
+		await run(r, "status");
+		expect(notes(r)).toContain("user: owner");
+		expect(configured.seen).toEqual([]);
+	});
+
+	test("a session that already works with threads keeps its cloud and says so", async () => {
+		const svc = pairingService(cert);
+		svc.claims.splice(0, 2);
+		const configured = plainService(answerWhoami);
+		const launched = { type: "custom_message", customType: "omp-cloud", details: { v: CARD_VERSION, kind: "launch", origin: "tool", thread: THREAD } };
+		const r = await rig(`url: ${configured.origin}\ntoken: cfg-token\n`, {}, { entries: [launched] });
+		await run(r, `connect ${pairingCode(cert, [svc.address])} --name laptop`);
+
+		expect(r.pi.sent[0]?.message.content).toContain("this session keeps personal: it already works with threads there");
+		expect(r.pi.entries).toEqual([]);
+		r.host.notes.length = 0;
+		await run(r, "status");
+		expect(configured.seen).toHaveLength(1);
+		expect(notes(r)).not.toContain("user: owner");
 	});
 
 	test("without a code it prompts, and the answer never appears in the command text", async () => {

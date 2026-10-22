@@ -324,8 +324,7 @@ describe("settling", () => {
 		await r.fake.jobs[0]?.settled;
 		expect(r.fake.jobs[0]?.status).toBe("completed");
 		const text = r.fake.jobs[0]?.result ?? "";
-		expect(text).toStartWith("Turn 1 done: Greeting fixed");
-		expect(text).toContain("<cloud-output");
+		expect(text).toStartWith(`<task-result id="${JOB}" agent="cloud" status="completed"`);
 		expect(text).toContain("All done.");
 		expect(text).toContain("result:");
 		expect(r.fake.jobs[0]?.structured).toEqual({ source: "none", mode: "permissive", status: "valid", data: turnPayload(done, finished, 1500) });
@@ -352,7 +351,7 @@ describe("settling", () => {
 		expect(r.jobs.settle(failed, finished)).toEqual({ id: JOB, waited: false, native: true });
 		await r.fake.jobs[0]?.settled;
 		expect(r.fake.jobs[0]?.status).toBe("failed");
-		expect(r.fake.jobs[0]?.error).toStartWith("Turn 1 failed");
+		expect(r.fake.jobs[0]?.error).toStartWith(`<task-result id="${JOB}" agent="cloud" status="failed"`);
 		expect(r.fake.jobs[0]?.error).toContain("vm lost");
 		expect(r.fake.jobs[0]?.structured).toEqual({ source: "none", mode: "permissive", status: "valid", data: turnPayload(failed, finished, 1500) });
 		expect(r.fake.acknowledged).toEqual([]);
@@ -366,7 +365,7 @@ describe("settling", () => {
 		expect(r.jobs.settle(stopped, finished)).toEqual({ id: JOB, waited: false, native: false });
 		await r.fake.jobs[0]?.settled;
 		expect(r.fake.jobs[0]?.status).toBe("failed");
-		expect(r.fake.jobs[0]?.error).toStartWith("Turn 1 stopped");
+		expect(r.fake.jobs[0]?.error).toStartWith(`<task-result id="${JOB}" agent="cloud" status="cancelled"`);
 		expect(r.fake.jobs[0]?.structured).toMatchObject({ data: { turn: 1, state: "cancelled" } });
 		expect(r.fake.acknowledged).toEqual([JOB]);
 	});
@@ -652,7 +651,7 @@ describe("the watcher with jobs", () => {
 		set(ended("cancelled"));
 		feed.push(ID, event(1, { kind: "turn_cancelled", turn: 1 }));
 		await until(() => r.fake.jobs[0]?.status === "failed");
-		expect(r.fake.jobs[0]?.error).toStartWith("Turn 1 stopped");
+		expect(r.fake.jobs[0]?.error).toStartWith(`<task-result id="${JOB}" agent="cloud" status="cancelled"`);
 		expect(sink.turns).toEqual([]);
 	});
 
@@ -846,7 +845,7 @@ describe("through omp's real job manager", () => {
 		await m.getJob(JOB)?.promise;
 		await m.drainDeliveries({ timeoutMs: 500 });
 		expect(delivered).toEqual([JOB]);
-		expect(m.getJob(JOB)?.resultText).toStartWith("Turn 1 done");
+		expect(m.getJob(JOB)?.resultText).toStartWith(`<task-result id="${JOB}" agent="cloud" status="completed"`);
 		expect(m.getJob(JOB)?.structured).toEqual({ source: "none", mode: "permissive", status: "valid", data: turnPayload(done, finished, 1500) });
 	});
 
@@ -880,7 +879,7 @@ describe("through omp's real job manager", () => {
 		await m.getJob(JOB)?.promise;
 		await m.drainDeliveries({ timeoutMs: 500 });
 		expect(delivered).toEqual([]);
-		expect(m.getJob(JOB)?.resultText).toStartWith("Turn 1 done");
+		expect(m.getJob(JOB)?.resultText).toStartWith(`<task-result id="${JOB}" agent="cloud" status="completed"`);
 	});
 
 	test("a job registered the plain way would be delivered: the check above does watch for a second delivery", async () => {
@@ -1061,7 +1060,7 @@ describe("what `proc://<job>` shows of a running cloud job", () => {
 		jobs.sync(running(), []);
 		jobs.settle(ended("done"), turn(1, { state: "done", title: "Greeting fixed", reply: "All done." }));
 		await m.getJob(JOB)?.promise;
-		expect(m.getJob(JOB)?.resultText).toStartWith("Turn 1 done: Greeting fixed");
+		expect(m.getJob(JOB)?.resultText).toStartWith(`<task-result id="${JOB}" agent="cloud" status="completed"`);
 	});
 });
 

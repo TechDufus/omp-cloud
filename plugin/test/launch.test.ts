@@ -8,7 +8,7 @@ import { readConfig, type CloudConfig, type Env } from "../src/config";
 import { run } from "../src/exec";
 import { isRecord } from "../src/guards";
 import { CloudError } from "../src/errors";
-import { launchBatch, type LaunchBatchInput, type LaunchedThread, type LaunchOutcome } from "../src/launch";
+import { launchBatch, type LaunchBatchInput, type LaunchedThread, type LaunchOutcome, type LaunchTask } from "../src/launch";
 import type { TitleGenerator } from "../src/naming";
 import { git } from "../src/snapshot";
 import type { HandoffRequest, Whoami } from "../src/types";
@@ -230,12 +230,12 @@ interface LaunchInput extends Omit<LaunchBatchInput, "tasks" | "origin" | "sessi
 }
 
 /** Launches the one task and returns its thread; a failed task throws its error. */
-async function launchHandoff(input: LaunchInput): Promise<LaunchedThread> {
+async function launchHandoff(input: LaunchInput, extra: Partial<LaunchTask> = {}): Promise<LaunchedThread> {
 	const { task, client, ...rest } = input;
 	const batch = await launchBatch({
 		...rest,
 		client: { whoami: o => client.whoami(o), createThread: (p, o) => client.createThread(p, o), requireCapability: async () => {} },
-		tasks: [{ task, workspace: "repo" }],
+		tasks: [{ task, workspace: "repo", ...extra }],
 		origin: "user",
 		sessionId: "sess-1",
 	});
@@ -432,6 +432,24 @@ describe("the handoff request", () => {
 			expect(only().request).not.toHaveProperty("mcp");
 			expect(result.summary.mcp).toEqual([]);
 			expect(result.warnings).toEqual(["the cloud service cannot take MCP servers; none are shipped"]);
+		});
+
+		test("a read-only task ships no MCP server and says nothing of the ones it leaves at home; the policy carries the flag", async () => {
+			const s = await withMcp();
+			const built = input(s, { withSession: false }, mcpClient({ capabilities: ["mcp.proxy"], mcpProxy: true }));
+			built.env.WIKI_TOKEN = "wiki-secret";
+			const result = await launchHandoff(built.input, { policy: { readOnly: true } });
+			expect(only().request).not.toHaveProperty("mcp");
+			expect(only().request.policy).toEqual({ readOnly: true });
+			expect(result.summary.mcp).toEqual([]);
+			expect(result.summary.readOnly).toBe(true);
+			expect(result.warnings).toEqual([]);
+
+			const again = input(s, { withSession: false }, mcpClient({ capabilities: ["mcp.proxy"], mcpProxy: true }));
+			again.env.WIKI_TOKEN = "wiki-secret";
+			const writable = await launchHandoff(again.input, { policy: { fetch: false } });
+			expect(writable.summary.readOnly).toBe(false);
+			expect(writable.summary.mcp.map(m => m.name)).toEqual(["wiki", "fs"]);
 		});
 	});
 
@@ -956,7 +974,7 @@ describe("thread name", () => {
 // ---------------------------------------------------------------------------
 
 describe("launchBatch", () => {
-	const CAPS = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta"];
+	const CAPS = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.subagent"];
 
 	interface Sent {
 		parts: HandoffParts;
@@ -969,13 +987,13 @@ describe("launchBatch", () => {
 	}
 
 	/** A service that answers every create with a thread of its own; `fail` fails the create of a prompt, `replay` answers one as found by its key, `gate` holds every create. */
-	function batchClient(over: { capabilities?: string[]; fail?: Record<string, Error>; replay?: string[]; gate?: (n: number) => Promise<void> } = {}): BatchClient {
+	function batchClient(over: { capabilities?: string[]; who?: Partial<Whoami>; fail?: Record<string, Error>; replay?: string[]; gate?: (n: number) => Promise<void> } = {}): BatchClient {
 		const sent: Sent[] = [];
 		const capabilities = over.capabilities ?? CAPS;
 		return {
 			sent,
 			client: {
-				whoami: async () => whoami({ modelPatterns: ["anthropic/*"], capabilities }),
+				whoami: async () => whoami({ modelPatterns: ["anthropic/*"], capabilities, ...over.who }),
 				requireCapability: async capability => {
 					if (!capabilities.includes(capability)) throw new CloudError({ code: "version_skew", message: `the cloud does not support ${capability}`, retriable: false, outcomeKnown: true, hint: "update the omp-cloud service (`omp-cloud update` for an installed service; `git pull`, then restart it, for a checkout)" });
 				},
@@ -994,6 +1012,7 @@ describe("launchBatch", () => {
 	interface BatchOptions extends LaunchOptions {
 		origin?: "tool" | "user";
 		context?: string;
+		serverHost?: string;
 		signal?: AbortSignal;
 		onProgress?: LaunchBatchInput["onProgress"];
 	}
@@ -1001,7 +1020,7 @@ describe("launchBatch", () => {
 	async function batch(s: Setup, c: BatchClient, tasks: LaunchBatchInput["tasks"], o: BatchOptions = {}) {
 		const { input: built } = input(s, o, { whoami: async () => whoami(), createThread: async () => ({ summary: summary(), replayed: false }) });
 		const { task: _task, client: _client, ...rest } = built;
-		return launchBatch({ ...rest, client: c.client, tasks, origin: o.origin ?? "tool", sessionId: "sess-1", context: o.context, signal: o.signal, onProgress: o.onProgress });
+		return launchBatch({ ...rest, client: c.client, tasks, origin: o.origin ?? "tool", sessionId: "sess-1", context: o.context, serverHost: o.serverHost, signal: o.signal, onProgress: o.onProgress });
 	}
 
 	/** The create a task made: creates run concurrently, so they are not in task order. */
@@ -1019,7 +1038,7 @@ describe("launchBatch", () => {
 	test("one snapshot, one conversation and one setup serve every task; each task still gets its own create", async () => {
 		const s = await setup();
 		const c = batchClient();
-		const done = await batch(s, c, [{ task: "a" }, { task: "b" }, { task: "c" }], { origin: "tool", toolCallId: CALL_ID });
+		const done = await batch(s, c, [{ task: "a", conversation: "full" }, { task: "b", conversation: "full" }, { task: "c", conversation: "full" }], { origin: "tool", toolCallId: CALL_ID });
 		expect(done.outcomes.map(o => o.ok)).toEqual([true, true, true]);
 		expect(c.sent).toHaveLength(3);
 		for (const part of ["source", "conversation", "setup"] as const) expect(new Set(c.sent.map(x => x.parts[part])).size).toBe(1);
@@ -1118,7 +1137,7 @@ describe("launchBatch", () => {
 		const done = await batch(s, c, [{ task: "a", ref: "bazel-port" }, { task: "b" }, { task: "c" }], { origin: "tool", toolCallId: CALL_ID, withSession: false });
 		const [a, b, other] = done.outcomes;
 		if (a?.ok !== false || b?.ok !== false) throw new Error("tasks a and b should have failed");
-		expect(a.error).toMatchObject({ code: "conflict", status: 409, retriable: false, outcomeKnown: true, message: 'ref "bazel-port" already names thread k3x9fa2m7q1z, which has a different task; use another ref (or none)' });
+		expect(a.error).toMatchObject({ code: "conflict", status: 409, retriable: false, outcomeKnown: true, message: 'ref "bazel-port" already names thread k3x9fa2m7q1z, which has a different task or read-only setting; use another ref (or none)' });
 		expect(b.error.message).toBe("an earlier attempt of this call already made thread k3x9fa2m7q1z, which holds a different task");
 		expect(a.key).toBeUndefined();
 		expect(b.key).toBeUndefined();
@@ -1135,7 +1154,7 @@ describe("launchBatch", () => {
 		expect(errors.map(e => e?.code)).toEqual(["invalid", "invalid", "invalid", "invalid", "too_large", "invalid"]);
 		expect(errors[0]?.message).toContain('ref "no spaces"');
 		expect(errors[1]?.message).toContain('policy key "nope"');
-		expect(errors[3]?.message).toBe("the cloud cannot run openai-codex models yet: /cloud login openai-codex");
+		expect(errors[3]?.message).toBe("this cloud does not serve openai-codex/gpt-5");
 		expect(errors[4]?.message).toContain("limit is 32768");
 		expect(c.sent.map(x => x.parts.request.prompt)).toEqual(["fine"]);
 		expect(done.outcomes.slice(1).every(o => !o.ok && o.key === undefined)).toBe(true);
@@ -1174,7 +1193,7 @@ describe("launchBatch", () => {
 	test("conversation: none ships no conversation for that task; wip: false ships HEAD without the uncommitted work, beside a task that ships it", async () => {
 		const s = await setup();
 		const c = batchClient();
-		const done = await batch(s, c, [{ task: "with" }, { task: "without", conversation: "none", wip: false }], {});
+		const done = await batch(s, c, [{ task: "with", conversation: "full" }, { task: "without", conversation: "none", wip: false }], {});
 		const withAll = sentFor(c, "with");
 		const without = sentFor(c, "without");
 		expect(withAll?.parts.conversation).toBeDefined();
@@ -1185,6 +1204,84 @@ describe("launchBatch", () => {
 		expect(repoOf(without.parts).handoffCommit).toBe(head);
 		expect(ok(done.outcomes[1]).summary.wip).toEqual({ files: 0, insertions: 0, deletions: 0 });
 		expect(ok(done.outcomes[0]).summary.wip.files).toBe(1);
+	});
+
+	test("the model's delegation starts blank: no conversation unless it asks for `full`; the user's handoff forks by default", async () => {
+		const s = await setup();
+		const c = batchClient();
+		const done = await batch(s, c, [{ task: "blank" }, { task: "forked", conversation: "full" }, { task: "explicit none", conversation: "none" }], { origin: "tool" });
+		expect(sentFor(c, "blank").parts.conversation).toBeUndefined();
+		expect(sentFor(c, "forked").parts.conversation).toBeDefined();
+		expect(sentFor(c, "explicit none").parts.conversation).toBeUndefined();
+		expect(ok(done.outcomes[0]).summary.conversation).toBe("none");
+		expect(ok(done.outcomes[1]).summary.conversation).toBe("included");
+
+		const user = batchClient();
+		const forked = await batch(s, user, [{ task: "from the user" }], { origin: "user" });
+		expect(sentFor(user, "from the user").parts.conversation).toBeDefined();
+		expect(ok(forked.outcomes[0]).summary.conversation).toBe("included");
+	});
+
+	test("a service that predates subagent threads is warned of for the model's tasks, not for the user's", async () => {
+		const s = await setup();
+		const old = batchClient({ capabilities: CAPS.filter(c => c !== "threads.subagent") });
+		const done = await batch(s, old, [{ task: "a" }, { task: "b" }], { origin: "tool", withSession: false });
+		for (const o of done.outcomes) expect(ok(o).warnings).toContain("this service predates subagent threads: its agents may ask questions, which arrive as [cloud] messages (answer with cloud answer)");
+		const current = batchClient();
+		expect(ok((await batch(s, current, [{ task: "a" }], { origin: "tool", withSession: false })).outcomes[0]).warnings.join("\n")).not.toContain("predates subagent");
+		const user = batchClient({ capabilities: CAPS.filter(c => c !== "threads.subagent" && c !== "threads.idempotency") });
+		expect(ok((await batch(s, user, [{ task: "a" }], { origin: "user", withSession: false })).outcomes[0]).warnings.join("\n")).not.toContain("predates subagent");
+	});
+
+	describe("the model of a delegation", () => {
+		const who = { modelPatterns: ["anthropic/*"], defaultModel: "anthropic/claude-sonnet-4-6", models: [{ id: "anthropic/claude-sonnet-4-6" }, { id: "anthropic/claude-opus-5" }] };
+		const session = { model: { provider: "openai", id: "gpt-5" } };
+
+		test("the cloud's default model runs when the session's is not served, and the launch says so; the thinking level stays", async () => {
+			const s = await setup();
+			const c = batchClient({ who });
+			const done = await batch(s, c, [{ task: "a" }], { ...session, origin: "tool", withSession: false, thinking: "low" });
+			expect(c.sent[0]?.parts.request).toMatchObject({ model: "anthropic/claude-sonnet-4-6", thinking: "low" });
+			expect(ok(done.outcomes[0]).warnings).toContain("this session's model openai/gpt-5 is not served by this cloud; it runs the cloud's default model anthropic/claude-sonnet-4-6");
+			expect(ok(done.outcomes[0]).summary.model).toBe("anthropic/claude-sonnet-4-6");
+		});
+
+		test("a model the model asked for that the cloud does not serve is invalid, with the models it serves and what the user can do", async () => {
+			const s = await setup();
+			const c = batchClient({ who });
+			const done = await batch(s, c, [{ task: "a", model: "openai/gpt-5" }], { ...session, origin: "tool", withSession: false });
+			const failed = done.outcomes[0];
+			if (failed?.ok !== false) throw new Error("the task should have failed");
+			expect(failed.error).toMatchObject({ code: "invalid", message: "this cloud does not serve openai/gpt-5", hint: "pass model with one it serves (anthropic/claude-sonnet-4-6, anthropic/claude-opus-5), or ask the user to run /cloud login openai" });
+			expect(c.sent).toEqual([]);
+		});
+
+		test("more than five served models are cut with an ellipsis, and a service listing none leaves the parenthesis out", async () => {
+			const s = await setup();
+			const many = Array.from({ length: 7 }, (_, i) => ({ id: `anthropic/m${i}` }));
+			const longList = await batch(s, batchClient({ who: { ...who, defaultModel: "", models: many } }), [{ task: "a" }], { ...session, origin: "tool", withSession: false });
+			expect(longList.outcomes[0]).toMatchObject({ ok: false, error: { hint: "pass model with one it serves (anthropic/m0, anthropic/m1, anthropic/m2, anthropic/m3, anthropic/m4, …), or ask the user to run /cloud login openai" } });
+			const none = await batch(s, batchClient({ who: { ...who, defaultModel: "", models: [] } }), [{ task: "a" }], { ...session, origin: "tool", withSession: false });
+			expect(none.outcomes[0]).toMatchObject({ ok: false, error: { hint: "pass model with one it serves, or ask the user to run /cloud login openai" } });
+		});
+
+		test("a cloud with no model login at all is not_configured, and a device is pointed at the server machine", async () => {
+			const s = await setup();
+			const c = batchClient({ who: { ...who, modelPatterns: [], models: [] } });
+			const done = await batch(s, c, [{ task: "a" }], { ...session, origin: "tool", withSession: false });
+			expect(done.outcomes[0]).toMatchObject({ ok: false, error: { code: "not_configured", message: "this cloud has no model login yet", hint: "ask the user to run /cloud login openai" } });
+			expect(c.sent).toEqual([]);
+
+			const device = await batch(s, batchClient({ who: { ...who, modelPatterns: [], models: [] } }), [{ task: "a" }], { ...session, origin: "tool", withSession: false, serverHost: "10.0.20.24" });
+			expect(device.outcomes[0]).toMatchObject({ ok: false, error: { code: "not_configured", hint: "ask the user to run omp-cloud login openai on 10.0.20.24 (over ssh: ssh -t <user>@10.0.20.24 '~/.local/bin/omp-cloud login openai')" } });
+		});
+
+		test("a served session model runs as is, with no warning", async () => {
+			const s = await setup();
+			const done = await batch(s, batchClient({ who }), [{ task: "a" }], { origin: "tool", withSession: false });
+			expect(ok(done.outcomes[0]).summary.model).toBe("anthropic/claude-sonnet-5-5");
+			expect(ok(done.outcomes[0]).warnings).toEqual([]);
+		});
 	});
 
 	test("the shared context is prepended to every task, model and thinking are the task's own or the session's, policy lays over the configuration's", async () => {

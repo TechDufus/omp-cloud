@@ -96,6 +96,8 @@ export interface SentMessage {
 export interface FakePi {
 	pi: PiHost;
 	sent: SentMessage[];
+	/** The session's entries: what `appendEntry` wrote, after those given as `FakePiOptions.entries`. Pass it to `fakeHost({ entries })` to read them back. */
+	entries: unknown[];
 }
 
 export interface FakePiOptions {
@@ -103,15 +105,20 @@ export interface FakePiOptions {
 	version?: string;
 	/** The session's `pi.pi.settings`: empty and in memory by default. */
 	settings?: Settings;
+	/** The array `appendEntry` pushes to; a new one by default. */
+	entries?: unknown[];
 }
 
 export function fakePi(opts: FakePiOptions = {}): FakePi {
 	const sent: SentMessage[] = [];
+	const entries = opts.entries ?? [];
 	return {
 		sent,
+		entries,
 		pi: {
 			getThinkingLevel: () => ("thinking" in opts ? opts.thinking : "high"),
 			sendMessage: (message, options) => void sent.push({ message, options }),
+			appendEntry: (customType, data) => void entries.push({ type: "custom", customType, data }),
 			pi: { VERSION: opts.version ?? "18.12.3", settings: opts.settings ?? Settings.isolated() },
 		},
 	};

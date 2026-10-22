@@ -405,6 +405,7 @@ export function parseThreadDetail(json: unknown): ThreadDetail {
 		configOverlays: strings(o, "configOverlays"),
 		vm: vm ? { sandboxId: str(vm, "sandboxId"), state: str(vm, "state"), pid: numOrNull(vm, "pid") } : null,
 		turns: records(o, "turns").map(parseTurn),
+		readOnly: isRecord(o.policy) && o.policy.readOnly === true,
 	};
 }
 
@@ -468,6 +469,11 @@ export function parseRedeemed(json: unknown): Redeemed {
 export function parseClaimed(json: unknown): Extract<Claim, { status: "paired" }> {
 	const o = obj(json, "pairing claim");
 	return { status: "paired", device: deviceRef(o.device) ?? { id: "", name: "" }, token: str(o, "token") };
+}
+
+/** The service's settings (`GET /settings`), each with its current value; the other fields of an entry (type, doc, source) are not read. */
+export function parseSettings(json: unknown): { key: string; value: unknown }[] {
+	return records(obj(json, "settings"), "settings").map(s => ({ key: str(s, "key"), value: s.value }));
 }
 
 export function parseDevices(json: unknown): Device[] {

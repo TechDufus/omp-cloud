@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { notConfigured, readConfig, resolveConnection, statusLines, tilde, type CloudConfig, type ConfigInput } from "../src/config";
+import { cloudLines, knownClouds, notConfigured, readConfig, resolveConnection, statusLines, tilde, type CloudConfig, type ConfigInput } from "../src/config";
+import { writeConnectionFile, type PairedConnection } from "../src/connection";
 import { UserError } from "../src/types";
 import { cleanup, tmp } from "./helpers";
+import { deviceToken, makeCert, PAIRING_DEVICE } from "./tls";
 
 afterEach(async () => {
 	delete process.env.CLOUD_TEST_TOKEN;
@@ -49,6 +51,8 @@ describe("readConfig", () => {
 			url: undefined,
 			urlFrom: undefined,
 			token: undefined,
+			personalUrl: undefined,
+			personalToken: undefined,
 			tokenFrom: undefined,
 			ignored: [],
 			excludeExtensions: [],
@@ -360,7 +364,7 @@ describe("showing the configuration", () => {
 		const l = await layout();
 		const xdg = await tmp("omp-cloud-xdg-");
 		expect(notConfigured(await read(l))).toBe(
-			'☁ omp-cloud is not configured: set url and token in ~/.config/omp-cloud/config.yml (for example token: "!cat ~/.config/omp-cloud/service.token"), or OMP_CLOUD_URL and OMP_CLOUD_TOKEN; or pair this machine with /cloud connect <code>',
+			'☁ omp-cloud is not configured: set url and token in ~/.config/omp-cloud/config.yml (for example token: "!cat ~/.config/omp-cloud/service.token"), or OMP_CLOUD_URL and OMP_CLOUD_TOKEN; or pair this machine with /cloud connect <code | user@host>',
 		);
 		expect(notConfigured(await read(l, { env: { XDG_CONFIG_HOME: xdg } }))).toContain(`set url and token in ${join(xdg, "omp-cloud", "config.yml")} (`);
 	});
@@ -403,5 +407,106 @@ describe("resolveConnection", () => {
 		const message = await failure(resolveConnection(await read(l)));
 		expect(message).toContain("token (~/.config/omp-cloud/config.yml) resolved to nothing");
 		expect(message).not.toContain("secret-marker");
+	});
+});
+
+/** A valid paired connection written beside the personal file of `l`; its first address is `address`. */
+async function pair(l: Layout, address = "10.0.0.5:8443"): Promise<PairedConnection> {
+	const cert = await makeCert("server");
+	const connection: PairedConnection = {
+		server: { fingerprint: cert.fingerprint, certificate: cert.der.toString("base64"), addresses: [address] },
+		device: PAIRING_DEVICE,
+		token: deviceToken(),
+		pairedAt: "2026-10-20T00:00:00.000Z",
+	};
+	await writeConnectionFile(join(l.home, ".config", "omp-cloud", "connection.json"), connection);
+	return connection;
+}
+
+describe("the clouds of a machine and the session's choice", () => {
+	const BOTH = "url: https://personal.example\ntoken: ptok\n";
+	const ENV = { OMP_CLOUD_URL: "https://env.example/", OMP_CLOUD_TOKEN: "etok" };
+
+	test("knownClouds lists env, personal and paired in that order, each with where it is configured", async () => {
+		const l = await layout({ personal: BOTH });
+		const connection = await pair(l);
+		const known = await knownClouds(await read(l, { env: ENV }));
+		expect(known).toEqual([
+			{ source: "env", url: "https://env.example", where: "OMP_CLOUD_URL" },
+			{ source: "personal", url: "https://personal.example", where: "url in ~/.config/omp-cloud/config.yml" },
+			{ source: "paired", url: "https://10.0.0.5:8443", where: `paired device ${connection.device.name}, ~/.config/omp-cloud/connection.json` },
+		]);
+	});
+
+	test("a personal url the environment overrides is still a cloud of its own", async () => {
+		const l = await layout({ personal: BOTH });
+		expect((await knownClouds(await read(l))).map(c => c.source)).toEqual(["personal"]);
+		expect((await knownClouds(await read(l, { env: ENV }))).map(c => c.source)).toEqual(["env", "personal"]);
+	});
+
+	test("nothing configured lists no cloud", async () => {
+		expect(await knownClouds(await read(await layout()))).toEqual([]);
+	});
+
+	test("a connection file that does not validate is listed without a url, with the reason", async () => {
+		const l = await layout({ personal: BOTH });
+		await writeFile(join(l.home, ".config", "omp-cloud", "connection.json"), "{ not json");
+		const paired = (await knownClouds(await read(l))).find(c => c.source === "paired");
+		expect(paired?.url).toBe("");
+		expect(paired?.where).toStartWith("~/.config/omp-cloud/connection.json does not validate: ");
+	});
+
+	test("a chosen personal cloud uses the file's own url and token, whatever the environment says", async () => {
+		const l = await layout({ personal: BOTH });
+		const cfg = await read(l, { env: ENV });
+		expect(await resolveConnection(cfg)).toMatchObject({ url: "https://env.example", token: "etok", source: "env" });
+		expect(await resolveConnection(cfg, "personal")).toEqual({ url: "https://personal.example", token: "ptok", source: "personal", paired: undefined, ignoredToken: undefined });
+		expect(await resolveConnection(cfg, "env")).toMatchObject({ url: "https://env.example", token: "etok", source: "env" });
+	});
+
+	test("a chosen personal cloud without a token says where to set one", async () => {
+		const l = await layout({ personal: "url: https://personal.example\n" });
+		const cfg = await read(l, { env: { OMP_CLOUD_TOKEN: "etok" } });
+		expect(await failure(resolveConnection(cfg, "personal"))).toBe(
+			'☁ url in ~/.config/omp-cloud/config.yml has no token: set token there (for example token: "!cat ~/.config/omp-cloud/service.token")',
+		);
+	});
+
+	test("a chosen paired cloud is used whole even when a url is configured, and no ignored token is reported", async () => {
+		const l = await layout({ personal: BOTH });
+		const connection = await pair(l);
+		const conn = await resolveConnection(await read(l), "paired");
+		expect(conn).toMatchObject({ url: "https://10.0.0.5:8443", token: connection.token, source: "paired", ignoredToken: undefined });
+	});
+
+	test("a chosen source this machine no longer has is an error that names the way out", async () => {
+		const l = await layout({ personal: BOTH });
+		const cfg = await read(l);
+		for (const gone of ["env", "paired"] as const) {
+			expect(await failure(resolveConnection(cfg, gone))).toBe(
+				`☁ omp-cloud is not configured for this session: it uses ${gone}, which this machine no longer has (/cloud use picks another, /cloud connect pairs a server)`,
+			);
+		}
+		expect(await failure(resolveConnection(await read(await layout()), "personal"))).toContain("it uses personal, which this machine no longer has");
+	});
+
+	test("cloudLines: none configured; the default and why; a choice; the other clouds", async () => {
+		expect(cloudLines(await read(await layout()), [], undefined, false)).toEqual(["cloud: none configured on this machine"]);
+
+		const l = await layout({ personal: BOTH });
+		await pair(l);
+		const cfg = await read(l);
+		const known = await knownClouds(cfg);
+		const others = "other clouds: paired https://10.0.0.5:8443 (paired device laptop-2, ~/.config/omp-cloud/connection.json)";
+		expect(cloudLines(cfg, known, "personal", false)).toEqual(["cloud: personal · https://personal.example · the default (url in ~/.config/omp-cloud/config.yml)", others]);
+		expect(cloudLines(cfg, known, "personal", true)[0]).toBe("cloud: personal · https://personal.example · this session's choice");
+
+		const envCfg = await read(l, { env: ENV });
+		expect(cloudLines(envCfg, await knownClouds(envCfg), "env", false)[0]).toBe("cloud: env · https://env.example · the default (OMP_CLOUD_URL is set)");
+
+		const only = await layout();
+		await pair(only);
+		const onlyCfg = await read(only);
+		expect(cloudLines(onlyCfg, await knownClouds(onlyCfg), "paired", false)).toEqual(["cloud: paired · https://10.0.0.5:8443 · the default (the paired server; no url configured)"]);
 	});
 });

@@ -31,13 +31,14 @@ import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry
 import * as sessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CloudClient } from "./api";
-import { AGENT_IDS, cloudFence, threadBranch } from "./cards";
+import { AGENT_IDS, threadBranch } from "./cards";
 import { cloudJobId } from "./cloud-job";
 import { CloudError, cloudErrorText } from "./errors";
 import { IRC_OUT_KIND } from "./events";
-import { clip } from "./format";
+import { clip, spanBetween } from "./format";
 import { isRecord } from "./guards";
 import { readArchiveJournal } from "./session-sync";
+import { taskResultText } from "./task-result";
 import type { IrcReceiptKind, ThreadDetail, ThreadEvent, ThreadMetrics, ThreadResult, ThreadTurn } from "./types";
 import { parseIrcPayload } from "./wire";
 
@@ -51,8 +52,6 @@ export const IRC_CAPABILITY = "threads.irc";
  */
 export const IRC_CUT_PLACEHOLDER = "history://<the sending agent's id>";
 
-/** Longest reply the relay and the job's structured data carry; the full reply is `agent://<id>`. */
-const RELAY_REPLY_MAX = 8000;
 /** Lines kept of one running turn's events for `history://`. */
 const LOG_LINES = 200;
 /** How long a message that queued a turn counts the agent as running before the thread's own detail says so. */
@@ -140,6 +139,12 @@ export function ircIdsFromEntries(entries: readonly unknown[]): Set<string> {
 	return out;
 }
 
+/** Whether the session's last `mode_change` entry put it in plan mode (omp's interactive mode records `plan`, `plan_paused` and `none`). */
+export function planModeFromEntries(entries: readonly unknown[]): boolean {
+	const last = entries.findLast(e => isRecord(e) && e.type === "mode_change");
+	return isRecord(last) && last.mode === "plan";
+}
+
 const isFinished = (t: ThreadTurn): boolean => t.state === "done" || t.state === "failed" || t.state === "cancelled";
 const isLive = (t: ThreadTurn): boolean => t.state === "queued" || t.state === "running";
 
@@ -149,12 +154,19 @@ function sender(from: string): string {
 	return clean === "" ? MAIN_AGENT_ID : clean;
 }
 
-/** The IRC message a finished turn's reply becomes. */
+/** The IRC message a finished turn's reply becomes: a `<task-result>`, as a woken subagent's reply reaches its parent. */
 function relayBody(id: string, detail: ThreadDetail, turn: ThreadTurn): string {
-	const head = `Turn ${turn.id} ${turn.state === "cancelled" ? "was stopped" : turn.state}${turn.title ? `: ${turn.title}` : ""}`;
-	const text = turn.state === "done" ? turn.reply : turn.error || turn.reply;
-	const body = text.trim() === "" ? [] : [text.length > RELAY_REPLY_MAX ? `${text.slice(0, RELAY_REPLY_MAX)}…` : text];
-	return [head, ...cloudFence(detail.id, turn.id, body), `Full result: agent://${id}`].join("\n");
+	return taskResultText({
+		id,
+		status: turn.state === "done" ? "completed" : turn.state === "failed" ? "failed" : "cancelled",
+		duration: spanBetween(turn.startedAt, turn.completedAt),
+		reply: turn.reply,
+		error: turn.state === "done" ? "" : turn.error,
+		thread: detail.id,
+		turn: turn.id,
+		result: detail.result,
+		pr: detail.pr?.url ?? "",
+	});
 }
 
 /**
@@ -214,6 +226,8 @@ interface SessionHost {
 	thread: string;
 	id: string;
 	deliver(msg: IrcMessage): Promise<IrcReceiptKind>;
+	/** Throws when the plan-mode rules refuse a message to this agent. */
+	checkIrc(): void;
 	stop(): Promise<void>;
 	messages(): unknown[];
 	detail(): ThreadDetail;
@@ -277,6 +291,7 @@ export class CloudSession {
 
 	/** omp's IRC delivery: the message goes to the service; the receipt is the service's (`injected` into the running turn, `woken`, `revived`). A failure throws, which the bus turns into a `failed` receipt. */
 	async deliverIrcMessage(msg: IrcMessage): Promise<IrcReceiptKind> {
+		this.#host.checkIrc();
 		return this.#host.deliver(msg);
 	}
 
@@ -525,6 +540,24 @@ export class CloudAgents {
 		return isRecord(session) && session.isSessionTransitioning === true;
 	}
 
+	/** Whether the main agent's session is in plan mode, as its own state says; undefined when the session has no such state (an older omp). */
+	ownerPlanning(): boolean | undefined {
+		const session: unknown = this.#registry()?.get(MAIN_AGENT_ID)?.session;
+		if (!isRecord(session) || typeof session.getPlanModeState !== "function") return undefined;
+		const state: unknown = session.getPlanModeState();
+		return isRecord(state) && state.enabled === true;
+	}
+
+	/** Whether the session is in plan mode: omp's own state, else the last `mode_change` entry of the session. */
+	planning(): boolean {
+		return this.ownerPlanning() ?? planModeFromEntries(this.#opts.entries());
+	}
+
+	/** Plan mode: a message could wake an agent that is not read-only, and its next turn pushes; only read-only agents take messages. */
+	#checkIrc(a: Agent): void {
+		if (!a.detail.readOnly && this.planning()) throw new Error(`plan mode: ${a.id} is not read-only, so a message could make it change and push work; message it after the plan is approved`);
+	}
+
 	/** The `cloud` tool's `send`: the message the way `write agent://<id>` delivers it (omp's IRC, from the main agent). Throws what the bus would report as a failure. */
 	async send(thread: string, text: string, from: string = MAIN_AGENT_ID): Promise<{ receipt: IrcReceiptKind; turn: number | null }> {
 		const a = this.#agents.get(thread);
@@ -615,6 +648,7 @@ export class CloudAgents {
 					return a.id;
 				},
 				deliver: msg => this.#deliver(a, msg),
+				checkIrc: () => this.#checkIrc(a),
 				stop: () => this.#stop(a),
 				messages: () => this.#messages(a),
 				detail: () => a.detail,

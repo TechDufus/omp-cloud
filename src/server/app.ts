@@ -132,6 +132,8 @@ const CAPABILITIES: readonly string[] = [
 	"mcp.proxy",
 	"threads.preview",
 	"threads.setup",
+	"threads.readonly",
+	"threads.subagent",
 ];
 
 /** A message body: its text plus JSON framing. */

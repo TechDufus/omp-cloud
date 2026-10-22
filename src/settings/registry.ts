@@ -163,6 +163,8 @@ export interface SettingValues {
 	"policy.webSearch": boolean;
 	/** `false` turns off the agent's browser. */
 	"policy.browser": boolean;
+	/** `true`: results are never pushed or opened as a pull request, the VM gets no MCP servers, and its agent is told to work read-only. */
+	"policy.readOnly": boolean;
 	/** The destinations the VM may reach besides the service; empty leaves the network open. */
 	"policy.egress": readonly string[];
 	/** The most one turn may cost, in USD; 0 is no cap. */
@@ -364,6 +366,13 @@ export const REGISTRY: Registry = {
 		default: true,
 		doc: "Whether the agent may drive a browser from its eval tool.",
 		parse: (raw) => toggle("policy.browser", raw),
+	},
+	"policy.readOnly": {
+		key: "policy.readOnly",
+		type: "bool",
+		default: false,
+		doc: "Whether cloud agents work read-only: their results are never pushed or opened as a pull request, they get no MCP servers, and they are told to change nothing. A thread may turn it on (the plugin does for every delegation made in plan mode), never off.",
+		parse: (raw) => toggle("policy.readOnly", raw),
 	},
 	"policy.egress": {
 		key: "policy.egress",

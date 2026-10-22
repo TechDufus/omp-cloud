@@ -4,6 +4,8 @@ import type { NativeNode } from "@oh-my-pi/pi-tui";
 import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { CallOptions } from "../src/api";
+import type { CloudsView, ConnectionSource } from "../src/config";
+import type { ConnectOutcome } from "../src/connect";
 import { CloudError } from "../src/errors";
 import type { LaunchFailure } from "../src/launch";
 import {
@@ -35,7 +37,7 @@ import { fakeHost } from "./fakes";
 const SESSION = "sess-1";
 const ID = "k3x9fa2m7q1z";
 const OTHER = "k3x9fbq8w4e5";
-const CAPS = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta"];
+const CAPS = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.readonly"];
 
 function skew(capability: string): CloudError {
 	return new CloudError({ code: "version_skew", message: `the cloud is service 0.3.0 (api 1) and does not support ${capability}`, retriable: false, outcomeKnown: true, hint: "update the omp-cloud service (`omp-cloud update` for an installed service; `git pull`, then restart it, for a checkout)" });
@@ -65,6 +67,11 @@ interface World {
 	stopFails: Set<string>;
 	deleted: string[];
 	answered: { thread: string; turn: number; question: number; body: unknown }[];
+	/** What `GET /settings` answers; `settingsError` makes it fail instead. */
+	settings: { key: string; value: unknown }[];
+	settingsError: CloudError | undefined;
+	/** What the host's cloud lines say: the clouds this machine knows and the one the session uses. */
+	clouds: CloudsView;
 }
 
 function world(): World {
@@ -82,6 +89,9 @@ function world(): World {
 		stopFails: new Set(),
 		deleted: [],
 		answered: [],
+		settings: [],
+		settingsError: undefined,
+		clouds: { known: [], active: undefined, chosen: false, lines: [] },
 	};
 	w.threads.set(ID, detail({ id: ID, title: "Add Greet", phase: "idle", origin: "tool", session: SESSION, turns: [turn(1, { reply: "Done." })] }));
 	return w;
@@ -101,6 +111,11 @@ function fakeClient(w: World): ToolClient {
 	};
 	return {
 		whoami: async () => w.who,
+		settings: async () => {
+			log("settings");
+			if (w.settingsError) throw w.settingsError;
+			return w.settings;
+		},
 		requireCapability: async (capability: string) => {
 			log("requireCapability", capability);
 			if (!w.who.capabilities.includes(capability)) throw skew(capability);
@@ -174,6 +189,11 @@ interface Rig {
 	/** What the tool asked `stopPreviews` to end, and how many the fake reports running. */
 	previewStops: { thread: string | undefined; port: number | undefined }[];
 	previewRunning: number;
+	/** Whether the host is in plan mode. */
+	planning: boolean;
+	/** The clouds the model asked to use, and the targets it asked to connect. */
+	uses: ConnectionSource[];
+	connects: string[];
 	behaviour: {
 		delegate: (request: DelegateRequest, run: DelegateRun) => DelegateResult;
 		pull: (thread: string, request: PullRequest) => PullResult & { thread: string };
@@ -203,6 +223,9 @@ function rig(): Rig {
 		previews: [],
 		previewStops: [],
 		previewRunning: 0,
+		planning: false,
+		uses: [],
+		connects: [],
 		agentReads: [],
 		behaviour: {
 			delegate: () => ({ defaultWorkspace: "repo", outcomes: [] }),
@@ -264,6 +287,16 @@ function rig(): Rig {
 		stopPreviews: (thread, port) => {
 			r.previewStops.push({ thread, port });
 			return r.previewRunning;
+		},
+		planning: () => r.planning,
+		clouds: async () => w.clouds,
+		useCloud: async (_ctx, source) => {
+			r.uses.push(source);
+			return w.clouds;
+		},
+		connectCloud: async (_ctx, target): Promise<ConnectOutcome> => {
+			r.connects.push(target);
+			return { lines: ["paired"], using: true, server: "omp.example", device: "laptop" };
 		},
 	};
 	return r;
@@ -344,7 +377,8 @@ describe("info", () => {
 		expect(t).toContain("models: anthropic/claude-sonnet-5-5, openai-codex/gpt-5");
 		expect(t).toContain("limits: message 32768 bytes · answer 4000 bytes");
 		expect(t).toContain("spend: $1.50 today, day cap $10.00");
-		expect(t).toContain("this session's model: google/gemini-3 (the cloud cannot run it yet");
+		expect(t).toContain("this session's model: google/gemini-3 (not served: delegations run the default model anthropic/claude-sonnet-5-5)");
+		expect(t).toContain("default model: anthropic/claude-sonnet-5-5 (runs when a delegation names no model and this session's model is not served)");
 		expect(t).toContain("vms: 1 running, 2 paused");
 		expect(res.details).toMatchObject({ op: "info", caller: { kind: "owner", name: "dev" }, models: ["anthropic/claude-sonnet-5-5", "openai-codex/gpt-5"], spend: { todayUSD: 1.5, dayCapUSD: 10 } });
 	});
@@ -362,15 +396,79 @@ describe("info", () => {
 	test("a device is told the owner logs the server in on the server machine; the owner connection names /cloud login", async () => {
 		const r = rig();
 		r.host = fakeHost({ model: { provider: "google", id: "gemini-3" } }).host;
-		r.w.who = whoami({ device: { id: "d1", name: "laptop" }, models: [], modelPatterns: [] });
+		r.w.who = whoami({ device: { id: "d1", name: "laptop" }, models: [], modelPatterns: [], defaultModel: "" });
 		const device = text(await call(r, { op: "info" }));
-		expect(device).toContain("models: none yet (the owner logs the server in with `omp-cloud login <provider>` on the server machine)");
-		expect(device).toContain("the cloud cannot run it yet: delegate with another model, or the owner logs the server in with `omp-cloud login <provider>` on the server machine");
+		expect(device).toContain("models: none yet (ask the user to run omp-cloud login <provider> on the server machine)");
+		expect(device).toContain("this session's model: google/gemini-3 (not served: pass model with one the cloud serves, or ask the user to run omp-cloud login <provider> on the server machine)");
 		expect(device).not.toContain("/cloud login");
 
-		r.w.who = whoami({ models: [], modelPatterns: [] });
+		r.w.who = whoami({ models: [], modelPatterns: [], defaultModel: "" });
 		const owner = text(await call(r, { op: "info" }));
-		expect(owner).toContain("models: none yet (the owner can run /cloud login <provider>)");
+		expect(owner).toContain("models: none yet (ask the user to run /cloud login <provider>)");
+		expect(owner).toContain("this session's model: google/gemini-3 (not served: pass model with one the cloud serves, or ask the user to run /cloud login <provider>)");
+	});
+
+	test("a session model the cloud serves is served", async () => {
+		const r = rig();
+		r.host = fakeHost({ model: { provider: "anthropic", id: "claude-sonnet-5-5" } }).host;
+		expect(text(await call(r, { op: "info" }))).toContain("this session's model: anthropic/claude-sonnet-5-5 (served)");
+	});
+
+	test("the lines start with the clouds this machine knows, and the details carry them", async () => {
+		const r = rig();
+		r.w.clouds = { known: [{ source: "env", url: "http://127.0.0.1:1", where: "OMP_CLOUD_URL" }], active: "env", chosen: true, lines: ["cloud: env · http://127.0.0.1:1 · this session's choice"] };
+		const res = await call(r, { op: "info" });
+		expect(text(res).split("\n")[1]).toBe("cloud: env · http://127.0.0.1:1 · this session's choice");
+		expect(res.details).toMatchObject({ op: "info", clouds: r.w.clouds.known, active: "env", chosen: true });
+	});
+
+	test("what an agent may do, its toolchain and what happens to its work come from the service's settings", async () => {
+		const r = rig();
+		r.w.who = whoami({ capabilities: CAPS, gitHosts: ["github.com"] });
+		r.w.settings = [
+			{ key: "git.push", value: "auto" },
+			{ key: "git.pr", value: "draft" },
+			{ key: "git.sign", value: "off" },
+			{ key: "vm.packages", value: ["nodejs", "python3"] },
+		];
+		const res = await call(r, { op: "info" });
+		const t = text(res);
+		expect(t).toContain("agents may: fetch yes · web search yes · browser yes · egress open (a delegation's policy can only tighten these)");
+		expect(t).toContain("agent toolchain: nodejs, python3 (vm.packages; Debian with git, curl, jq and sudo)");
+		expect(t).toContain("agent results: pushed after every turn (git.push auto) · pull requests draft after a push to a github.com repository with the GitHub App · signing off · push credentials for github.com");
+		expect(res.details).toMatchObject({ op: "info", planning: false, agents: { fetch: true, egress: [], packages: ["nodejs", "python3"], push: "auto", pr: "draft", sign: "off", readOnly: false } });
+
+		r.w.settings = [
+			{ key: "policy.egress", value: ["a.example", "b.example"] },
+			{ key: "policy.fetch", value: false },
+			{ key: "policy.readOnly", value: true },
+			{ key: "git.push", value: "never" },
+		];
+		const narrowed = text(await call(r, { op: "info" }));
+		expect(narrowed).toContain("agents may: fetch no · web search yes · browser yes · egress 2 destinations · read-only (a delegation's policy can only tighten these)");
+		expect(narrowed).toContain("agent results: kept for the user to pull (git.push never) · push credentials for github.com");
+		expect(narrowed).not.toContain("agent toolchain:");
+	});
+
+	test("when the settings cannot be read the agents lines give way to one that says so", async () => {
+		const r = rig();
+		r.w.settingsError = new CloudError({ code: "forbidden", status: 403, message: "no", retriable: false, outcomeKnown: true });
+		const res = await call(r, { op: "info" });
+		expect(res.isError).toBeUndefined();
+		const t = text(res);
+		expect(t).toContain("agents: not reported (forbidden)");
+		expect(t).not.toContain("agents may:");
+		expect(res.details).toMatchObject({ op: "info", agents: null });
+	});
+
+	test("plan mode shows as a line and in the details", async () => {
+		const r = rig();
+		r.planning = true;
+		const res = await call(r, { op: "info" });
+		expect(text(res)).toContain("plan mode: on: every delegation runs read-only; pull, and messages to agents that are not read-only, are refused until the plan is approved");
+		expect(res.details).toMatchObject({ op: "info", planning: true });
+		r.planning = false;
+		expect(text(await call(r, { op: "info" }))).not.toContain("plan mode:");
 	});
 
 	test("the update state is one line: ready for the owner names the command, for a device it names the owner, a service that reports none says nothing", async () => {
@@ -458,7 +556,7 @@ describe("status", () => {
 		expect(await state()).toStartWith("following: no (this session is not following it");
 		r.followed.set(ID, "tool");
 		r.jobs.set(ID, "FixGreeting");
-		expect(await state()).toBe("following: wake (its results and questions arrive here as [cloud] messages); job FixGreeting");
+		expect(await state()).toBe("following: wake (its results arrive here like a subagent's; [cloud] messages bring approvals and notices); job FixGreeting");
 		r.followed.set(ID, "user");
 		expect(await state()).toStartWith("following: silent (its results go to the user's tray, not to you");
 		r.stale.add(ID);
@@ -734,8 +832,8 @@ describe("send", () => {
 		const t = text(res);
 		expect(t).toContain("delivered: woken; turn 2 queued");
 		expect(t).not.toContain("turn: 2 queued");
-		expect(t).toContain("following: wake (its results and questions arrive here as [cloud] messages)");
-		expect(t).toContain("next: the reply arrives as a [cloud] message;");
+		expect(t).toContain("following: wake (its results arrive here like a subagent's; [cloud] messages bring approvals and notices)");
+		expect(t).toContain("next: its reply comes back to you as a message from the agent, like a subagent you woke; omp's wait returns when it does");
 		expect(t).not.toContain("cancelled:");
 		expect(res.details).toMatchObject({ op: "send", thread: ID, turn: 2, receipt: "woken", mode: "queue", interrupted: false, cancelled: [], following: "wake" });
 	});
@@ -755,6 +853,7 @@ describe("send", () => {
 		expect(first(res)).toBe(`cloud send: ok ${ID} injected`);
 		const t = text(res);
 		expect(t).toContain("delivered: into the running turn at its next step (injected)");
+		expect(t).toContain("next: it reads the message at its next step; the turn's result arrives as usual");
 		expect(t).not.toContain("queued");
 		expect(res.details).toMatchObject({ op: "send", thread: ID, turn: null, receipt: "injected", mode: "queue", interrupted: false, cancelled: [] });
 		expect(r.followed.get(ID)).toBe("tool");
@@ -782,6 +881,7 @@ describe("send", () => {
 		expect(text(res)).toContain("cancelled: turns 4, 5 (queued turns dropped by the interrupt");
 		expect(res.details).toMatchObject({ op: "send", turn: 3, receipt: null, interrupted: true, cancelled: [4, 5] });
 		expect(text(res)).toContain("job: AddGreet");
+		expect(text(res)).toContain("next: turn 3's result arrives like a subagent's; omp's wait returns when it does");
 
 		r.w.who = whoami({ capabilities: ["threads.paging"] });
 		expect(errorOf(await call(r, { op: "send", thread: ID, text: "x", mode: "interrupt" })).code).toBe("version_skew");
@@ -821,6 +921,27 @@ describe("send", () => {
 		const res = await call(r, { op: "send", thread: ID, text: "x", mode: "interrupt" });
 		expect(errorOf(res).code).toBe("ambiguous_outcome");
 		expect(r.followed.size).toBe(0);
+	});
+
+	test("in plan mode a message goes only to an agent that is read-only: a writable one is refused, nothing is delivered, and nothing is adopted", async () => {
+		const r = rig();
+		r.planning = true;
+		r.w.threads.set(ID, detail({ id: ID, origin: "tool", readOnly: false, turns: [turn(1)] }));
+		const refused = await call(r, { op: "send", thread: ID, text: "now push it" });
+		expect(errorOf(refused)).toMatchObject({ code: "forbidden", message: `plan mode: ${ID} is not read-only, so a message could make it change and push work` });
+		expect(r.ircs).toEqual([]);
+		expect(calls(r, "sendMessage")).toEqual([]);
+		expect(r.followed.size).toBe(0);
+		expect(errorOf(await call(r, { op: "send", thread: ID, text: "now push it", mode: "interrupt" })).code).toBe("forbidden");
+		expect(calls(r, "sendMessage")).toEqual([]);
+
+		r.w.threads.set(ID, detail({ id: ID, origin: "tool", readOnly: true, turns: [turn(1)] }));
+		expect(first(await call(r, { op: "send", thread: ID, text: "look at the tests too" }))).toStartWith("cloud send: ok");
+		expect(r.ircs).toHaveLength(1);
+
+		r.planning = false;
+		r.w.threads.set(ID, detail({ id: ID, origin: "tool", readOnly: false, turns: [turn(1)] }));
+		expect(first(await call(r, { op: "send", thread: ID, text: "now push it" }))).toStartWith("cloud send: ok");
 	});
 });
 
@@ -1175,14 +1296,15 @@ describe("delegate", () => {
 			key: `key-${index}`,
 			warnings: [],
 			job: undefined,
-			summary: { repo: { name: "app", baseRef: "main", localBranch: "main" }, scratch: false, base: "", commits: 3, wip: { files: 2, insertions: 5, deletions: 1 }, untracked: [], untrackedTotal: 0, withheld: [], secrets: { files: 0, env: 0 }, conversation: "included", setupBytes: 10, model: "anthropic/claude-sonnet-5-5", thinking: "high", ompVersion: "18.12.3", overlays: [], policy: [] },
+			agent: undefined,
+			summary: { repo: { name: "app", baseRef: "main", localBranch: "main" }, scratch: false, base: "", commits: 3, wip: { files: 2, insertions: 5, deletions: 1 }, untracked: [], untrackedTotal: 0, withheld: [], secrets: { files: 0, env: 0 }, conversation: "none", setupBytes: 10, model: "anthropic/claude-sonnet-5-5", thinking: "high", ompVersion: "18.12.3", overlays: [], mcp: [], setup: null, policy: [], readOnly: false },
 			...over,
 		}) as DelegateResult["outcomes"][number];
 
 	test("one task: starts a thread; the result names thread, workspace, model, branch, ref and what to do next", async () => {
 		const r = rig();
 		r.jobs.set(ID, "Greet");
-		r.behaviour.delegate = () => ({ defaultWorkspace: "repo", outcomes: [started(0, ID, { job: "Greet" })] });
+		r.behaviour.delegate = () => ({ defaultWorkspace: "repo", outcomes: [started(0, ID, { job: "Greet", agent: "Greet" })] });
 		const updates: string[] = [];
 		const res = await call(r, { op: "delegate", task: "port the build", ref: "bazel", name: "Bazel port", model: "openai-codex/gpt-5:high", policy: { fetch: false }, wip: false }, { onUpdate: t => updates.push(t) });
 		expect(r.delegates[0]?.request).toEqual({ tasks: [{ task: "port the build", name: "Bazel port", ref: "bazel", model: "openai-codex/gpt-5:high", policy: { fetch: false }, wip: false }], context: undefined });
@@ -1190,14 +1312,14 @@ describe("delegate", () => {
 		expect(first(res)).toBe(`cloud delegate: ok started ${ID}`);
 		const t = text(res);
 		expect(t).toContain("workspace: repo by default (this directory is inside a git repository)");
-		expect(t).toContain(`task 1: thread Greet · ${ID} started`);
+		expect(t).toContain(`task 1: agent \`Greet\` (thread ${ID}) started`);
 		expect(t).toContain("  workspace: repo app (full history, 2 uncommitted files)");
 		expect(t).toContain("  model: anthropic/claude-sonnet-5-5 · thinking high");
 		expect(t).toContain(`  branch: omp-cloud/${ID}`);
 		expect(t).toContain("  ref: bazel");
-		expect(t).toContain("  job: Greet");
-		expect(t).toContain("next: results and questions arrive as [cloud] messages; do not poll. cloud wait blocks until they settle");
-		expect(res.details).toMatchObject({ op: "delegate", defaultWorkspace: "repo", outcomes: [{ ok: true, index: 0, thread: ID, job: "Greet", ref: "bazel", replayed: false, workspace: "repo" }] });
+		expect(t).not.toContain("  job:");
+		expect(t).toContain("next: results auto-deliver as <task-result>; NEVER poll. Completely blocked? Call wait. agent://<id> reads a result; write agent://<id> messages an agent");
+		expect(res.details).toMatchObject({ op: "delegate", defaultWorkspace: "repo", outcomes: [{ ok: true, index: 0, thread: ID, job: "Greet", agent: "Greet", ref: "bazel", replayed: false, workspace: "repo", readOnly: false }] });
 		expect(updates).toEqual([]);
 	});
 
@@ -1308,6 +1430,172 @@ describe("delegate", () => {
 		await call(r, { op: "delegate", task: "x" }, { onUpdate: t => updates.push(t) });
 		expect(updates).toEqual(["packing the repository, conversation and setup for all tasks", "uploading task 2: the service is starting; retrying in 0.5s (attempt 2 of 4)"]);
 	});
+	test("the conversation line says what shipped: a fork is named, a too-large one is said, none says nothing", async () => {
+		const r = rig();
+		r.behaviour.delegate = () => ({
+			defaultWorkspace: "repo",
+			outcomes: [
+				started(0, ID, { summary: { ...(started(0, ID) as DelegatedThread).summary, conversation: "included" } }),
+				started(1, OTHER, { summary: { ...(started(0, ID) as DelegatedThread).summary, conversation: "too-large" } }),
+				started(2, "k3x9fcc1d2e3", { summary: { ...(started(0, ID) as DelegatedThread).summary, conversation: "none" } }),
+			],
+		});
+		const lines = text(await call(r, { op: "delegate", tasks: [{ task: "a" }, { task: "b" }, { task: "c" }] })).split("\n");
+		expect(lines.filter(l => l.startsWith("  conversation:"))).toEqual(["  conversation: forked from this session", "  conversation: too large, not shipped"]);
+	});
+
+	test("the MCP servers that shipped are named once for the call, with how each is reached", async () => {
+		const r = rig();
+		const mcp = [{ name: "wiki", via: "service" as const }, { name: "probe", via: "vm" as const }];
+		const base = (started(0, ID) as DelegatedThread).summary;
+		r.behaviour.delegate = () => ({ defaultWorkspace: "repo", outcomes: [started(0, ID, { summary: { ...base, mcp: [mcp[0] as (typeof mcp)[number]] } }), started(1, OTHER, { summary: { ...base, mcp } })] });
+		const t = text(await call(r, { op: "delegate", tasks: [{ task: "a" }, { task: "b" }] }));
+		expect(t.split("\n").filter(l => l.startsWith("mcp servers:"))).toEqual(["mcp servers: wiki (through the service)"]);
+
+		r.behaviour.delegate = () => ({ defaultWorkspace: "repo", outcomes: [started(0, ID)] });
+		expect(text(await call(r, { op: "delegate", task: "a" }))).not.toContain("mcp servers:");
+	});
+
+	test("a replayed agent is found again, and a task the service ran without an agent id keeps today's line", async () => {
+		const r = rig();
+		r.behaviour.delegate = () => ({ defaultWorkspace: "repo", outcomes: [started(0, ID, { replayed: true, agent: "Greet" })] });
+		expect(text(await call(r, { op: "delegate", task: "a", ref: "again" }))).toContain(`task 1: agent \`Greet\` (thread ${ID}) found again (replayed)`);
+		r.behaviour.delegate = () => ({ defaultWorkspace: "repo", outcomes: [started(0, ID)] });
+		expect(text(await call(r, { op: "delegate", task: "a" }))).toContain(`task 1: thread Greet · ${ID} started`);
+	});
+});
+
+describe("plan mode", () => {
+	const base = (): DelegatedThread["summary"] => (started() as DelegatedThread).summary;
+	function started(): DelegatedThread {
+		return {
+			ok: true,
+			index: 0,
+			response: summary({ id: ID, name: "Greet", title: "Add greet", warnings: [] }),
+			replayed: false,
+			workspace: "repo",
+			key: "k",
+			warnings: [],
+			job: "Greet",
+			agent: "Greet",
+			summary: { repo: { name: "app", baseRef: "main", localBranch: "main" }, scratch: false, base: "", commits: 0, wip: { files: 0, insertions: 0, deletions: 0 }, untracked: [], untrackedTotal: 0, withheld: [], secrets: { files: 0, env: 0 }, conversation: "none", setupBytes: 0, model: "anthropic/claude-sonnet-5-5", thinking: "", ompVersion: "18.12.3", overlays: [], mcp: [], setup: null, policy: [], readOnly: false },
+		};
+	}
+
+	test("every delegation is read-only, an explicit `false` included, and the output says so", async () => {
+		const r = rig();
+		r.planning = true;
+		r.behaviour.delegate = () => ({ defaultWorkspace: "repo", outcomes: [{ ...started(), summary: { ...base(), readOnly: true } }] });
+		const res = await call(r, { op: "delegate", tasks: [{ task: "a" }, { task: "b", policy: { readOnly: false, fetch: false } }] });
+		expect(r.delegates[0]?.request.tasks.map(t => t.policy)).toEqual([{ readOnly: true }, { readOnly: true, fetch: false }]);
+		expect(calls(r, "requireCapability")).toContainEqual(["threads.readonly"]);
+		expect(text(res)).toContain("  read-only: nothing it changes is pushed, and it has no MCP servers");
+		expect(res.details).toMatchObject({ outcomes: [{ ok: true, readOnly: true }] });
+	});
+
+	test("outside plan mode the policy is the model's own and no read-only capability is asked for", async () => {
+		const r = rig();
+		r.behaviour.delegate = () => ({ defaultWorkspace: "repo", outcomes: [started()] });
+		const res = await call(r, { op: "delegate", task: "a", policy: { fetch: false } });
+		expect(r.delegates[0]?.request.tasks[0]?.policy).toEqual({ fetch: false });
+		expect(calls(r, "requireCapability")).not.toContainEqual(["threads.readonly"]);
+		expect(text(res)).not.toContain("read-only:");
+	});
+
+	test("a service that cannot run read-only agents is said to be too old, and nothing is delegated", async () => {
+		const r = rig();
+		r.planning = true;
+		r.w.who = whoami({ capabilities: CAPS.filter(c => c !== "threads.readonly") });
+		const res = await call(r, { op: "delegate", task: "a" });
+		expect(first(res)).toStartWith("cloud delegate: error version_skew: plan mode delegates read-only cloud agents, and this service cannot run them");
+		expect(text(res)).toContain("ask the user to update the service (/cloud update), or delegate after the plan is approved");
+		expect(r.delegates).toEqual([]);
+	});
+
+	test("pull is refused, nothing is pulled, and the read ops still work", async () => {
+		const r = rig();
+		r.planning = true;
+		const res = await call(r, { op: "pull", thread: ID });
+		expect(first(res)).toStartWith("cloud pull: error forbidden: plan mode: pull changes this repository");
+		expect(r.pulls).toEqual([]);
+		expect(first(await call(r, { op: "diff", thread: ID, stat: true }))).toStartWith("cloud diff: ok");
+		r.planning = false;
+		expect(first(await call(r, { op: "pull", thread: ID }))).toStartWith("cloud pull: ok");
+	});
+
+	test("a preview still starts", async () => {
+		const r = rig();
+		r.planning = true;
+		r.w.who = whoami({ capabilities: [...CAPS, "threads.preview"] });
+		expect(first(await call(r, { op: "preview", thread: ID, port: 3000 }))).toStartWith("cloud preview: ok");
+		expect(r.previews).toEqual([{ thread: ID, port: 3000 }]);
+	});
+});
+
+describe("use and connect", () => {
+	test("use hands the cloud to the host and answers with the clouds as the host lists them", async () => {
+		const r = rig();
+		r.w.clouds = { known: [{ source: "personal", url: "http://10.0.0.1:8080", where: "url in ~/.config/omp-cloud/config.yml" }], active: "personal", chosen: true, lines: ["cloud: personal · http://10.0.0.1:8080 · this session's choice"] };
+		const res = await call(r, { op: "use", cloud: "personal" });
+		expect(r.uses).toEqual(["personal"]);
+		expect(first(res)).toBe("cloud use: ok personal");
+		expect(text(res)).toContain("cloud: personal · http://10.0.0.1:8080 · this session's choice");
+		expect(res.details).toEqual({ op: "use", cloud: "personal", url: "http://10.0.0.1:8080" });
+	});
+
+	test("use without a cloud is invalid, and the host's refusal is the result's error", async () => {
+		const r = rig();
+		expect(errorOf(await call(r, { op: "use" }))).toMatchObject({ code: "invalid" });
+		expect(r.uses).toEqual([]);
+		r.cloud.useCloud = async () => {
+			throw new CloudError({ code: "conflict", message: "this session already works with 1 cloud thread(s) (abc) on env; start a new omp session to use paired", retriable: false, outcomeKnown: true });
+		};
+		const refused = await call(r, { op: "use", cloud: "paired" });
+		expect(first(refused)).toStartWith("cloud use: error conflict: this session already works with 1 cloud thread(s)");
+	});
+
+	test("use and connect need no connection: they run when the session has none", async () => {
+		const r = rig();
+		r.cloud.toolSession = async () => {
+			throw new UserError("☁ omp-cloud is not configured: set url and token");
+		};
+		expect(first(await call(r, { op: "use", cloud: "env" }))).toBe("cloud use: ok env");
+		expect(first(await call(r, { op: "connect", target: "me@omp.example" }))).toBe("cloud connect: ok paired with omp.example");
+	});
+
+	test("connect passes the target and the abort signal to the host and reports what it paired", async () => {
+		const r = rig();
+		const ctrl = new AbortController();
+		const connect = r.cloud.connectCloud;
+		let signal: AbortSignal | undefined;
+		r.cloud.connectCloud = (ctx, target, s) => {
+			signal = s;
+			return connect(ctx, target, s);
+		};
+		const res = await call(r, { op: "connect", target: "  me@omp.example " }, { signal: ctrl.signal });
+		expect(r.connects).toEqual(["me@omp.example"]);
+		expect(signal).toBe(ctrl.signal);
+		expect(text(res)).toContain("paired");
+		expect(res.details).toEqual({ op: "connect", server: "omp.example", device: "laptop", using: true });
+		expect(errorOf(await call(r, { op: "connect" })).code).toBe("invalid");
+		expect(errorOf(await call(r, { op: "connect", target: "  " })).code).toBe("invalid");
+		expect(r.connects).toHaveLength(1);
+	});
+
+	test("a failing info still lists the clouds the model can use, and a not_configured error carries the connect hint", async () => {
+		const r = rig();
+		r.w.clouds = { known: [{ source: "paired", url: "https://x", where: "paired device" }], active: undefined, chosen: false, lines: ["cloud: none usable", "other clouds: paired https://x (paired device)"] };
+		r.cloud.toolSession = async () => {
+			throw new UserError("☁ omp-cloud is not configured: set url and token");
+		};
+		const res = await call(r, { op: "info" });
+		expect(errorOf(res)).toMatchObject({ code: "not_configured", hint: expect.stringContaining("cloud connect {target}") });
+		expect(text(res)).toContain("other clouds: paired https://x (paired device)");
+
+		const list = await call(r, { op: "list" });
+		expect(text(list)).not.toContain("other clouds:");
+		expect(errorOf(list).hint).toContain("ask the user which omp-cloud to use");
+	});
 });
 
 describe("registration, approval and the description", () => {
@@ -1323,11 +1611,18 @@ describe("registration, approval and the description", () => {
 	}
 
 	test("approval tiers: reads are read, thread changes write, delegation and anything unknown exec", () => {
-		const exec = { tier: "exec", reason: "ships the repository, this conversation and your omp setup to a cloud agent" };
+		const exec = { tier: "exec", reason: "ships the repository and your omp setup to a cloud agent" };
+		const forks = { tier: "exec", reason: "ships the repository, this conversation and your omp setup to a cloud agent" };
 		const cases: [unknown, unknown][] = [
 			...["list", "status", "read", "events", "diff", "files", "wait", "info"].map(op => [{ op }, "read"] as [unknown, unknown]),
-			...["send", "answer", "stop", "pull", "delete", "preview"].map(op => [{ op }, "write"] as [unknown, unknown]),
+			...["send", "answer", "stop", "pull", "delete", "preview", "use"].map(op => [{ op }, "write"] as [unknown, unknown]),
+			[{ op: "connect", target: "me@host" }, { tier: "exec", reason: "pairs this machine with an omp-cloud server as one of its devices" }],
 			[{ op: "delegate", task: "t" }, exec],
+			[{ op: "delegate", task: "t", conversation: "full" }, forks],
+			[{ op: "delegate", task: "t", conversation: "none" }, exec],
+			[{ op: "delegate", tasks: [{ task: "a" }, { task: "b", conversation: "full" }] }, forks],
+			[{ op: "delegate", conversation: "full", tasks: [{ task: "a" }, { task: "b", conversation: "none" }] }, forks],
+			[{ op: "delegate", conversation: "full", tasks: [{ task: "b", conversation: "none" }] }, exec],
 			[{ op: "format-disk" }, exec],
 			[undefined, exec],
 			["list", exec],
@@ -1335,14 +1630,11 @@ describe("registration, approval and the description", () => {
 		for (const [args, want] of cases) expect(toolApproval(args)).toEqual(want as never);
 	});
 
-	test("the description teaches when to delegate, not to poll, that results arrive as [cloud] messages, wait, the slash commands, and that approvals are the user's", () => {
-		for (const s of ["cancels the thread's queued turns", "independent of this machine", "[cloud] messages", "do not poll", "op=wait", "Slash commands such as /compact", "same ref with the same task finds the existing thread", "same ref with a different task is refused", "scratch", "ref", "tasks", "Tool approvals and push approvals", "the user's decision", "/cloud answer", "omp-cloud/<thread>", "ambiguous_outcome", "force"]) {
-			expect(TOOL_DESCRIPTION).toContain(s);
-		}
-		for (const op of TOOL_OPS) expect(TOOL_DESCRIPTION).toContain(op === "info" ? "info:" : `${op}`);
+	test("the description names every op", () => {
+		for (const op of TOOL_OPS) expect(TOOL_DESCRIPTION).toContain(op === "info" ? "info:" : op === "use" ? "use {cloud}:" : op === "connect" ? "connect {target}:" : `${op}`);
 	});
 
-	test("registers one tool, `cloud`, or `cloud_agent` when the name is taken; it pairs, connects and manages devices nowhere", () => {
+	test("registers one tool, `cloud`, or `cloud_agent` when the name is taken; it pairs devices nowhere, but connects and uses a cloud", () => {
 		const r = rig();
 		expect(chooseToolName(["read", "bash"])).toBe("cloud");
 		expect(chooseToolName(["cloud"])).toBe("cloud_agent");
@@ -1351,7 +1643,8 @@ describe("registration, approval and the description", () => {
 		const [tool] = register([], r.cloud);
 		expect(tool?.loadMode).toBe("essential");
 		expect(tool?.approval).toBe(toolApproval);
-		for (const verb of ["connect", "pair", "devices", "disconnect", "revoke"]) expect(TOOL_OPS as readonly string[]).not.toContain(verb);
+		for (const verb of ["pair", "devices", "disconnect", "revoke"]) expect(TOOL_OPS as readonly string[]).not.toContain(verb);
+		for (const op of ["connect", "use"]) expect(TOOL_OPS as readonly string[]).toContain(op);
 	});
 
 	test("the schema accepts every op and each op's fields, and rejects an unknown op or a bad value", () => {
@@ -1547,7 +1840,8 @@ describe("native views of a result", () => {
 			key: "k",
 			warnings: ["model x is not available"],
 			job: undefined,
-			summary: { repo: { name: "app", baseRef: "main", localBranch: "main" }, scratch: false, base: "", commits: 3, wip: { files: 2, insertions: 5, deletions: 1 }, untracked: [], untrackedTotal: 0, withheld: [], secrets: { files: 0, env: 0 }, conversation: "included", setupBytes: 10, model: "anthropic/claude-sonnet-5-5", thinking: "high", ompVersion: "18.12.3", overlays: [], mcp: [], setup: null, policy: [] },
+			agent: "AddGreet",
+			summary: { repo: { name: "app", baseRef: "main", localBranch: "main" }, scratch: false, base: "", commits: 3, wip: { files: 2, insertions: 5, deletions: 1 }, untracked: [], untrackedTotal: 0, withheld: [], secrets: { files: 0, env: 0 }, conversation: "included", setupBytes: 10, model: "anthropic/claude-sonnet-5-5", thinking: "high", ompVersion: "18.12.3", overlays: [], mcp: [], setup: null, policy: [], readOnly: true },
 		};
 		const refused: LaunchFailure = { ok: false, index: 1, workspace: "repo", error: new CloudError({ code: "invalid", message: "bad ref", retriable: false, outcomeKnown: true }) };
 		r.behaviour.delegate = () => ({ defaultWorkspace: "repo", outcomes: [launched, refused] });
@@ -1560,6 +1854,20 @@ describe("native views of a result", () => {
 		const info = viewOf(await call(r, { op: "info" }));
 		expect(headText(info)).toStartWith("Cloud info omp-cloud");
 		expect(JSON.stringify(info.body)).toContain("1 running · 2 paused");
+		expect(JSON.stringify(delegated.body)).toContain("AddGreet");
+		expect(JSON.stringify(delegated.body)).toContain("read-only");
+
+		r.planning = true;
+		r.w.settings = [{ key: "git.push", value: "auto" }, { key: "vm.packages", value: ["nodejs"] }];
+		const detailed = JSON.stringify(viewOf(await call(r, { op: "info" })).body);
+		expect(detailed).toContain("fetch yes · web search yes · browser yes · egress open");
+		expect(detailed).toContain("nodejs");
+		expect(detailed).toContain("git.push auto");
+		expect(detailed).toContain("on: delegations are read-only");
+		r.planning = false;
+
+		expect(headText(viewOf(await call(r, { op: "use", cloud: "env" })))).toBe("Cloud use env");
+		expect(headText(viewOf(await call(r, { op: "connect", target: "me@omp.example" })))).toBe("Cloud connect paired with omp.example");
 
 		const sent = viewOf(await call(r, { op: "send", thread: ID, text: "hello" }));
 		expect(headText(sent)).toBe(`Cloud send ${ID} turn 2`);
@@ -1603,6 +1911,12 @@ describe("native views of a result", () => {
 		expect(headText(plain)).toBe("Cloud result 0 of 0 threads");
 		const old = describeResult({ content: [{ type: "text", text: "cloud wait: ok 1 of 1 settled (until any)\n- x" }], details: { op: "wait", outcomes: [], failures: [] } }, FINAL);
 		expect(headText(old)).toBe("Cloud wait 1 of 1 settled (until any)");
+		// An info result an older plugin recorded has no clouds, plan mode or agents fields: it shows as its text.
+		const info = await call(r, { op: "info" });
+		const recorded = Object.fromEntries(Object.entries(info.details).filter(([key]) => !["clouds", "active", "chosen", "planning", "agents"].includes(key)));
+		const replayed = describeResult({ content: info.content, details: recorded }, FINAL);
+		expect(headText(replayed)).toStartWith("Cloud info omp-cloud");
+		expect(JSON.stringify(replayed?.body)).toContain("you are owner");
 	});
 
 	test("the call view shows while the call runs and hands over to the result view; a progress update keeps the call view", async () => {

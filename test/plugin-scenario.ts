@@ -24,7 +24,7 @@
  *  8a–8h the `cloud` tool, called by the fake model of a second local omp (own repository whose remote the service can read, `CLOUD[tag]: {json}` prompts):
  *     8a `info`; 8b a batch `delegate` of two (one with `ref`, one scratch); 8c a replay with the same `ref`, `list` with `mine`, filters and cursor;
  *     8d `wait` until all, `status` (id, suffix, name, list; a missing thread is an error result), `diff`, `files`; 8e `send`, `read` paging, `events`;
- *     8f `send` with `mode: interrupt`, an ask question answered through `answer`; 8g an approval and a push question refused by `answer` (the owner answers them);
+ *     8f `send` with `mode: interrupt` (an agent the model started has no `ask`); 8f2 an adopted person-started thread still asks, answered through `answer`; 8g an approval and a push question refused by `answer` (the owner answers them);
  *     8h `pull` (fetch, worktree, scratch clone, wrong repository refused), `delete` (`confirm`, a user's thread refused), `stop all-mine`
  *  9a–9e orchestration parity (the tool omp's fake model drives omp's own `read`, `write` and `wait`; the cloud agents' model is the fake model in a real VM):
  *     9a a model-started cloud agent is a registered agent: `agent://<id>` and `proc://<job>` resolve while its turn runs; its result arrives as omp's `async-result` (type task, completed, pointing at `agent://<id>`), no `[cloud]` turn card
@@ -924,7 +924,8 @@ async function run(): Promise<void> {
 		const jobId = cloudJobId({ id: thread, name: GENERATED_TITLE });
 		const named = new RegExp(`### (${jobId}(?:-\\d+)?) \\[task\\] — completed`).exec(waited);
 		if (named === null) throw new Error(`the wait result does not name the cloud job ${jobId}: ${JSON.stringify(waited)}`);
-		expectContains("the wait result carries the turn's result", waited, "Turn 3 done");
+		expectContains("the wait result carries the turn's result", waited, "<task-result");
+		expectContains("the wait result carries the turn's result", waited, 'status="completed"');
 		const done = await waitTurnIdle(thread, 3, 180_000);
 		// The fake model reports the first user message of the conversation it was given: the local "hello".
 		const reply = text(latestOf(done)?.reply);
@@ -1127,7 +1128,7 @@ async function run(): Promise<void> {
 		const version = text(obj(JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8")), "package.json").version);
 		const info = await callCloud(requireTool(), { op: "info" });
 		expectResult("info", info, `cloud info: ok omp-cloud ${version}`);
-		for (const expected of [`omp-cloud ${version} (api ${API_VERSION})`, "you are owner", "capabilities: threads.paging", "threads.irc", "fake/fake-model", "message 32768 bytes", "(the cloud can run it)"]) {
+		for (const expected of [`omp-cloud ${version} (api ${API_VERSION})`, "you are owner", "capabilities: threads.paging", "threads.irc", "fake/fake-model", "message 32768 bytes", "(served)"]) {
 			expectContains("info text", info.text, expected);
 		}
 		if (info.text.includes("☁")) throw new Error(`the tool text carries a ☁: ${info.text.slice(0, 200)}`);
@@ -1144,7 +1145,7 @@ async function run(): Promise<void> {
 		const batch = await callCloud(requireTool(), {
 			op: "delegate",
 			tasks: [
-				{ task: "BASH: printf 'from repo\\n' > repo.txt", name: "repo-task", ref: REPO_REF, workspace: "repo" },
+				{ task: "BASH: printf 'from repo\\n' > repo.txt", name: "repo-task", ref: REPO_REF, workspace: "repo", conversation: "full" },
 				{ task: "BASH: printf 'from scratch\\n' > scratch.txt", name: "scratch-task", workspace: "scratch", conversation: "none" },
 			],
 		}, 240_000);
@@ -1162,7 +1163,8 @@ async function run(): Promise<void> {
 		expectEqual("repo outcome branch", repoOutcome?.branch, `omp-cloud/${repoThread}`);
 		expectContains("delegate text", batch.text, repoThread);
 		expectContains("delegate text", batch.text, scratchThread);
-		expectContains("delegate text of the conversation=none task", batch.text, "conversation: not shipped");
+		expectContains("delegate text of the conversation=full task", batch.text, "conversation: forked from this session");
+		if (batch.text.includes("conversation: not shipped")) throw new Error("the output names a conversation that was not shipped though no line is the rule for none");
 		expectContains("delegate text", batch.text, `ref: ${REPO_REF}`);
 		if (batch.text.includes("workspace: repo by default") || batch.text.includes("workspace: scratch by default")) throw new Error("the output says a workspace was defaulted though both tasks named one");
 
@@ -1328,7 +1330,7 @@ async function run(): Promise<void> {
 		expectEqual("events of turn 1 name another turn", ofTurn.text.includes(" t2 "), false);
 	}, () => `scratch ${scratchThread}`);
 
-	await report.step("8f interrupt: the running turn is stopped, the new turn runs first and asks; answer picks an option", async () => {
+	await report.step("8f interrupt: the running turn is stopped and the new turn runs first; an agent the model started has no ask", async () => {
 		const tool = requireTool();
 		const slow = await callCloud(tool, { op: "send", thread: scratchThread, text: "BASH: sleep 90" });
 		expectResult("send of the slow turn", slow, `cloud send: ok ${scratchThread} turn 3`);
@@ -1338,28 +1340,42 @@ async function run(): Promise<void> {
 		expectEqual("interrupt details", JSON.stringify([interrupt.details.mode, interrupt.details.interrupted]), JSON.stringify(["interrupt", true]));
 		expectContains("interrupt text", interrupt.text, "the running turn was stopped first");
 
-		// No thread given: the wait covers every thread this session started that works or waits (here only the scratch thread).
-		const waiting = await callCloud(tool, { op: "wait", on: ["question"], timeoutSec: 240 }, 270_000);
+		// The agent the model started has no `ask` tool: the interrupting turn finishes on its own, no question is raised.
+		const waited = await callCloud(tool, { op: "wait", thread: scratchThread, on: ["done"], timeoutSec: 240 }, 270_000);
+		expectResult("wait for the interrupting turn", waited, "cloud wait: ok 1 of 1 settled");
+		expectEqual("wait outcome", JSON.stringify(rows(waited.details.outcomes, "outcomes").map(o => o.outcome)), JSON.stringify(["done"]));
+		const thread4 = await waitTurnIdle(scratchThread, 4, 120_000);
+		const stopped = turnById(thread4, 3);
+		expectEqual("the interrupted turn", JSON.stringify([stopped?.state, stopped?.error]), JSON.stringify(["failed", "stopped by owner"]));
+		const asking = turnById(thread4, 4);
+		expectEqual("the interrupting turn", asking?.state, "done");
+		expectEqual("the interrupting turn's questions", JSON.stringify(asking?.questions ?? []), JSON.stringify([]));
+		expectContains("the interrupting turn's reply", text(asking?.reply), "ANSWER=");
+	});
+
+	await report.step("8f2 an adopted person-started thread still asks: send adopts it, wait names the question, answer picks an option", async () => {
+		const tool = requireTool();
+		const n = rows((await detail(thread)).turns, "turns").length + 1;
+		const sent = await callCloud(tool, { op: "send", thread, text: "ASK: pick a color", follow: "wake" });
+		expectResult("send of the asking turn", sent, `cloud send: ok ${thread} turn ${n}`);
+		const waiting = await callCloud(tool, { op: "wait", thread, on: ["question"], timeoutSec: 240 }, 270_000);
 		expectResult("wait for the question", waiting, "cloud wait: ok 1 of 1 settled");
 		expectEqual("wait outcome", JSON.stringify(rows(waiting.details.outcomes, "outcomes").map(o => o.outcome)), JSON.stringify(["question"]));
-		expectContains("wait text", waiting.text, "waiting for an answer (ask, question 4:");
-		const status = await callCloud(tool, { op: "status", thread: scratchThread });
-		expectResult("status while waiting", status, `cloud status: ok ${scratchThread} waiting`);
-		expectContains("status text", status.text, "Question 4:");
+		expectContains("wait text", waiting.text, `waiting for an answer (ask, question ${n}:`);
+		const status = await callCloud(tool, { op: "status", thread });
+		expectResult("status while waiting", status, `cloud status: ok ${thread} waiting`);
+		expectContains("status text", status.text, `Question ${n}:`);
 		expectContains("status text", status.text, "pick a color");
 		expectContains("status text", status.text, "question: ask, expires ");
 		expectEqual("status question kind", obj(rows(status.details.threads, "threads")[0]?.question, "question").kind, "ask");
 
-		const answered = await callCloud(tool, { op: "answer", thread: scratchThread, selected: ["blue"] });
-		expectResult("answer", answered, `cloud answer: ok question 4:`);
+		const answered = await callCloud(tool, { op: "answer", thread, selected: ["blue"] });
+		expectResult("answer", answered, `cloud answer: ok question ${n}:`);
 		expectContains("answer text", answered.text, "Answered: blue");
 		expectEqual("answer details", JSON.stringify([answered.details.kind, answered.details.selected]), JSON.stringify(["ask", ["blue"]]));
-		const again = await callCloud(tool, { op: "wait", thread: scratchThread, on: ["done"], timeoutSec: 240 }, 270_000);
+		const again = await callCloud(tool, { op: "wait", thread, on: ["done"], timeoutSec: 240 }, 270_000);
 		expectEqual("wait after the answer", JSON.stringify(rows(again.details.outcomes, "outcomes").map(o => o.outcome)), JSON.stringify(["done"]));
-		const thread4 = await detail(scratchThread);
-		const stopped = turnById(thread4, 3);
-		expectEqual("the interrupted turn", JSON.stringify([stopped?.state, stopped?.error]), JSON.stringify(["failed", "stopped by owner"]));
-		expectContains("the interrupting turn's reply", text(turnById(thread4, 4)?.reply), "blue");
+		expectContains("the asking turn's reply", text(turnById(await detail(thread), n)?.reply), "blue");
 	});
 
 	await report.step("8g refusals: answer cannot answer a tool approval or a push approval; the owner does", async () => {
@@ -1555,7 +1571,8 @@ async function run(): Promise<void> {
 		const details = obj(relay.details, "relay details");
 		expectEqual("relay sender", details.from, orchAgent);
 		expectEqual("relay wakeRelay", details.wakeRelay, true);
-		expectContains("relay text", text(details.message), "Turn 2 done");
+		expectContains("relay text", text(details.message), "<task-result");
+		expectContains("relay text", text(details.message), 'status="completed"');
 		expectContains("relay text", text(details.message), longReply(120));
 		await Bun.sleep(2000);
 		expectEqual("[cloud] turn cards of the thread", JSON.stringify(await turnCards(client, orchThread)), JSON.stringify([]));
@@ -1587,7 +1604,8 @@ async function run(): Promise<void> {
 		expectContains("turn 3 reply", text(turn.reply), "DONE=");
 		const relay = await waitUntil("the wake relay of turn 3", 120_000, async () => (await customMessages(client, "irc:incoming")).find(m => obj(m.details, "irc details").replyTo === text(turn.ircId)));
 		expectEqual("relay wakeRelay", obj(relay.details, "relay details").wakeRelay, true);
-		expectContains("relay text", text(obj(relay.details, "relay details").message), "Turn 3 done");
+		expectContains("relay text", text(obj(relay.details, "relay details").message), "<task-result");
+		expectContains("relay text", text(obj(relay.details, "relay details").message), 'status="completed"');
 		// (the thread goes in 9e)
 	});
 

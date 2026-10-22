@@ -10,18 +10,18 @@ omp-cloud keeps its own files; omp's config is never read or written. `<config h
 
 | Key | Type | Meaning |
 |---|---|---|
-| `url` | string | The service address; `OMP_CLOUD_URL` wins. Must be `https`, or `http` on loopback: a token never crosses a network in the clear |
-| `token` | string | The owner token: a literal, an environment variable name or a `!command` (run with `/bin/sh -c`); `OMP_CLOUD_TOKEN` wins |
+| `url` | string | The service address; `OMP_CLOUD_URL` wins. Must be `https`, or `http` on loopback: a token never crosses a network in the clear. It is the default cloud of new sessions (`/cloud use personal` picks it, `/cloud use env` picks `OMP_CLOUD_URL`) |
+| `token` | string | The owner token: a literal, an environment variable name or a `!command` (run with `/bin/sh -c`); `OMP_CLOUD_TOKEN` wins. `/cloud use personal` needs one next to the `url` |
 | `excludeExtensions` | list of strings | Extension names that stay on this machine |
 | `secretFiles` | list of strings | Repository files (relative paths) whose contents go to the cloud agent |
 | `secretEnv` | list of strings | Names of environment variables whose values go to the cloud agent. A value every agent on a repository needs belongs in the service's [Secrets](secrets-and-mcp.md#secrets) instead |
-| `policy` | mapping | Flat policy keys a handoff sends to tighten the service's policy for that thread: `bash.patterns`, `tools.approval`, `fetch`, `webSearch`, `browser`, `egress`, `spend.turnUSD`, `spend.threadUSD`, `spend.dayUSD`, `models.allowed`. The service never lets it loosen the policy ([API](api.md#agent-policy)). The launch card lists the keys sent |
+| `policy` | mapping | Flat policy keys a handoff sends to tighten the service's policy for that thread: `bash.patterns`, `tools.approval`, `fetch`, `webSearch`, `browser`, `readOnly`, `egress`, `spend.turnUSD`, `spend.threadUSD`, `spend.dayUSD`, `models.allowed`. The service never lets it loosen the policy ([API](api.md#agent-policy)). The launch card lists the keys sent |
 | `deliver` | `tray` or `transcript` | Where a followed thread's finished turns and questions of your own threads go: the inbox and a terminal notification (`tray`, the default), or transcript cards. Yours only |
 | `setup` | mapping | `{run, cacheFiles?}`: a script the cloud runs once per repository environment and caches by the contents of `cacheFiles` (default: the common lockfiles). **A repository's `.omp-cloud.yml` only**: in your personal file it is ignored with a warning. See [Environments](environments.md#per-repository-environments) |
 
-A repository's file never supplies `url`, `token` or `deliver`, and your personal file never supplies `setup`: they are ignored and `/cloud status` says so. The repository's three lists add to yours, and its `policy` keys replace yours key by key. `/cloud status` shows where `url`, `token` and `deliver` came from, the repository file when one was read and the warnings.
+A repository's file never supplies `url`, `token` or `deliver`, and your personal file never supplies `setup`: they are ignored and `/cloud status` says so. The repository's three lists add to yours, and its `policy` keys replace yours key by key. `/cloud status` shows where `url`, `token` and `deliver` came from, the repository file when one was read and the warnings. When the machine knows more than one cloud (`OMP_CLOUD_URL`, the `url` of this file, a pairing) or the session picked one, it also shows `cloud:` and `other clouds:` lines.
 
-With no `url` from the environment or your file, the machine uses its paired connection (`connection.json` beside `config.yml`) and ignores a `token`; see [Pairing](pairing.md).
+With no `url` from the environment or your file, the machine uses its paired connection (`connection.json` beside `config.yml`) and ignores a `token`; see [Pairing](pairing.md). That is only the default for new sessions: a session picks among `env` (`OMP_CLOUD_URL`), `personal` (this file's `url` and `token`) and `paired` with `/cloud use`, and the choice is kept in the session.
 
 A handoff also ships your omp's agent directory (`~/.omp/agent`) and the session's `--config` overlays. Settings that must stay on this machine (credentials, `!command` values, host paths, loopback endpoints) are removed from that copy with a launch warning, and MCP servers are planned separately; see [Secrets and MCP servers](secrets-and-mcp.md#settings-that-stay-on-your-machine).
 

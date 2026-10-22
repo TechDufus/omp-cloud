@@ -389,6 +389,33 @@ describe("PushStep", () => {
 			expect(store.getThread(ID)?.pr).toEqual({ number: 7, url: URL_7 });
 		});
 
+		test("a read-only thread under auto is not pushed, asked about or opened as a pull request", async () => {
+			thread = { ...thread, policy: { readOnly: true } };
+			step = makeStep(1800);
+			expect(await run()).toEqual(NOT_PUSHED);
+			expect(pushes).toEqual([]);
+			expect(opened).toEqual([]);
+			expect(log).toEqual([{ kind: "push", text: "not pushed: the thread is read-only" }]);
+			expect(pushQuestionOf()).toBeUndefined();
+		});
+
+		test("a read-only thread under ask posts no push question", async () => {
+			settings.apply({ "git.push": "ask" }, "owner");
+			thread = { ...thread, policy: { readOnly: true } };
+			step = makeStep(1800);
+			expect(await run()).toEqual(NOT_PUSHED);
+			expect(pushQuestionOf()).toBeUndefined();
+			expect(pushes).toEqual([]);
+			expect(events).toEqual(["not pushed: the thread is read-only"]);
+		});
+
+		test("the service's own policy.readOnly makes every thread read-only", async () => {
+			settings.apply({ "policy.readOnly": true }, "owner");
+			expect(await run()).toEqual(NOT_PUSHED);
+			expect(pushes).toEqual([]);
+			expect(opened).toEqual([]);
+		});
+
 		test("git.pr ready opens a ready pull request, and the name titles it when the thread has one", async () => {
 			settings.apply({ "git.pr": "ready" }, "owner");
 			thread = { ...thread, name: "Fix the login" };

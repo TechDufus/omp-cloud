@@ -30,9 +30,9 @@ No Kubernetes, no SaaS: one HTTP service, a [vibemon](https://github.com/stencil
 ## What you get
 
 - **Hand off.** The repo state, uncommitted changes included, and the conversation go to an agent in its own microVM, on the same omp binary you run.
-- **It asks, you answer.** The agent's `ask` questions come back as omp cards and as a "needs attention" entry in your terminal's tray, and wait for you.
+- **It asks, you answer.** The agent's `ask` questions come back as omp cards and as a "needs attention" entry in your terminal's tray, and wait for you. (An agent the model starts through the `cloud` tool works like a `task` subagent instead: it has no `ask` and its final message is its result.)
 - **Sleeps with its processes intact.** A VM pauses after idle and resumes on the next message; after 7 days idle (the default) it is archived and restored from its last result.
-- **Looks like omp's own jobs, and works like omp's agents.** Job tiles with step dots and a live output tail, the jobs pill, `/jobs` and `proc://`; `agent://<id>` and `history://<id>` read a cloud agent's reply and conversation, `write agent://<id>` messages it (and it can write back), and a thread the model started delivers its result as omp's own async-result. `omp stats` counts its spend with yours.
+- **Looks like omp's own jobs, and works like omp's agents.** Job tiles with step dots and a live output tail, the jobs pill, `/jobs` and `proc://`; `agent://<id>` and `history://<id>` read a cloud agent's reply and conversation, `write agent://<id>` messages it (and it can write back), and a thread the model started delivers its result as omp's own async-result, a `<task-result>` like a `task` subagent's. `omp stats` counts its spend with yours.
 - **A dashboard.** Threads by repository, per-thread context and cost, spend, VMs, devices and settings, in light and dark.
 - **Yours, and locked down.** A loopback API listener plus a pinned-TLS remote listener, a per-thread gateway client token, a push policy, an egress allow-list and spend caps.
 
@@ -113,7 +113,7 @@ graph LR
   VM -->|gateway client token| G
 ```
 
-1. **Handoff.** The plugin snapshots the repo as a git bundle, packs the conversation, and ships your omp setup, model and omp version.
+1. **Handoff.** The plugin snapshots the repo as a git bundle, packs the conversation (a delegation by the model sends none unless it asks), and ships your omp setup, model and omp version.
 2. **Run.** The service gives each thread one microVM running the same omp binary you do; omp runs over RPC and its `ask` questions come back to you.
 3. **Idle.** After each turn the service commits the work and stores a result bundle; after the idle timeout it pauses the VM, and a thread nobody touches for 7 days (the default) is [archived](docs/archive.md).
 4. **Return.** `/cloud pull <id>` fetches `omp-cloud/<id>` and saves the cloud conversation as a local omp session; `/cloud resume <id>` continues it locally.
@@ -188,7 +188,7 @@ More in [`docs/security.md`](docs/security.md).
 | [Install](docs/install.md) | The one-command install, requirements, flags, `doctor`, `login`, `uninstall` |
 | [Agent setup](docs/agent-setup.md) | A prompt that has omp or another coding agent do the install with you |
 | [`/cloud` commands](docs/commands.md) | The command reference, the inbox and tray, cards and buttons, slash commands in the cloud agent |
-| [The `cloud` tool](docs/cloud-tool.md) | What omp's model can do, and scratch threads |
+| [The `cloud` tool](docs/cloud-tool.md) | What omp's model can do: subagent-style delegation, plan mode, picking a cloud, and scratch threads |
 | [Cloud agents as omp jobs](docs/jobs.md) | Job tiles, `wait`, `agent://` and messaging, how results arrive, cancelling |
 | [Configuration](docs/configuration.md) | The client config files and `service.json` |
 | [GitHub](docs/github.md) | The GitHub App, one-hour tokens, Verified commits, pull requests |

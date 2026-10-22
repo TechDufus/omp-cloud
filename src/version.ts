@@ -39,4 +39,4 @@ export const SERVICE_VERSION: string = typeof __OMP_CLOUD_VERSION__ === "undefin
 export const BUILD: Build = parseBuild(typeof __OMP_CLOUD_BUILD__ === "undefined" ? undefined : __OMP_CLOUD_BUILD__);
 
 /** The API revision: an integer bumped whenever the contract gains something a client may depend on. `whoami` and `omp-cloud ssh-pair` report it. */
-export const API_VERSION = 4;
+export const API_VERSION = 5;

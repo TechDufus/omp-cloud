@@ -37,6 +37,7 @@ export function helpLines(): string[] {
 		delete: "/cloud delete <id>",
 		login: "/cloud login <provider>",
 		status: "/cloud status",
+		use: "/cloud use [env | personal | paired]",
 		update: "/cloud update",
 		dashboard: "/cloud dashboard",
 		connect: "/cloud connect [<code|host>] [--name n]",

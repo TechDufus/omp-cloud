@@ -25,7 +25,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { CloudError } from "../src/errors";
 import { isRecord } from "../src/guards";
-import { CloudAgents, IRC_CAPABILITY, type AgentsClient } from "../src/cloud-agents";
+import { CloudAgents, IRC_CAPABILITY, planModeFromEntries, type AgentsClient } from "../src/cloud-agents";
 import { CloudJobs } from "../src/cloud-jobs";
 import { Deliverer } from "../src/deliver";
 import type { IrcMessageBody, IrcReceipt, ThreadDetail, ThreadTurn } from "../src/types";
@@ -72,6 +72,13 @@ class FakeSession {
 	/** Set to make the next delivery fail. */
 	failWith: Error | undefined;
 	#transitions = 0;
+
+	/** omp's `AgentSession.getPlanModeState()`: what plan mode is in; undefined when it has never been on. */
+	planMode: { enabled: boolean } | undefined;
+
+	getPlanModeState(): { enabled: boolean } | undefined {
+		return this.planMode;
+	}
 
 	/** omp's `AgentSession.isSessionTransitioning`: true while a session identity or transcript transition is applying. */
 	get isSessionTransitioning(): boolean {
@@ -708,9 +715,8 @@ describe("inbound IRC: a message the cloud agent sends reaches its recipient's s
 		expect(r.main.delivered).toHaveLength(1);
 		const relay = r.main.delivered[0];
 		expect(relay).toMatchObject({ from: AGENT, to: "Main", replyTo: msgId, wakeRelay: true });
-		expect(relay?.body).toContain("Turn 2 done: Farewell");
+		expect(relay?.body).toStartWith(`<task-result id="${AGENT}" agent="cloud" status="completed"`);
 		expect(relay?.body).toContain("Second reply.");
-		expect(relay?.body).toContain(`Full result: agent://${AGENT}`);
 		// A later observe of the same state relays nothing again.
 		r.agents.observe(second("done", { origin: "irc", ircFrom: "Main", ircId: msgId }));
 		await shimOf(r).waitForIrcReplies();
@@ -798,7 +804,7 @@ describe("the wait path: what omp's wait and roster read of the agent", () => {
 		const out = await result;
 		const text = out.content[0]?.type === "text" ? out.content[0].text : "";
 		expect(text).toContain(`### ${AGENT} [task] — completed`);
-		expect(text).toContain("Turn 1 done: Greeting fixed");
+		expect(text).toContain(`<task-result id="${AGENT}" agent="cloud" status="completed"`);
 		expect(text).toContain(`Structured output: schema valid; full payload at agent://${AGENT}, fields via agent://${AGENT}/<field>`);
 		// The wait returned the result itself: omp does not deliver it a second time.
 		await r.manager.drainDeliveries({ timeoutMs: 500 });
@@ -857,7 +863,7 @@ describe("jobs and structured results with omp's AsyncJobManager", () => {
 		expect(delivery.job?.structured?.status).toBe("valid");
 		const { text, details } = asyncResult(delivery);
 		expect(text).toContain(`Background job ${AGENT} has completed.`);
-		expect(text).toContain("Turn 1 done: Greeting fixed");
+		expect(text).toContain(`<task-result id="${AGENT}" agent="cloud" status="completed"`);
 		expect(text).toContain("Structured output: schema valid");
 		expect(text).toContain(`full payload at agent://${AGENT}, fields via agent://${AGENT}/<field>[/<index>/…]`);
 		expect(details).toMatchObject({ jobs: [{ jobId: AGENT, type: "task", status: "completed", agentId: AGENT, schema: { status: "valid", data: { reply: "All done. The farewell too.", branch: BRANCH, thread: ID } } }] });
@@ -970,14 +976,14 @@ describe("jobs and structured results with omp's AsyncJobManager", () => {
 		const job = r.manager.getJob(AGENT) as AsyncJob;
 		await job.promise;
 		expect(job.status).toBe("failed");
-		expect(job.errorText).toContain("Turn 1 failed: Greeting fixed");
-		expect(job.errorText).toContain("Error: tests still fail");
+		expect(job.errorText).toContain(`<task-result id="${AGENT}" agent="cloud" status="failed"`);
+		expect(job.errorText).toContain("tests still fail");
 		expect(job.structured).toMatchObject({ status: "valid", data: { state: "failed", error: "tests still fail", thread: ID } });
 		expect((await read(r, `agent://${AGENT}`)).content).toBe("Turn 1 failed: tests still fail");
 
 		await until(() => r.delivered.length === 1);
 		const { text, details } = asyncResult(r.delivered[0] as Delivered);
-		expect(text).toContain("Turn 1 failed: Greeting fixed");
+		expect(text).toContain(`<task-result id="${AGENT}" agent="cloud" status="failed"`);
 		expect(text).toContain(`full payload at agent://${AGENT}`);
 		expect(details).toMatchObject({ jobs: [{ status: "failed", schema: { data: { state: "failed" } } }] });
 		expect(new AsyncJobError("x").structured).toBeUndefined();
@@ -1094,6 +1100,76 @@ describe("cancel against teardown", () => {
 		expect(r.agents.ownerTransitioning()).toBe(false);
 		r.registry.register({ id: "Main", displayName: "Main", kind: "main", session: {} as unknown as AgentSession, status: "idle" });
 		expect(r.agents.ownerTransitioning()).toBe(false);
+	});
+
+	describe("plan mode", () => {
+		test("omp's own state says it: on, off, or off before it was ever on; a session without the getter, or no Main, says nothing", async () => {
+			const r = await rig();
+			expect(r.agents.ownerPlanning()).toBe(false);
+			r.main.planMode = { enabled: true };
+			expect(r.agents.ownerPlanning()).toBe(true);
+			r.main.planMode = { enabled: false };
+			expect(r.agents.ownerPlanning()).toBe(false);
+
+			AgentRegistry.resetGlobalForTests();
+			const bare = await rig({ main: false });
+			expect(bare.agents.ownerPlanning()).toBeUndefined();
+			bare.registry.register({ id: "Main", displayName: "Main", kind: "main", session: {} as unknown as AgentSession, status: "idle" });
+			expect(bare.agents.ownerPlanning()).toBeUndefined();
+		});
+
+		test("the session's last mode_change entry says it: plan is on, plan_paused and none are off, other entries do not count", () => {
+			const entry = (mode: string) => ({ type: "mode_change", mode });
+			expect(planModeFromEntries([])).toBe(false);
+			expect(planModeFromEntries([entry("plan")])).toBe(true);
+			expect(planModeFromEntries([entry("plan"), { type: "message" }])).toBe(true);
+			expect(planModeFromEntries([entry("plan"), entry("plan_paused")])).toBe(false);
+			expect(planModeFromEntries([entry("plan"), entry("none")])).toBe(false);
+			expect(planModeFromEntries([entry("none"), entry("plan")])).toBe(true);
+			expect(planModeFromEntries([{ type: "custom", mode: "plan" }])).toBe(false);
+		});
+
+		test("omp's state wins when it has one; the entries decide when it has none", async () => {
+			const r = await rig();
+			r.entries.push({ type: "mode_change", mode: "plan" });
+			r.main.planMode = { enabled: false };
+			expect(r.agents.planning()).toBe(false);
+			r.main.planMode = { enabled: true };
+			r.entries.length = 0;
+			expect(r.agents.planning()).toBe(true);
+
+			AgentRegistry.resetGlobalForTests();
+			const bare = await rig({ main: false });
+			expect(bare.agents.planning()).toBe(false);
+			bare.entries.push({ type: "mode_change", mode: "plan" });
+			expect(bare.agents.planning()).toBe(true);
+		});
+
+		test("write agent://<id> to an agent that is not read-only fails with the plan-mode reason and posts nothing; a read-only agent takes it; the hub's chat box is open either way", async () => {
+			const r = await rig();
+			r.main.planMode = { enabled: true };
+			r.client.answer = async (_t, m) => ({ receipt: "injected", id: m.id ?? "", turn: null });
+			r.agents.observe(running());
+
+			const refused = await write(r, AGENT, "now push it");
+			expect(refused.isError).toBe(true);
+			expect(textOf(refused)).toContain(`plan mode: ${AGENT} is not read-only, so a message could make it change and push work; message it after the plan is approved`);
+			expect(r.client.irc).toEqual([]);
+			expect(r.client.messages).toEqual([]);
+
+			await shimOf(r).prompt("a word from the user");
+			expect(r.client.irc.map(i => i.message.body)).toEqual(["a word from the user"]);
+
+			r.agents.observe(running({ readOnly: true }));
+			const delivered = await write(r, AGENT, "also look at the tests");
+			expect(textOf(delivered)).toBe(`Delivered to ${AGENT}.`);
+			expect(r.client.irc.map(i => i.message.body)).toEqual(["a word from the user", "also look at the tests"]);
+
+			// Outside plan mode a writable agent takes messages as ever.
+			r.main.planMode = { enabled: false };
+			r.agents.observe(running({ readOnly: false }));
+			expect(textOf(await write(r, AGENT, "now push it"))).toBe(`Delivered to ${AGENT}.`);
+		});
 	});
 	test("omp's shutdown reason does not stop the cloud turn, for cancelAll or for dispose", async () => {
 		const r = await rig();

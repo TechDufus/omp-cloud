@@ -725,6 +725,29 @@ describe("an Idempotency-Key", () => {
 		expect(retry).toEqual({ thread: first.thread, replayed: true });
 	});
 
+	test("a key first used without policy is not replayed read-only: it is 409 and creates nothing", async () => {
+		const first = await createThreadIdempotent(store, withRequest(full(), [["source", bytes("src")]], key), OWNER, options());
+		const error = await createThreadIdempotent(store, withRequest(full({ policy: { readOnly: true } }), [], key), OWNER, options()).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(ApiError);
+		expect((error as ApiError).status).toBe(409);
+		expect((error as ApiError).message).toBe(`Idempotency-Key ${KEY} was used for a different request (thread ${first.thread.id})`);
+		expect(store.listThreads(OWNER, 10)).toHaveLength(1);
+		// Other policy keys do not bind the key.
+		expect(await createThreadIdempotent(store, withRequest(full({ policy: { fetch: false } }), [], key), OWNER, options())).toEqual({ thread: first.thread, replayed: true });
+	});
+
+	test("a key first used read-only replays only with readOnly true", async () => {
+		const first = await createThreadIdempotent(store, withRequest(full({ policy: { readOnly: true } }), [["source", bytes("src")]], key), OWNER, options());
+		expect(first.thread.policy).toEqual({ readOnly: true });
+		for (const policy of [undefined, {}, { readOnly: false }]) {
+			const error = await createThreadIdempotent(store, withRequest(full(policy === undefined ? {} : { policy }), [], key), OWNER, options()).catch((caught: unknown) => caught);
+			expect((error as ApiError).status).toBe(409);
+		}
+		const replay = await createThreadIdempotent(store, withRequest(full({ policy: { readOnly: true } }), [], key), OWNER, options());
+		expect(replay).toEqual({ thread: first.thread, replayed: true });
+		expect(store.listThreads(OWNER, 10)).toHaveLength(1);
+	});
+
 	test("a replay without a usable request part is 400", async () => {
 		await createThreadIdempotent(store, withRequest(full(), [["source", bytes("src")]], key), OWNER, options());
 		for (const req of [

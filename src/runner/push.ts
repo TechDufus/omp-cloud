@@ -11,6 +11,7 @@ import { githubRepoOf } from "../github/repo";
 import { isRecord } from "../guards";
 import type { Settings } from "../settings";
 import { THREAD_PLACEHOLDER } from "../settings/registry";
+import { effectivePolicy } from "../settings/tighten";
 import type { Store } from "../store";
 import {
 	ANSWERED_BY_STOP,
@@ -241,6 +242,10 @@ export class PushStep {
 			remoteURL: thread.repo.remoteURL,
 		});
 		if (!eligible) return NOT_PUSHED;
+		if (effectivePolicy(settings, thread.policy).readOnly) {
+			this.deps.event("not pushed: the thread is read-only");
+			return NOT_PUSHED;
+		}
 
 		const target = pushTarget(settings.get("git.branch"), thread.id);
 		const protectedPatterns = settings.get("git.protected");

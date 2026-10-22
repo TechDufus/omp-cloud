@@ -219,7 +219,7 @@ export const MIGRATIONS: readonly string[] = [
 	// 10: thread metadata, scratch threads and idempotent create. origin is `tool` or `user` ('' unknown), ref the caller's
 	// short label, session the omp session id that started the thread; scratch marks a thread without a repository;
 	// idempotency_key is the create request's `Idempotency-Key` (NULL for none), unique per owner among live threads;
-	// idempotency_fingerprint is the SHA-256 (hex) of that request's prompt, what a later request with the key is compared to.
+	// idempotency_fingerprint is the SHA-256 (hex) of that request's prompt and policy.readOnly, what a later request with the key is compared to.
 	// threads_by_activity serves the paged list (newest lastActivityAt first).
 	`
 	ALTER TABLE threads ADD COLUMN origin TEXT NOT NULL DEFAULT '';

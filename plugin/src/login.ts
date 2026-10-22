@@ -21,12 +21,17 @@ export function serverHostOf(paired: PairedConnection | undefined): string | und
 }
 
 /**
- * What to tell the user who needs the broker logged in to `provider`. The owner token (`serverHost` undefined) runs
- * `/cloud login`; a paired device cannot, so it is pointed at the server machine, where `omp-cloud login` works.
+ * What the user does to log the broker in to `provider`: the owner token runs `/cloud login`; a paired device cannot, so it
+ * is pointed at the server machine, where `omp-cloud login` works.
  */
+export function userLoginStep(provider: string, serverHost: string | undefined): string {
+	if (serverHost === undefined) return `run /cloud login ${provider}`;
+	return `run omp-cloud login ${provider} on ${serverHost} (over ssh: ssh -t <user>@${serverHost} '~/.local/bin/omp-cloud login ${provider}')`;
+}
+
+/** What to tell the user who needs the broker logged in to `provider`. */
 export function loginHint(provider: string, serverHost: string | undefined): string {
-	if (serverHost === undefined) return `/cloud login ${provider}`;
-	return `log the server in: run omp-cloud login ${provider} on ${serverHost} (over ssh: ssh -t <user>@${serverHost} '~/.local/bin/omp-cloud login ${provider}')`;
+	return serverHost === undefined ? `/cloud login ${provider}` : `log the server in: ${userLoginStep(provider, serverHost)}`;
 }
 
 export interface RunLoginOptions {

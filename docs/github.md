@@ -4,7 +4,7 @@
 
 Connect a GitHub App to the service once and cloud agents push to your private repositories with short-lived tokens, their commits show as **Verified**, and a draft pull request opens and stays current by itself. Nothing here gives a VM a credential: the service pushes, signs and opens the pull request, and a VM only receives and produces bundles ([Security model](security.md#github-app-and-signing-key)). The routes are in [API](api.md#github-signing-and-pull-requests).
 
-What it needs: the dashboard ([Configuration](configuration.md#service-config)), a GitHub account that owns the repositories (or an organization you may create Apps in), and `git.push` set to `ask` or `auto`, because a pull request opens after a push.
+What it needs: the dashboard ([Configuration](configuration.md#service-config)), a GitHub account that owns the repositories (or an organization you may create Apps in), and `git.push` set to `ask` or `auto`, because a pull request opens after a push. A [read-only thread](api.md#agent-policy) (`policy.readOnly`, which the plugin sets on every delegation made in plan mode) is never pushed, so it opens no pull request.
 
 ## Set it up (once)
 

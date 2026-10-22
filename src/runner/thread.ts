@@ -1395,6 +1395,9 @@ export class ThreadRunner {
 		});
 		if (provisioned.envNames.length > 0) this.#event("vm", `secret env: ${provisioned.envNames.join(", ")}`, turnId);
 		for (const name of provisioned.mcpSkipped) this.#event("notice", `MCP server ${name} was not delivered: the service has no MCP proxy`, turnId);
+		if (policy.readOnly && thread.mcpServers.length > 0) {
+			this.#event("vm", `MCP servers not delivered: the thread is read-only (${thread.mcpServers.join(", ")})`, turnId);
+		}
 		if (provisioned.mcpNames.length > 0) this.#event("vm", `MCP servers: ${provisioned.mcpNames.join(", ")}`, turnId);
 		if (served.length > 0) await gateway.waitAccepted(token, 30_000);
 		// A conversation unpacked into the VM is the session omp resumes, also when omp has to restart before it reports its own.
