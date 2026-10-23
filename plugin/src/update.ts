@@ -7,7 +7,7 @@
 import { fullAccess } from "./access";
 import { asCard, CARD_TYPE } from "./cards";
 import { isRecord } from "./guards";
-import type { Whoami, WhoamiUpdate } from "./types";
+import type { UpdateStatus, Whoami, WhoamiUpdate } from "./types";
 
 /** How often the session asks the service again, so `update ready` appears without a command. */
 export const UPDATE_PROBE_MS = 15 * 60_000;
@@ -38,6 +38,24 @@ export function compareVersions(a: string, b: string): number | undefined {
 /** What the plugin tells the user when it is older than the service. */
 export function pluginOlderText(plugin: string, service: string): string {
 	return `☁ the omp-cloud plugin ${plugin} is older than the service ${service}: update it (omp plugin upgrade omp-cloud, or git pull in a linked checkout) and restart omp`;
+}
+
+/** Whether this release moves vibemon: it is installed and the release needs another tag. */
+export function vmonMoves({ installed, required }: UpdateStatus["vmon"]): boolean {
+	return installed !== null && required !== null && installed !== required;
+}
+
+/**
+ * What an update confirmation adds when the release moves vibemon: the restart it causes and, with other machines in the
+ * cluster, that they follow by themselves. Empty when vibemon stays as it is (or is not installed, which the update does
+ * not restart). `machines` is the capacity's machine count, undefined when the service did not report it.
+ */
+export function vmonMoveText(vmon: UpdateStatus["vmon"], machines: number | undefined): string {
+	if (!vmonMoves(vmon)) return "";
+	const moves = `This release moves vibemon from ${vmon.installed} to ${vmon.required}: vmon restarts, so a turn running now is re-run.`;
+	if (machines === undefined || machines <= 1) return moves;
+	const others = machines - 1;
+	return `${moves} ${others === 1 ? "The other vibemon machine follows by itself" : `The other ${others} vibemon machines follow by themselves`} within a few minutes.`;
 }
 
 /** The update state as one line for the user and the model; undefined when the service reports none. `full` is whether this caller has full access, which installs updates. */

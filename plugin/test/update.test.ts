@@ -3,7 +3,7 @@ import { CloudClient } from "../src/api";
 import { CARD_TYPE, CARD_VERSION, updateCard, type CardDetails } from "../src/cards";
 import { parseUpdateStatus, parseWhoami } from "../src/wire";
 import type { UpdateStatus, Whoami } from "../src/types";
-import { compareVersions, pluginOlderText, Updates, updateLine, updateVersionsFromEntries, UPDATE_PROBE_MS, type Schedule, type UpdatesOptions } from "../src/update";
+import { compareVersions, pluginOlderText, Updates, updateLine, updateVersionsFromEntries, UPDATE_PROBE_MS, vmonMoves, vmonMoveText, type Schedule, type UpdatesOptions } from "../src/update";
 import { PLUGIN_VERSION } from "../src/version";
 import { Cloud } from "../src/verbs";
 import { statusText } from "../src/watch";
@@ -91,8 +91,25 @@ describe("what the service says", () => {
 			error: null,
 			message: null,
 			checkedAt: "2026-10-21T01:00:00Z",
+			vmon: { installed: "v0.4.0", required: "v0.4.0" },
 		});
 		expect(parseUpdateStatus({ state: "applying", applying: { version: "0.5.1", step: "swap", startedAt: "t" } }).applying).toEqual({ version: "0.5.1", step: "swap", startedAt: "t" });
+	});
+
+	test("the vibemon sentence: nothing when vibemon stays, the restart when it moves, the other machines when there are some", () => {
+		const same = { installed: "v0.4.0", required: "v0.4.0" };
+		const moves = { installed: "v0.4.0", required: "v0.4.1" };
+		const first = "This release moves vibemon from v0.4.0 to v0.4.1: vmon restarts, so a turn running now is re-run.";
+		expect(vmonMoveText(same, 3)).toBe("");
+		expect(vmonMoveText({ installed: "v0.4.0", required: null }, 3)).toBe("");
+		expect(vmonMoveText({ installed: null, required: "v0.4.1" }, 3)).toBe("");
+		expect(vmonMoves(same)).toBe(false);
+		expect(vmonMoves(moves)).toBe(true);
+		expect(vmonMoveText(moves, undefined)).toBe(first);
+		expect(vmonMoveText(moves, 0)).toBe(first);
+		expect(vmonMoveText(moves, 1)).toBe(first);
+		expect(vmonMoveText(moves, 2)).toBe(`${first} The other vibemon machine follows by itself within a few minutes.`);
+		expect(vmonMoveText(moves, 3)).toBe(`${first} The other 2 vibemon machines follow by themselves within a few minutes.`);
 	});
 
 	test("one line says each state, for the owner and for a device", () => {
@@ -315,6 +332,7 @@ const status = (over: Partial<UpdateStatus> = {}): UpdateStatus => ({
 	error: null,
 	message: null,
 	checkedAt: null,
+	vmon: { installed: "v0.4.0", required: "v0.4.0" },
 	...over,
 });
 
@@ -326,6 +344,8 @@ const state = {
 	status: undefined as UpdateStatus | undefined,
 	/** The answer to `POST /update/apply`. */
 	apply: undefined as Response | undefined,
+	/** What `GET /capacity` answers; undefined is a service without the route. */
+	capacity: undefined as unknown,
 };
 
 function reset(): void {
@@ -333,6 +353,7 @@ function reset(): void {
 	state.who = whoami({ user: "dev", service: SERVICE });
 	state.status = undefined;
 	state.apply = undefined;
+	state.capacity = undefined;
 }
 
 let server: Bun.Server<undefined>;
@@ -346,7 +367,12 @@ beforeAll(() => {
 			state.reqs.push({ method: req.method, path: p });
 			if (p === "/api/v1/whoami") return Response.json(state.who);
 			if (p === "/api/v1/threads") return Response.json({ threads: [summary({ id: "k3x9fa2m7q1z" })] });
-			if (p === "/api/v1/update" && state.status) return Response.json(state.status);
+			if (p === "/api/v1/update" && state.status) {
+				// The wire carries the vibemon pair under `components`.
+				const { vmon, ...rest } = state.status;
+				return Response.json({ ...rest, components: { vmon: { ...vmon, helper: true } } });
+			}
+			if (p === "/api/v1/capacity" && state.capacity !== undefined) return Response.json(state.capacity);
 			if (p === "/api/v1/update/check" && req.method === "POST") return Response.json({}, { status: 202 });
 			if (p === "/api/v1/update/apply" && req.method === "POST") return state.apply ?? Response.json({ applying: { version: state.status?.staged ?? "" } }, { status: 202 });
 			return Response.json({ error: "not found" }, { status: 404 });
@@ -510,6 +536,48 @@ describe("/cloud update", () => {
 		expect(posts()).toEqual(["/api/v1/update/apply"]);
 		expect(notes(r)).toContain("☁ installing omp-cloud 0.5.1: the service restarts in a moment");
 		expect(r.host.status.at(-1)).toBeUndefined();
+	});
+
+	test("a release that moves vibemon says so, and with other machines says they follow; without the capability or when capacity fails only the first sentence", async () => {
+		const MOVES = "This release moves vibemon from v0.4.0 to v0.4.1: vmon restarts, so a turn running now is re-run.";
+		const FOLLOW = "The other 2 vibemon machines follow by themselves within a few minutes.";
+		const base = "Install omp-cloud 0.5.1 and restart the cloud service? It is unreachable for a moment while it restarts.";
+		const moving = (): UpdateStatus => status({ state: "ready", staged: "0.5.1", vmon: { installed: "v0.4.0", required: "v0.4.1" } });
+		state.status = moving();
+		state.capacity = { available: true, machines: { total: 3, ready: 3 } };
+
+		state.who = whoami({ user: "dev", service: SERVICE, update: READY, capabilities: ["capacity"] });
+		let r = await setup();
+		await r.cloud.handle("update", r.host.host as never);
+		expect(r.asked).toEqual([["Update omp-cloud", `${base} ${MOVES} ${FOLLOW}`]]);
+
+		// A service without the capability is never asked for capacity.
+		reset();
+		state.status = moving();
+		state.capacity = { available: true, machines: { total: 3, ready: 3 } };
+		state.who = whoami({ user: "dev", service: SERVICE, update: READY, capabilities: [] });
+		r = await setup();
+		await r.cloud.handle("update", r.host.host as never);
+		expect(r.asked).toEqual([["Update omp-cloud", `${base} ${MOVES}`]]);
+		expect(state.reqs.map(q => q.path)).not.toContain("/api/v1/capacity");
+
+		// A capacity that fails to answer leaves the second sentence out.
+		reset();
+		state.status = moving();
+		state.who = whoami({ user: "dev", service: SERVICE, update: READY, capabilities: ["capacity"] });
+		r = await setup();
+		await r.cloud.handle("update", r.host.host as never);
+		expect(r.asked).toEqual([["Update omp-cloud", `${base} ${MOVES}`]]);
+	});
+
+	test("a release that keeps vibemon asks no capacity and adds nothing", async () => {
+		state.who = whoami({ user: "dev", service: SERVICE, update: READY, capabilities: ["capacity"] });
+		state.status = status({ state: "ready", staged: "0.5.1" });
+		state.capacity = { available: true, machines: { total: 3, ready: 3 } };
+		const r = await setup();
+		await r.cloud.handle("update", r.host.host as never);
+		expect(r.asked).toEqual([["Update omp-cloud", "Install omp-cloud 0.5.1 and restart the cloud service? It is unreachable for a moment while it restarts."]]);
+		expect(state.reqs.map(q => q.path)).not.toContain("/api/v1/capacity");
 	});
 
 	test("declining sends nothing", async () => {

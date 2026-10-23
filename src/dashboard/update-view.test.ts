@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { UpdateStatus } from "./client/api";
-import { checkedText, isMoving, type PillInput, pendingStillApplies, pillOf, UPDATED_VISIBLE_MS, vmonRow } from "./client/app/update";
+import { checkedText, isMoving, type PillInput, pendingStillApplies, pillOf, UPDATED_VISIBLE_MS, vmonMoves, vmonMoveText, vmonRow } from "./client/app/update";
 
 const NOW = Date.parse("2026-10-21T12:00:00Z");
 
@@ -142,5 +142,25 @@ describe("vmonRow", () => {
 			tone: "warn",
 		});
 		expect(vmonRow({ installed: "v0.4.0", required: null, helper: false })).toEqual({ text: "v0.4.0", tone: "neutral" });
+	});
+});
+
+describe("vmonMoveText", () => {
+	const first = "This release moves vibemon from v0.4.0 to v0.4.1: vmon restarts, so a turn running now is re-run.";
+	const moves = { installed: "v0.4.0", required: "v0.4.1", helper: true };
+
+	test("says nothing when vibemon stays, is not installed or needs no particular tag", () => {
+		expect(vmonMoves({ installed: "v0.4.0", required: "v0.4.0", helper: true })).toBe(false);
+		expect(vmonMoveText({ installed: "v0.4.0", required: "v0.4.0", helper: true }, 3)).toBe("");
+		expect(vmonMoveText({ installed: "v0.4.0", required: null, helper: true }, 3)).toBe("");
+		expect(vmonMoveText({ installed: null, required: "v0.4.1", helper: true }, 3)).toBe("");
+	});
+
+	test("a move names both tags and the restart; other machines are added only when there are some", () => {
+		expect(vmonMoves(moves)).toBe(true);
+		expect(vmonMoveText(moves, undefined)).toBe(first);
+		expect(vmonMoveText(moves, 1)).toBe(first);
+		expect(vmonMoveText(moves, 2)).toBe(`${first} The other vibemon machine follows by itself within a few minutes.`);
+		expect(vmonMoveText(moves, 3)).toBe(`${first} The other 2 vibemon machines follow by themselves within a few minutes.`);
 	});
 });

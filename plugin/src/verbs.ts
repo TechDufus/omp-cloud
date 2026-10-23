@@ -42,7 +42,7 @@ import { UserError, type AnswerBody, type Capacity, type CommandHost, type Host,
 import type { DelegateRequest, DelegateResult, DelegateRun, PullRequest, ToolCloud, ToolSession } from "./tool";
 import { helpLines, resultLine, WIDGET_KEY, Watcher, type WatchSink } from "./watch";
 import type { WaitOptions, WaitResult } from "./wait";
-import { Updates, updateLine, updateVersionsFromEntries } from "./update";
+import { Updates, updateLine, updateVersionsFromEntries, vmonMoves, vmonMoveText } from "./update";
 import { PLUGIN_VERSION } from "./version";
 
 /** Idle threads of a session that become cloud agents when the session starts: the newest of the ones its cards name. */
@@ -561,7 +561,7 @@ export class Cloud implements CardActions, ToolCloud {
 		}
 		switch (status.state) {
 			case "ready":
-				return this.#applyUpdate(ctx, s, status.staged ?? status.latest?.version ?? who.update?.available ?? "", who);
+				return this.#applyUpdate(ctx, s, status, status.staged ?? status.latest?.version ?? who.update?.available ?? "", who);
 			case "unsupported":
 				ctx.ui.notify(`☁ ${status.message ?? "this omp-cloud runs from a git checkout; update it with git pull and restart it"}`, "warning");
 				return;
@@ -586,10 +586,11 @@ export class Cloud implements CardActions, ToolCloud {
 	}
 
 	/** Confirms, then asks the service to install the staged `version` and restart. A refusal (nothing ready any more, an apply running) is the service's own message. */
-	async #applyUpdate(ctx: Host, s: Session, version: string, who: Whoami): Promise<void> {
+	async #applyUpdate(ctx: Host, s: Session, status: UpdateStatus, version: string, who: Whoami): Promise<void> {
 		const busy = who.threads.starting + who.threads.working + who.threads.waiting;
 		const running = busy > 0 ? ` ${plural(busy, "thread")} ${busy === 1 ? "is" : "are"} working right now.` : "";
-		if (!(await ctx.ui.confirm("Update omp-cloud", `Install omp-cloud ${version || "the new version"} and restart the cloud service? It is unreachable for a moment while it restarts.${running}`))) return;
+		const vmon = vmonMoveText(status.vmon, vmonMoves(status.vmon) ? (await readCapacity(s.client, who))?.machines.total : undefined);
+		if (!(await ctx.ui.confirm("Update omp-cloud", `Install omp-cloud ${version || "the new version"} and restart the cloud service? It is unreachable for a moment while it restarts.${running}${vmon === "" ? "" : ` ${vmon}`}`))) return;
 		const applying = (await s.client.applyUpdate()) || version;
 		this.#updates.applying(applying);
 		ctx.ui.notify(`☁ installing omp-cloud ${applying}: the service restarts in a moment`, "info");

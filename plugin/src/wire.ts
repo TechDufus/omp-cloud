@@ -133,6 +133,8 @@ export function parseUpdateStatus(json: unknown): UpdateStatus {
 	const current = isRecord(o.current) ? o.current : {};
 	const latest = isRecord(o.latest) ? o.latest : undefined;
 	const applying = isRecord(o.applying) ? o.applying : undefined;
+	const components = isRecord(o.components) ? o.components : {};
+	const vmon = isRecord(components.vmon) ? components.vmon : {};
 	return {
 		mode: oneOf(str(o, "mode"), UPDATE_MODES, "notify"),
 		managed: bool(o, "managed"),
@@ -144,6 +146,7 @@ export function parseUpdateStatus(json: unknown): UpdateStatus {
 		error: strOrNull(o, "error"),
 		message: strOrNull(o, "message"),
 		checkedAt: strOrNull(o, "checkedAt"),
+		vmon: { installed: strOrNull(vmon, "installed"), required: strOrNull(vmon, "required") },
 	};
 }
 

@@ -108,3 +108,23 @@ export function vmonRow(vmon: UpdateStatus["components"]["vmon"]): { text: strin
 		tone: "warn",
 	};
 }
+
+type VmonComponent = UpdateStatus["components"]["vmon"];
+
+/** Whether this release moves vibemon: it is installed and the release needs another tag. */
+export function vmonMoves({ installed, required }: VmonComponent): boolean {
+	return installed !== null && required !== null && installed !== required;
+}
+
+/**
+ * What the restart confirmation adds when the release moves vibemon: the restart it causes and, with other machines in the
+ * cluster, that they follow by themselves. Empty when vibemon stays as it is. `machines` is the capacity's machine count,
+ * undefined while it is unknown (not loaded, or unavailable).
+ */
+export function vmonMoveText(vmon: VmonComponent, machines: number | undefined): string {
+	if (!vmonMoves(vmon)) return "";
+	const moves = `This release moves vibemon from ${vmon.installed} to ${vmon.required}: vmon restarts, so a turn running now is re-run.`;
+	if (machines === undefined || machines <= 1) return moves;
+	const others = machines - 1;
+	return `${moves} ${others === 1 ? "The other vibemon machine follows by itself" : `The other ${others} vibemon machines follow by themselves`} within a few minutes.`;
+}

@@ -1,15 +1,22 @@
 /** The header's update pill, after Tern's: nothing when up to date, else the state with its one action. */
 import { CircleArrowUp, CircleCheck, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import { useState } from "react";
+import { getCapacity } from "../api";
 import { Modal } from "../kit/ui";
 import { Markdown } from "./Markdown";
+import { useQuery } from "./query";
 import { useAccess } from "./session";
+import { vmonMoves, vmonMoveText } from "./update";
 import { useUpdate } from "./update-context";
 
 export function UpdatePill() {
-	const { pill, busy, apply, check, dismiss } = useUpdate();
+	const { pill, status, busy, apply, check, dismiss } = useUpdate();
 	const full = useAccess() === "full";
 	const [confirming, setConfirming] = useState(false);
+	// The machine count is read only while the modal is open on a release that moves vibemon.
+	const moving = status !== undefined && vmonMoves(status.components.vmon);
+	const capacity = useQuery(["update-capacity"], () => getCapacity(), { enabled: confirming && moving });
+	const vmonText = status === undefined ? "" : vmonMoveText(status.components.vmon, capacity.data?.available ? capacity.data.machines.total : undefined);
 	const [reading, setReading] = useState(false);
 	if (pill === null) return null;
 
@@ -105,6 +112,7 @@ export function UpdatePill() {
 							omp-cloud restarts to run {pill.version}. This dashboard signs out when the service comes back; open a new link with{" "}
 							<code>/cloud dashboard</code>.
 						</p>
+						{vmonText !== "" && <p>{vmonText}</p>}
 					</Modal>
 				</>
 			);

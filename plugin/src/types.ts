@@ -120,6 +120,8 @@ export interface UpdateStatus {
 	error: string | null;
 	message: string | null;
 	checkedAt: string | null;
+	/** The vibemon the service runs and the one this release needs (`components.vmon`); null when unknown or not installed. */
+	vmon: { installed: string | null; required: string | null };
 }
 
 export interface ServiceInfo {
