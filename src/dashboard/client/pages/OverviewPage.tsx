@@ -1,7 +1,7 @@
 /** The landing page: what the threads are doing, what they cost, and the latest activity. */
 import { ArrowRight } from "lucide-react";
 import { useMemo, useState } from "react";
-import { getUsage, getVms, listThreads, type ThreadPhase, type ThreadSummaryView } from "../api";
+import { getCapacity, getUsage, getVms, listThreads, type ThreadPhase, type ThreadSummaryView } from "../api";
 import type { PageProps } from "../app/page";
 import { useQuery } from "../app/query";
 import { navigate } from "../app/route";
@@ -25,7 +25,7 @@ import {
 	TableSkeleton,
 	type Tone,
 } from "../kit/ui";
-import { ago, count, modelName, money } from "../format";
+import { ago, count, gib, modelName, money } from "../format";
 import { threadLabel } from "./thread-metrics";
 
 type SpendRange = Extract<TimeRange, "7d" | "30d" | "90d">;
@@ -96,6 +96,7 @@ export function OverviewPage({ active }: PageProps) {
 
 	const threads = useQuery(["overview", "threads"], () => listThreads(), { enabled: active, live: true });
 	const vms = useQuery(["overview", "vms"], () => getVms(), { enabled: active, refetchMs: VMS_POLL_MS });
+	const capacity = useQuery(["overview", "capacity"], () => getCapacity(), { enabled: active, refetchMs: VMS_POLL_MS });
 	const usage = useQuery(
 		["overview", "usage", range],
 		() => getUsage(new Date(bucketAxis(range, [])[0] ?? Date.now()).toISOString()),
@@ -127,6 +128,19 @@ export function OverviewPage({ active }: PageProps) {
 	const threadCount = (phase: ThreadPhase): string => (threads.data === undefined ? "—" : count(phases[phase]));
 	const spendOf = (value: number): string => (usage.data === undefined ? "—" : money(value));
 
+	// The capacity tiles show a dash while it loads and a hint when vibemon's admin API is unavailable.
+	const available = capacity.data?.available === true ? capacity.data : null;
+	const capacityView =
+		available === null
+			? null
+			: {
+					vcpus: `${count(available.vcpus.allocated)} of ${count(available.vcpus.total)}`,
+					memory: `${gib(available.memoryMB.allocated)} of ${gib(available.memoryMB.total)} GiB`,
+					vcpuSpark: available.history.length > 1 ? available.history.map(point => point.vcpusAllocated) : undefined,
+					memorySpark: available.history.length > 1 ? available.history.map(point => point.memoryAllocatedMB) : undefined,
+				};
+	const capacityHint = capacity.data !== undefined && !capacity.data.available ? "capacity unavailable" : undefined;
+
 	return (
 		<div className="page">
 			<PageHeader title="Overview" description="What your cloud agents are doing, and what they cost." />
@@ -155,6 +169,22 @@ export function OverviewPage({ active }: PageProps) {
 				/>
 				<Stat label="VMs running" value={vmCount("running")} />
 				<Stat label="VMs paused" value={vmCount("paused")} />
+				<Stat
+					label="vCPU allocated"
+					title="vCPUs of the running VMs against all CPUs of the cloud's vibemon machines"
+					value={capacityView?.vcpus ?? "—"}
+					hint={capacityHint}
+					spark={capacityView?.vcpuSpark}
+					sparkColor="var(--chart-primary)"
+				/>
+				<Stat
+					label="Memory allocated"
+					title="Memory of the running VMs against all memory of the cloud's vibemon machines"
+					value={capacityView?.memory ?? "—"}
+					hint={capacityHint}
+					spark={capacityView?.memorySpark}
+					sparkColor="var(--chart-secondary)"
+				/>
 			</StatGrid>
 
 			<Card

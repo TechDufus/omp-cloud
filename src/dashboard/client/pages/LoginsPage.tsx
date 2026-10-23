@@ -1,12 +1,16 @@
 /** Provider logins for the cloud broker: start, open the sign-in page, paste a redirect or code, follow the state. */
+import { TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
-import { ApiError, cancelLogin, getLogin, getWhoami, inputLogin, type Login, startLogin } from "../api";
+import { ApiError, cancelLogin, getLogin, getLogins, getWhoami, inputLogin, type Login, type LoginEntry, type LoginList, startLogin } from "../api";
 import type { PageProps } from "../app/page";
-import { useQuery } from "../app/query";
-import { safeHref } from "../format";
-import { Badge, Card, EmptyState, ErrorState, PageHeader, type Tone } from "../kit/ui";
+import { type QueryState, useQuery } from "../app/query";
+import { useAccess } from "../app/session";
+import { dateTime, safeHref } from "../format";
+import { Badge, Card, type Column, EmptyState, ErrorState, LabelCell, PageHeader, QueryView, Table, TableSkeleton, type Tone } from "../kit/ui";
 import { describe } from "./access-errors";
 import "./access.css";
+import { FullAccessNotice } from "./FullAccessNotice";
+import { renewTone } from "./logins-view";
 
 const POLL_MS = 2000;
 
@@ -145,15 +149,102 @@ function LoginCard({ login, onUpdate, onDismiss, onCancelled }: LoginCardProps) 
 	);
 }
 
+const LIST_REFRESH_MS = 60_000;
+
+/** The "Renew by" cell: a plain date, amber inside a week of it, red once past; blank for providers whose logins do not expire on a known date. */
+function RenewBy({ renewBy, now }: { renewBy: string; now: number }) {
+	const tone = renewTone(renewBy, now);
+	if (tone === null) return <span className="muted">—</span>;
+	return <Badge tone={tone}>{tone === "bad" ? `overdue · ${dateTime(renewBy)}` : dateTime(renewBy)}</Badge>;
+}
+
+interface LoggedInProps {
+	query: QueryState<LoginList>;
+	/** Whether this connection has full access: accounts show, and each row can log in again. */
+	full: boolean;
+	starting: string | null;
+	onAgain: (provider: string) => void;
+}
+
+/** What the cloud is logged in to now: one row per credential in its broker and per MCP server. */
+function LoggedInCard({ query, full, starting, onAgain }: LoggedInProps) {
+	const now = Date.now();
+	const columns: Column<LoginEntry>[] = [
+		{ key: "provider", header: "Provider", sort: entry => entry.provider, render: entry => <span className="mono">{entry.provider}</span> },
+		{
+			key: "account",
+			header: "Account",
+			sort: entry => entry.account,
+			render: entry =>
+				entry.kind === "mcp" ? (
+					<LabelCell primary={entry.account === "" ? "—" : entry.account} secondary="MCP server" />
+				) : entry.account === "" ? (
+					<span className="muted">—</span>
+				) : (
+					entry.account
+				),
+		},
+		{ key: "loggedIn", header: "Logged in", sort: entry => entry.loggedInAt, render: entry => dateTime(entry.loggedInAt) },
+		{ key: "renewBy", header: "Renew by", sort: entry => entry.renewBy, render: entry => <RenewBy renewBy={entry.renewBy} now={now} /> },
+		{
+			key: "status",
+			header: "Status",
+			sort: entry => Number(entry.disabled),
+			render: entry =>
+				entry.disabled ? (
+					<span title={entry.note === "" ? undefined : entry.note}>
+						<Badge tone="bad">disabled</Badge>
+					</span>
+				) : (
+					<Badge tone="ok">active</Badge>
+				),
+		},
+	];
+	if (full) {
+		columns.push({
+			key: "again",
+			header: "",
+			align: "right",
+			render: entry => (
+				<button type="button" className="btn" data-size="sm" disabled={starting !== null} onClick={() => onAgain(entry.provider)}>
+					{starting === entry.provider ? "Starting…" : "Log in again"}
+				</button>
+			),
+		});
+	}
+	return (
+		<Card
+			title="Logged in"
+			description="What the cloud can use now: the cloud broker's provider logins, and the MCP servers it is signed in to."
+			flush
+			footer={
+				query.data !== undefined && query.data.brokerError !== "" ? (
+					<span className="access-warn" role="alert">
+						<TriangleAlert size={13} /> {query.data.brokerError}
+					</span>
+				) : undefined
+			}
+		>
+			<QueryView query={query} skeleton={<TableSkeleton rows={3} />}>
+				{data => <Table columns={columns} rows={data.logins} rowKey={entry => `${entry.provider}:${entry.account}:${entry.disabled}`} empty="No logins yet." />}
+			</QueryView>
+		</Card>
+	);
+}
+
 export function LoginsPage({ active }: PageProps) {
+	const full = useAccess() === "full";
 	/** The logins started in this tab, newest first. */
 	const [logins, setLogins] = useState<Login[]>([]);
 	const [provider, setProvider] = useState("");
 	const [startError, setStartError] = useState<string | null>(null);
-	const [starting, setStarting] = useState(false);
+	/** The provider whose flow is being started: from the box (`""`) or a row's "Log in again". */
+	const [starting, setStarting] = useState<string | null>(null);
+
+	const list = useQuery(["logins-list"], () => getLogins(), { enabled: active, refetchMs: LIST_REFRESH_MS });
 
 	// Providers the cloud already runs make good suggestions; an unknown id is refused by the service.
-	const whoami = useQuery(["whoami"], () => getWhoami(), { enabled: active });
+	const whoami = useQuery(["whoami"], () => getWhoami(), { enabled: active && full });
 
 	const waitingIds = logins.filter(login => login.state === "waiting").map(login => login.id);
 	const polled = useQuery(["logins", ...waitingIds], () => Promise.all(waitingIds.map(pollLogin)), {
@@ -165,24 +256,30 @@ export function LoginsPage({ active }: PageProps) {
 		if (polls) setLogins(current => applyPolls(current, polls));
 	}, [polls]);
 
+	// A login that finished in this tab changes what the list shows.
+	const doneCount = logins.filter(login => login.state === "done").length;
+	const refetchList = list.refetch;
+	useEffect(() => {
+		if (doneCount > 0) refetchList();
+	}, [doneCount, refetchList]);
+
 	function remember(login: Login): void {
 		setLogins(current => (current.some(known => known.id === login.id) ? current.map(known => (known.id === login.id ? login : known)) : [login, ...current]));
 	}
 
-	async function start(): Promise<void> {
-		const id = provider.trim();
+	async function start(id: string, from: string): Promise<void> {
 		if (id === "") {
 			setStartError("Enter a provider id.");
 			return;
 		}
-		setStarting(true);
+		setStarting(from);
 		try {
 			remember(await startLogin(id));
 			setStartError(null);
 		} catch (failure) {
 			setStartError(describe(failure));
 		} finally {
-			setStarting(false);
+			setStarting(null);
 		}
 	}
 
@@ -192,38 +289,45 @@ export function LoginsPage({ active }: PageProps) {
 				title="Provider logins"
 				description="Give the cloud broker its own login to a provider. The refresh token is created on the service host and never leaves it."
 			/>
-			<Card title="Start a login">
-				<div className="access-stack">
-					<div className="access-fields">
-						<input
-							className="input"
-							type="text"
-							list="login-providers"
-							placeholder="provider id, for example openai-codex"
-							autoComplete="off"
-							value={provider}
-							onChange={event => setProvider(event.target.value)}
-							onKeyDown={event => {
-								if (event.key === "Enter" && !starting) void start();
-							}}
-						/>
-						<datalist id="login-providers">
-							{(whoami.data?.modelPatterns ?? []).map(pattern => (
-								<option key={pattern} value={pattern.replace(/\/\*$/, "")} />
-							))}
-						</datalist>
-						<button type="button" className="btn" data-variant="primary" disabled={starting} onClick={() => void start()}>
-							Start login
-						</button>
+			<LoggedInCard query={list} full={full} starting={starting} onAgain={id => void start(id, id)} />
+			{full ? (
+				<Card title="Start a login">
+					<div className="access-stack">
+						<div className="access-fields">
+							<input
+								className="input"
+								type="text"
+								list="login-providers"
+								placeholder="provider id, for example openai-codex"
+								autoComplete="off"
+								value={provider}
+								onChange={event => setProvider(event.target.value)}
+								onKeyDown={event => {
+									if (event.key === "Enter" && starting === null) void start(provider.trim(), "");
+								}}
+							/>
+							<datalist id="login-providers">
+								{(whoami.data?.modelPatterns ?? []).map(pattern => (
+									<option key={pattern} value={pattern.replace(/\/\*$/, "")} />
+								))}
+							</datalist>
+							<button type="button" className="btn" data-variant="primary" disabled={starting !== null} onClick={() => void start(provider.trim(), "")}>
+								Start login
+							</button>
+						</div>
+						{startError !== null && <ErrorState error={startError} />}
 					</div>
-					{startError !== null && <ErrorState error={startError} />}
-				</div>
-			</Card>
+				</Card>
+			) : (
+				<FullAccessNotice />
+			)}
 			{polled.error !== undefined && polled.error !== null && <ErrorState error={describe(polled.error)} />}
 			{logins.length === 0 ? (
-				<Card flush>
-					<EmptyState title="No logins started in this session." />
-				</Card>
+				full && (
+					<Card flush>
+						<EmptyState title="No logins started in this session." />
+					</Card>
+				)
 			) : (
 				<div className="grid grid-2">
 					{logins.map(login => (

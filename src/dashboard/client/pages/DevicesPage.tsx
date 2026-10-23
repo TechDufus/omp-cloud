@@ -8,21 +8,30 @@ import {
 	createOffer,
 	declineOffer,
 	type Device,
+	type DeviceAccess,
 	getOffer,
 	listDevices,
 	type OfferCreated,
 	type OfferStatus,
 	revokeDevice,
+	setDeviceAccess,
 } from "../api";
 import type { PageProps } from "../app/page";
 import { useQuery } from "../app/query";
+import { useAccess } from "../app/session";
 import { ago } from "../format";
-import { Badge, Card, type Column, ErrorState, Modal, PageHeader, QueryView, Table, TableSkeleton } from "../kit/ui";
+import { Badge, Card, type Column, ErrorState, Modal, PageHeader, QueryView, Segmented, type SegmentedOption, Table, TableSkeleton } from "../kit/ui";
 import { describe, readable } from "./access-errors";
 import "./access.css";
+import { FullAccessNotice } from "./FullAccessNotice";
 
 const OFFER_POLL_MS = 1000;
 const DEVICES_REFRESH_MS = 30_000;
+
+const ACCESS_OPTIONS: readonly SegmentedOption<DeviceAccess>[] = [
+	{ value: "full", label: "Full", title: "Everything the owner token can do" },
+	{ value: "threads", label: "Threads only", title: "Threads and reads; no settings changes, logins, secrets, GitHub or updates" },
+];
 
 const TERMINAL: Partial<Record<OfferStatus, true>> = { paired: true, declined: true, cancelled: true, burned: true, expired: true };
 
@@ -213,8 +222,11 @@ function PairCard({ active, onPaired }: { active: boolean; onPaired: () => void 
 					Approve only if you started this on a machine of yours. Expires in <Countdown expiresAt={offer.expiresAt} />.
 				</p>
 				<div className="access-actions">
-					<button type="button" className="btn" data-variant="primary" disabled={busy} onClick={() => void decide(approveOffer)}>
-						Approve
+					<button type="button" className="btn" data-variant="primary" disabled={busy} onClick={() => void decide(id => approveOffer(id, "full"))}>
+						Approve with full access
+					</button>
+					<button type="button" className="btn" disabled={busy} onClick={() => void decide(id => approveOffer(id, "threads"))}>
+						Approve, threads only
 					</button>
 					<button type="button" className="btn" data-variant="danger" disabled={busy} onClick={() => void decide(declineOffer)}>
 						Decline
@@ -256,6 +268,10 @@ export function DevicesPage({ active }: PageProps) {
 	const [revokeBusy, setRevokeBusy] = useState(false);
 	const [revokeError, setRevokeError] = useState<string | null>(null);
 	const [notice, setNotice] = useState<string | null>(null);
+	const full = useAccess() === "full";
+	const [demoting, setDemoting] = useState<Device | null>(null);
+	const [accessBusy, setAccessBusy] = useState<string | null>(null);
+	const [accessError, setAccessError] = useState<string | null>(null);
 
 	async function revoke(device: Device): Promise<void> {
 		setRevokeBusy(true);
@@ -273,6 +289,27 @@ export function DevicesPage({ active }: PageProps) {
 			setRevokeError(describe(failure));
 		} finally {
 			setRevokeBusy(false);
+		}
+	}
+
+	/** Sets a device's access. Changing this device's own reloads the page: its menus and locked pages come from the access it signed in with. */
+	async function changeAccess(device: Device, access: DeviceAccess): Promise<void> {
+		setAccessBusy(device.id);
+		try {
+			await setDeviceAccess(device.id, access);
+			setDemoting(null);
+			if (device.current) {
+				window.location.reload();
+				return;
+			}
+			setNotice(`${device.name} now has ${access === "full" ? "full access" : "threads-only access"}.`);
+			devices.refetch();
+		} catch (failure) {
+			setNotice(null);
+			setDemoting(null);
+			setAccessError(describe(failure));
+		} finally {
+			setAccessBusy(null);
 		}
 	}
 
@@ -303,6 +340,29 @@ export function DevicesPage({ active }: PageProps) {
 				device.lastSeenAt ? `${ago(device.lastSeenAt)}${device.lastSeenAddress ? ` from ${device.lastSeenAddress}` : ""}` : "never",
 		},
 		{
+			key: "access",
+			header: "Access",
+			sort: device => device.access,
+			render: device =>
+				full ? (
+					<fieldset className="access-fieldset" disabled={accessBusy === device.id}>
+						<Segmented
+							options={ACCESS_OPTIONS}
+							value={device.access}
+							size="sm"
+							aria-label={`Access of ${device.name}`}
+							onChange={access => {
+								if (access === device.access) return;
+								if (device.current && access === "threads") setDemoting(device);
+								else void changeAccess(device, access);
+							}}
+						/>
+					</fieldset>
+				) : (
+					<Badge tone={device.access === "full" ? "ok" : "warn"}>{device.access === "full" ? "full access" : "threads only"}</Badge>
+				),
+		},
+		{
 			key: "revoke",
 			header: "",
 			align: "right",
@@ -327,19 +387,20 @@ export function DevicesPage({ active }: PageProps) {
 		<div className="page">
 			<PageHeader
 				title="Devices"
-				description="Each paired device has its own token. Revoking one signs it out at once; its running requests and event streams end."
+				description="Each paired device has its own token and an access level: full is everything the owner token can do, threads only is threads and reads. Revoking one signs it out at once; its running requests and event streams end."
 				actions={
 					<button type="button" className="btn" data-size="sm" data-variant="ghost" onClick={devices.refetch}>
 						<RotateCw size={13} /> Refresh
 					</button>
 				}
 			/>
-			<PairCard active={active} onPaired={devices.refetch} />
+			{full ? <PairCard active={active} onPaired={devices.refetch} /> : <FullAccessNotice />}
 			<Card title="Paired devices" flush footer={notice === null ? undefined : <span className="access-ok">{notice}</span>}>
 				<QueryView query={devices} skeleton={<TableSkeleton rows={4} />}>
 					{rows => <Table columns={columns} rows={rows} rowKey={device => device.id} empty="No paired devices." />}
 				</QueryView>
 			</Card>
+			{accessError !== null && <ErrorState error={accessError} />}
 			<Modal
 				open={revoking !== null}
 				title="Revoke device"
@@ -357,6 +418,19 @@ export function DevicesPage({ active }: PageProps) {
 					{revoking?.current && <p className="muted">This is the device you are using now: it loses access immediately.</p>}
 					{revokeError !== null && <ErrorState error={revokeError} />}
 				</div>
+			</Modal>
+			<Modal
+				open={demoting !== null}
+				title="Change this device's access"
+				onClose={() => setDemoting(null)}
+				primaryAction={{
+					label: "Give threads-only access",
+					onClick: () => {
+						if (demoting) void changeAccess(demoting, "threads");
+					},
+				}}
+			>
+				<p>Give this device threads-only access? This dashboard then loses Settings changes, Logins, Secrets, GitHub and updates.</p>
 			</Modal>
 		</div>
 	);

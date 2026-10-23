@@ -1,6 +1,6 @@
 /** The dashboard's entry: the frame guard, the sign-in flow, then the app. */
 import { createRoot } from "react-dom/client";
-import { getSession, onUnauthorized, signIn, signOut } from "./api";
+import { getSession, getWhoami, onUnauthorized, signIn, signOut, type Whoami } from "./api";
 import { App } from "./app/App";
 import { messageOf } from "./app/query";
 import { SessionProvider } from "./app/session";
@@ -33,12 +33,13 @@ if (window.top === window.self) {
 		root.render(<SignIn notice={notice} onSignedIn={() => void start()} />);
 	};
 
-	const startSession = (user: string): void => {
+	const startSession = (user: string, identity: Whoami): void => {
 		stopSession();
 		const stream = startLive(() => showSignIn(endedNotice("The connection to the service was lost and your session ended.")));
 		live = stream;
 		const value = {
 			user,
+			identity,
 			live: stream,
 			async signOut() {
 				await signOut();
@@ -69,7 +70,7 @@ if (window.top === window.self) {
 		try {
 			const current = await getSession();
 			if (current === null) showSignIn(notice);
-			else startSession(current.user);
+			else startSession(current.user, await getWhoami());
 		} catch (error) {
 			showSignIn(`Cannot reach the service: ${messageOf(error)}`);
 		}

@@ -8,6 +8,8 @@ export interface NavItem {
 	hash: string;
 	/** Second key of the `g <key>` jump shortcut. */
 	hotkey: string;
+	/** The page's writes (or all of it) need full access: a device with threads-only access sees a lock. */
+	needsFullAccess?: true;
 }
 
 export interface NavGroup {
@@ -30,9 +32,9 @@ export const NAV: readonly NavGroup[] = [
 		heading: "Access",
 		items: [
 			{ id: "devices", label: "Devices", icon: Smartphone, hash: "#/devices", hotkey: "d" },
-			{ id: "logins", label: "Logins", icon: KeyRound, hash: "#/logins", hotkey: "l" },
-			{ id: "github", label: "GitHub", icon: GitBranch, hash: "#/github", hotkey: "g" },
-			{ id: "secrets", label: "Secrets", icon: LockKeyhole, hash: "#/secrets", hotkey: "k" },
+			{ id: "logins", label: "Logins", icon: KeyRound, hash: "#/logins", hotkey: "l", needsFullAccess: true },
+			{ id: "github", label: "GitHub", icon: GitBranch, hash: "#/github", hotkey: "g", needsFullAccess: true },
+			{ id: "secrets", label: "Secrets", icon: LockKeyhole, hash: "#/secrets", hotkey: "k", needsFullAccess: true },
 		],
 	},
 	{

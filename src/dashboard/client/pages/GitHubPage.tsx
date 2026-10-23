@@ -1,7 +1,6 @@
 /** GitHub for the cloud: the App that pushes and opens pull requests, the key that signs commits, and the settings that steer both. */
 import { useEffect, useRef, useState } from "react";
 import {
-	ApiError,
 	createSigningKey,
 	deleteSigningKey,
 	disconnectGithub,
@@ -18,28 +17,15 @@ import {
 import { clearGithubReturnError, githubReturned, readGithubReturnError } from "../app/github-return";
 import type { PageProps } from "../app/page";
 import { messageOf, useQuery } from "../app/query";
+import { useAccess } from "../app/session";
 import { dateTime, safeHref } from "../format";
 import { Badge, Card, ErrorState, KeyValues, Modal, PageHeader, QueryView, Segmented, TableSkeleton } from "../kit/ui";
+import { describe, readable } from "./access-errors";
 import "./access.css";
+import { LockedPage } from "./FullAccessNotice";
 
-const OWNER_ONLY = "Connect GitHub from the dashboard on the service host.";
 const NEW_SIGNING_KEY_URL = "https://github.com/settings/ssh/new";
 const ORG_NAME = /^[A-Za-z0-9-]{1,39}$/;
-
-/** An error as one readable line; a 403 means a paired device's session reached an owner-only route. */
-function describe(error: unknown): string {
-	if (error instanceof ApiError && error.status === 403) return OWNER_ONLY;
-	return messageOf(error);
-}
-
-/** Awaits `call`; a failure rethrows as an `Error` whose message is `describe`'s, so `ErrorState` shows it as is. */
-async function readable<T>(call: Promise<T>): Promise<T> {
-	try {
-		return await call;
-	} catch (error) {
-		throw new Error(describe(error), { cause: error });
-	}
-}
 
 /** A link that opens GitHub in a new tab; text only when the URL is not http(s). */
 function ExternalLink({ url, children }: { url: string; children: string }) {
@@ -391,7 +377,7 @@ function PullRequestsCard({ push, pr, onChanged }: { push: Setting | undefined; 
 	);
 }
 
-export function GitHubPage({ active }: PageProps) {
+function GitHubContent({ active }: PageProps) {
 	const [returnError, setReturnError] = useState<string | null>(null);
 	useEffect(() => {
 		void githubReturned().then(() => setReturnError(readGithubReturnError()));
@@ -460,4 +446,11 @@ export function GitHubPage({ active }: PageProps) {
 			</QueryView>
 		</div>
 	);
+}
+
+export function GitHubPage(props: PageProps) {
+	if (useAccess() === "threads") {
+		return <LockedPage title="GitHub" description="Connect GitHub once: cloud agents then push to your private repositories, sign their commits and open pull requests." />;
+	}
+	return <GitHubContent {...props} />;
 }

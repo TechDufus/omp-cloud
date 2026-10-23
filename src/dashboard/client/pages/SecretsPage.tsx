@@ -4,10 +4,12 @@ import { useState } from "react";
 import { deleteSecret, getSecrets, putSecret, type Secret } from "../api";
 import type { PageProps } from "../app/page";
 import { useQuery } from "../app/query";
+import { useAccess } from "../app/session";
 import { ago } from "../format";
 import { Badge, Card, type Column, ErrorState, Modal, PageHeader, QueryView, Table, TableSkeleton } from "../kit/ui";
 import { describe, readable } from "./access-errors";
 import "./access.css";
+import { LockedPage } from "./FullAccessNotice";
 
 /** One glob per line; commas also separate, since a pasted list often uses them. */
 function parseRepos(text: string): string[] {
@@ -130,7 +132,7 @@ function SecretForm({ replacing, onSaved }: FormProps) {
 	);
 }
 
-export function SecretsPage({ active }: PageProps) {
+function SecretsContent({ active }: PageProps) {
 	const secrets = useQuery(["secrets"], () => readable(getSecrets()), { enabled: active });
 	const [replacing, setReplacing] = useState<Secret | null>(null);
 	const [deleting, setDeleting] = useState<Secret | null>(null);
@@ -258,4 +260,16 @@ export function SecretsPage({ active }: PageProps) {
 			</Modal>
 		</div>
 	);
+}
+
+export function SecretsPage(props: PageProps) {
+	if (useAccess() === "threads") {
+		return (
+			<LockedPage
+				title="Secrets"
+				description="Environment variables for cloud agents, set once here. A thread gets only the secrets whose repositories match its own; nothing goes to a thread by default."
+			/>
+		);
+	}
+	return <SecretsContent {...props} />;
 }

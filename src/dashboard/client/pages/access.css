@@ -5,6 +5,35 @@
 	gap: 12px;
 }
 
+/* A group of controls disabled as one for a device with threads-only access: no frame, dimmed while disabled. */
+.access-fieldset {
+	margin: 0;
+	padding: 0;
+	border: 0;
+	min-width: 0;
+}
+
+.access-fieldset:disabled {
+	opacity: 0.55;
+}
+
+/* A strip above a page that says why its controls are off. */
+.access-banner {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 14px;
+	border-radius: var(--r-control);
+	border: 1px solid var(--line-2);
+	background: var(--warn-soft);
+	color: var(--warn);
+	font-size: 13px;
+}
+
+.access-banner svg {
+	flex: none;
+}
+
 .access-fields {
 	display: flex;
 	flex-wrap: wrap;
@@ -36,6 +65,15 @@ textarea.input {
 .access-fine {
 	font-size: 12.5px;
 	color: var(--ink-3);
+	overflow-wrap: anywhere;
+}
+
+.access-warn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12.5px;
+	color: var(--warn);
 	overflow-wrap: anywhere;
 }
 

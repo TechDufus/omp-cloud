@@ -1,8 +1,10 @@
 /** The settings store: one editor per key, the audit trail, and YAML export and import. */
+import { Lock } from "lucide-react";
 import { useState } from "react";
 import { type AuditEntry, type AuditPage, getAudit, getSettings, importSettings, putSettings, SETTINGS_EXPORT_PATH, type Setting } from "../api";
 import type { PageProps } from "../app/page";
 import { messageOf, useQuery } from "../app/query";
+import { NEEDS_FULL_ACCESS, useAccess } from "../app/session";
 import { dateTime } from "../format";
 import { Badge, Card, type Column, ErrorState, Modal, PageHeader, QueryView, Segmented, Table, TableSkeleton } from "../kit/ui";
 import { describe, readable } from "./access-errors";
@@ -154,7 +156,7 @@ function Editor({ setting, text, checked, onText, onChecked }: EditorProps) {
 }
 
 /** One setting: its documentation, editor, Save and Reset. Remounted (via `key`) when the stored value changes, so the draft restarts from it. */
-function SettingCard({ setting, onApplied }: { setting: Setting; onApplied: () => void }) {
+function SettingCard({ setting, readOnly, onApplied }: { setting: Setting; readOnly: boolean; onApplied: () => void }) {
 	const [text, setText] = useState(() => initialText(setting));
 	const [checked, setChecked] = useState(setting.value === true);
 	const [error, setError] = useState<string | null>(null);
@@ -193,32 +195,34 @@ function SettingCard({ setting, onApplied }: { setting: Setting; onApplied: () =
 				</span>
 			}
 		>
-			<div className="access-stack">
-				<div>
-					<Editor setting={setting} text={text} checked={checked} onText={setText} onChecked={setChecked} />
+			<fieldset className="access-fieldset" disabled={readOnly} title={readOnly ? NEEDS_FULL_ACCESS : undefined}>
+				<div className="access-stack">
+					<div>
+						<Editor setting={setting} text={text} checked={checked} onText={setText} onChecked={setChecked} />
+					</div>
+					<div className="access-actions">
+						<button
+							type="button"
+							className="btn"
+							data-variant="primary"
+							disabled={busy}
+							onClick={() => void apply(() => readValue(setting, text, checked))}
+						>
+							Save
+						</button>
+						<button type="button" className="btn" disabled={busy || !stored} onClick={() => void apply(() => null)}>
+							Reset to default
+						</button>
+					</div>
+					{error !== null && <ErrorState error={error} />}
 				</div>
-				<div className="access-actions">
-					<button
-						type="button"
-						className="btn"
-						data-variant="primary"
-						disabled={busy}
-						onClick={() => void apply(() => readValue(setting, text, checked))}
-					>
-						Save
-					</button>
-					<button type="button" className="btn" disabled={busy || !stored} onClick={() => void apply(() => null)}>
-						Reset to default
-					</button>
-				</div>
-				{error !== null && <ErrorState error={error} />}
-			</div>
+			</fieldset>
 		</Card>
 	);
 }
 
 /** Paste or load YAML and import it, merging into or replacing the stored settings. */
-function ImportCard({ onImported }: { onImported: () => void }) {
+function ImportCard({ readOnly, onImported }: { readOnly: boolean; onImported: () => void }) {
 	const [yaml, setYaml] = useState("");
 	const [mode, setMode] = useState<ImportMode>("replace");
 	const [error, setError] = useState<string | null>(null);
@@ -261,36 +265,38 @@ function ImportCard({ onImported }: { onImported: () => void }) {
 
 	return (
 		<Card title="Import YAML" description="Paste YAML or load a file, for example one exported from here.">
-			<div className="access-stack">
-				<input
-					className="access-file"
-					type="file"
-					accept=".yaml,.yml,text/yaml,text/plain"
-					aria-label="YAML file"
-					onChange={event => {
-						const input = event.currentTarget;
-						void load(input.files?.[0]).then(() => {
-							input.value = "";
-						});
-					}}
-				/>
-				<textarea
-					className="input"
-					rows={8}
-					spellCheck={false}
-					placeholder={"git:\n  push: ask\n  protected:\n    - main\n    - release/*"}
-					value={yaml}
-					onChange={event => setYaml(event.target.value)}
-					aria-label="Settings YAML"
-				/>
-				<div className="access-actions">
-					<Segmented options={IMPORT_MODES} value={mode} onChange={setMode} aria-label="Import mode" />
-					<button type="button" className="btn" data-variant="primary" disabled={busy} onClick={submit}>
-						Import
-					</button>
+			<fieldset className="access-fieldset" disabled={readOnly} title={readOnly ? NEEDS_FULL_ACCESS : undefined}>
+				<div className="access-stack">
+					<input
+						className="access-file"
+						type="file"
+						accept=".yaml,.yml,text/yaml,text/plain"
+						aria-label="YAML file"
+						onChange={event => {
+							const input = event.currentTarget;
+							void load(input.files?.[0]).then(() => {
+								input.value = "";
+							});
+						}}
+					/>
+					<textarea
+						className="input"
+						rows={8}
+						spellCheck={false}
+						placeholder={"git:\n  push: ask\n  protected:\n    - main\n    - release/*"}
+						value={yaml}
+						onChange={event => setYaml(event.target.value)}
+						aria-label="Settings YAML"
+					/>
+					<div className="access-actions">
+						<Segmented options={IMPORT_MODES} value={mode} onChange={setMode} aria-label="Import mode" />
+						<button type="button" className="btn" data-variant="primary" disabled={busy} onClick={submit}>
+							Import
+						</button>
+					</div>
+					{error !== null && <ErrorState error={error} />}
 				</div>
-				{error !== null && <ErrorState error={error} />}
-			</div>
+			</fieldset>
 			<Modal
 				open={confirming}
 				title="Replace all stored settings?"
@@ -323,6 +329,7 @@ export function SettingsPage({ active }: PageProps) {
 	const [olderBusy, setOlderBusy] = useState(false);
 	const [olderError, setOlderError] = useState<string | null>(null);
 
+	const readOnly = useAccess() === "threads";
 	const settings = useQuery(["settings"], () => readable(getSettings()), { enabled: active });
 	const audit = useQuery(["audit", epoch], () => readable(getAudit(null)), { enabled: active });
 
@@ -360,6 +367,12 @@ export function SettingsPage({ active }: PageProps) {
 					</a>
 				}
 			/>
+			{readOnly && (
+				<div className="access-banner" role="status">
+					<Lock size={14} />
+					<span>This device has threads-only access: settings are read-only here.</span>
+				</div>
+			)}
 			<UpdateCard onModeChanged={applied} />
 			<QueryView query={settings} skeleton={<TableSkeleton rows={8} />}>
 				{rows => (
@@ -367,12 +380,17 @@ export function SettingsPage({ active }: PageProps) {
 						{rows
 							.filter(setting => setting.key !== UPDATE_MODE_KEY)
 							.map(setting => (
-								<SettingCard key={`${setting.key}:${setting.source}:${setting.updatedAt}`} setting={setting} onApplied={applied} />
+								<SettingCard
+									key={`${setting.key}:${setting.source}:${setting.updatedAt}`}
+									setting={setting}
+									readOnly={readOnly}
+									onApplied={applied}
+								/>
 							))}
 					</div>
 				)}
 			</QueryView>
-			<ImportCard onImported={applied} />
+			<ImportCard readOnly={readOnly} onImported={applied} />
 			<Card
 				title="Audit"
 				flush

@@ -3,10 +3,12 @@ import { CircleArrowUp, CircleCheck, LoaderCircle, TriangleAlert, X } from "luci
 import { useState } from "react";
 import { Modal } from "../kit/ui";
 import { Markdown } from "./Markdown";
+import { useAccess } from "./session";
 import { useUpdate } from "./update-context";
 
 export function UpdatePill() {
 	const { pill, busy, apply, check, dismiss } = useUpdate();
+	const full = useAccess() === "full";
 	const [confirming, setConfirming] = useState(false);
 	const [reading, setReading] = useState(false);
 	if (pill === null) return null;
@@ -41,15 +43,17 @@ export function UpdatePill() {
 				<span className="update-pill" data-tone="bad" role="alert" title={pill.error}>
 					<TriangleAlert size={13} />
 					<span className="update-pill-text">Update failed: {pill.error}</span>
-					<button
-						type="button"
-						className="btn"
-						data-size="sm"
-						disabled={busy}
-						onClick={() => void (pill.retry === "apply" ? apply() : check())}
-					>
-						Retry
-					</button>
+					{full && (
+						<button
+							type="button"
+							className="btn"
+							data-size="sm"
+							disabled={busy}
+							onClick={() => void (pill.retry === "apply" ? apply() : check())}
+						>
+							Retry
+						</button>
+					)}
 				</span>
 			);
 		case "updated":
@@ -75,12 +79,14 @@ export function UpdatePill() {
 		case "ready":
 			return (
 				<>
-					<span className="update-pill" data-tone="accent" role="status">
+					<span className="update-pill" data-tone="accent" role="status" title={full ? undefined : "A connection with full access installs it"}>
 						<CircleArrowUp size={13} />
 						<span className="update-pill-text">Update ready · {pill.version}</span>
-						<button type="button" className="btn" data-variant="accent" data-size="sm" disabled={busy} onClick={() => setConfirming(true)}>
-							Restart to update
-						</button>
+						{full && (
+							<button type="button" className="btn" data-variant="accent" data-size="sm" disabled={busy} onClick={() => setConfirming(true)}>
+								Restart to update
+							</button>
+						)}
 					</span>
 					<Modal
 						open={confirming}

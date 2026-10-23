@@ -1,0 +1,57 @@
+/* The VMs page's Capacity card. */
+.capacity-body {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+
+/* A tile's hint wraps here instead of being cut: "limit 32 · each 2 vCPU, 4 GiB" is the point of the VMs tile. */
+.capacity-body .stat-foot .truncate {
+	white-space: normal;
+	overflow: visible;
+	text-overflow: clip;
+}
+
+.capacity-chart {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.capacity-machines > summary {
+	cursor: pointer;
+	padding: 4px 0;
+	font-weight: 500;
+	color: var(--ink-2);
+}
+
+.capacity-machines[open] > summary {
+	margin-bottom: 8px;
+}
+
+.capacity-add {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	width: 100%;
+}
+
+.capacity-join {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+
+.capacity-command {
+	flex: 1 1 320px;
+	min-width: 0;
+	padding: 6px 10px;
+	border: 1px solid var(--line-2);
+	border-radius: var(--r-control);
+	background: var(--card);
+	font-family: var(--font-mono);
+	font-size: 12.5px;
+	overflow-wrap: anywhere;
+	user-select: all;
+}
