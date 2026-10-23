@@ -28,6 +28,7 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 ### Fixed
 
+- **A VM that stayed unreachable failed its thread for good.** After the five retries (about four minutes), a thread whose paused VM answered `503` for ever, for example on a machine that was asleep or gone, failed with `the VM stopped responding`. When vibemon itself answers `GET /health`, the thread is now restored on a new VM from its last result and conversation, with the `vm` event `the VM did not answer for about 4 minutes (…); restoring the thread on a new VM`. If vibemon does not answer either, the thread fails as before.
 - **The limits text said the whole team had 8 vCPUs, 8192 MB and 20480 MB.** Those are vibemon's per-VM ceilings, not team totals. Setup's step text and `docs/install.md` now say so.
 
 ## 0.7.0 (2026-10-22)

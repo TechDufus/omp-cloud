@@ -28,6 +28,8 @@ export interface SandboxMetricsSample {
 const METRICS_WINDOW_MS = 5 * 60_000;
 /** A metrics request that takes longer is abandoned: the dashboard shows the VM without a sample. */
 const METRICS_TIMEOUT_MS = 5000;
+/** `healthy` waits this long for vmon's `/health`. */
+const HEALTH_TIMEOUT_MS = 5000;
 
 /**
  * The sandbox network of the egress policy: undefined when `egress` is empty (the network stays open), else everything
@@ -126,6 +128,16 @@ export class Vmon {
 		} catch (error) {
 			if (error instanceof SandboxNotFoundError) return null;
 			throw error;
+		}
+	}
+
+	/** True when vmon answers its own `GET /health` with 204 within 5 s: it is up, whatever a single sandbox does. Never throws. */
+	async healthy(): Promise<boolean> {
+		try {
+			const response = await fetch(`${this.connection.apiUrl}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+			return response.status === 204;
+		} catch {
+			return false;
 		}
 	}
 
