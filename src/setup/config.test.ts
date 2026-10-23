@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseConfig } from "../config";
-import { defaultServiceConfig, ensureAdminToken, ensureDirs, ensureGatewayClients, ensureServiceConfig, migrateServiceConfig, readVmonKey, recordedTeam, type SetupPaths, setupPaths, writeVmonKey } from "./config";
+import { defaultServiceConfig, ensureAdminToken, ensureClusterSecret, ensureDirs, ensureGatewayClients, ensureServiceConfig, migrateServiceConfig, readVmonKey, recordedClusterAddress, recordedTeam, type SetupPaths, setupPaths, writeVmonKey } from "./config";
 
 let dir: string;
 let paths: SetupPaths;
@@ -239,5 +239,55 @@ describe("ensureAdminToken", () => {
 		const step = await ensureAdminToken(paths, undefined);
 		expect(step).toEqual({ id: "config.admin", status: "skipped", detail: "/etc/vmon/env holds no VMON_ADMIN_TOKEN: capacity stays hidden" });
 		expect(await Bun.file(paths.vmonAdminToken).exists()).toBe(false);
+	});
+});
+
+describe("cluster mode in service.json and the secret file", () => {
+	const LAN = "192.168.1.20";
+
+	test("defaultServiceConfig adds both cluster keys only with an address, and the service accepts them", () => {
+		const config = defaultServiceConfig(paths, "d".repeat(64), "omp-cloud", LAN);
+		expect(parseConfig(config).vmon).toMatchObject({ clusterAddress: LAN, clusterSecretFile: paths.vmonClusterSecret });
+		expect(defaultServiceConfig(paths, "d".repeat(64), "omp-cloud").vmon).not.toHaveProperty("clusterAddress");
+	});
+
+	test("ensureServiceConfig sets, keeps and removes the keys of an existing file, and recordedClusterAddress reads them", async () => {
+		await ensureDirs(paths);
+		await ensureServiceConfig(paths, "omp-cloud");
+		expect(await recordedClusterAddress(paths)).toBeNull();
+
+		const set = await ensureServiceConfig(paths, "omp-cloud", LAN);
+		expect(set.steps[0]?.detail).toContain(`vmon.clusterAddress set to ${LAN}`);
+		expect(await recordedClusterAddress(paths)).toBe(LAN);
+		expect(JSON.parse(await readFile(paths.serviceJson, "utf8")).vmon.clusterSecretFile).toBe(paths.vmonClusterSecret);
+
+		const kept = await ensureServiceConfig(paths, "omp-cloud", LAN);
+		expect(kept.steps.map((step) => step.status)).toEqual(["ok"]);
+
+		const removed = await ensureServiceConfig(paths, "omp-cloud", null);
+		expect(removed.steps[0]?.detail).toContain("vmon.clusterAddress and vmon.clusterSecretFile removed");
+		expect(await recordedClusterAddress(paths)).toBeNull();
+		expect(JSON.parse(await readFile(paths.serviceJson, "utf8")).vmon).not.toHaveProperty("clusterSecretFile");
+	});
+
+	test("recordedClusterAddress is null for a missing or broken file", async () => {
+		expect(await recordedClusterAddress(paths)).toBeNull();
+		await mkdir(paths.configDir, { recursive: true });
+		await writeFile(paths.serviceJson, "{not json");
+		expect(await recordedClusterAddress(paths)).toBeNull();
+	});
+
+	test("ensureClusterSecret writes a 0600 file once, never puts the secret in a step, and deletes it out of cluster mode", async () => {
+		await ensureDirs(paths);
+		const written = await ensureClusterSecret(paths, LAN, "s3cret-value");
+		expect(written).toMatchObject({ id: "config.cluster", status: "changed" });
+		expect(JSON.stringify(written)).not.toContain("s3cret-value");
+		expect(await readFile(paths.vmonClusterSecret, "utf8")).toBe("s3cret-value");
+		expect(await mode(paths.vmonClusterSecret)).toBe(0o600);
+		expect(await ensureClusterSecret(paths, LAN, "s3cret-value")).toMatchObject({ status: "ok" });
+		expect(await ensureClusterSecret(paths, LAN, undefined)).toMatchObject({ status: "failed", fix: "omp-cloud setup" });
+		expect(await ensureClusterSecret(paths, null, undefined)).toMatchObject({ status: "changed" });
+		expect(await stat(paths.vmonClusterSecret).catch(() => null)).toBeNull();
+		expect(await ensureClusterSecret(paths, null, undefined)).toBeNull();
 	});
 });

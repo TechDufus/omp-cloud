@@ -2,7 +2,8 @@
  * `omp-cloud uninstall [--purge] [--yes] [--checkout]`: stops and removes the user units, the plugin and the `~/.local/bin`
  * link, then runs the root part with `--uninstall` (vmon's and the network's system units, the helper and its sudoers rule,
  * linger when setup enabled it). `--purge` also removes vibemon's files and every omp-cloud directory of this user; backups
- * are always kept.
+ * are always kept. On a vibemon node (`/etc/omp-cloud/node.env` exists) there are no user units, plugin, sandboxes of the
+ * team or service data: it removes the link and runs the root part, and `--purge` also removes the app directory.
  */
 import { readdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -13,6 +14,7 @@ import { removeAppDir, removeBinaryLink } from "./managed";
 import { personalConfigPath } from "./plugin";
 import { runRootPart, sudoCommand, sudoReady } from "./root";
 import { Reporter, type StepResult } from "./steps";
+import { NODE_ENV_FILE } from "./system";
 import { removeUserUnits } from "./units";
 
 const USAGE = "usage: omp-cloud uninstall [--purge] [--yes] [--checkout]";
@@ -39,9 +41,22 @@ export function parseUninstallArgs(argv: readonly string[]): ParsedUninstallArgs
 	return { ok: true, args };
 }
 
-/** What uninstall will do and keep, printed before anything is removed. */
-export function buildUninstallPlan(args: UninstallArgs, ctx: SetupContext): string[] {
+/** What uninstall will do and keep, printed before anything is removed. `node`: this machine is a vibemon node, which has none of the server's user units, plugin or data. */
+export function buildUninstallPlan(args: UninstallArgs, ctx: SetupContext, node: boolean): string[] {
 	const { paths } = ctx;
+	if (node) {
+		const lines = [
+			"omp-cloud uninstall will:",
+			"  - remove the ~/.local/bin/omp-cloud link",
+			"  - as root (asks for sudo once): stop and remove the system units vmon, omp-cloud-node-net and omp-cloud-vmon-sync (with its timer), the vibemon install and sync helpers and the sudoers rule, and /etc/omp-cloud/node.env",
+			"  - VMs running on this machine are lost; the server restores their threads on its other machines",
+		];
+		if (args.purge) {
+			lines.push("  - --purge: also delete vibemon (/opt/vmon, /var/lib/vmon with every VM and template, /etc/vmon) and /etc/omp-cloud", `  - --purge: also delete ${paths.appDir}`);
+		}
+		lines.push(`kept: ${args.purge ? paths.configDir : `${paths.appDir} and vibemon's data`}`);
+		return lines;
+	}
 	const lines = [
 		"omp-cloud uninstall will:",
 		"  - stop and remove the user units omp-auth-broker, omp-auth-gateway, omp-cloud and omp-cloud-backup (with its timer)",
@@ -106,7 +121,8 @@ export async function runUninstall(args: UninstallArgs, ctx: SetupContext): Prom
 		reporter.report({ id: "uninstall.binary", status: "failed", detail: "run omp-cloud uninstall from the installed binary, or pass --checkout in a checkout" });
 		return finish();
 	}
-	reporter.note(buildUninstallPlan(args, ctx).join("\n"));
+	const node = await ctx.preflight.exists(NODE_ENV_FILE);
+	reporter.note(buildUninstallPlan(args, ctx, node).join("\n"));
 	if (!args.yes) {
 		if (!ctx.stdinIsTty) {
 			process.stderr.write("omp-cloud: no terminal to ask on; run omp-cloud uninstall in a terminal, or pass --yes\n");
@@ -128,12 +144,16 @@ export async function runUninstall(args: UninstallArgs, ctx: SetupContext): Prom
 		return finish();
 	}
 
-	// The service first: its runner reconnects to a VM that pauses under it.
-	reporter.reportAll(await removeUserUnits(paths, ctx.run));
-	reporter.report(await retireSandboxes(ctx, args.purge));
-	const omp = await findOmp(ctx);
-	reporter.reportAll(await ctx.parts.removePlugin({ run: ctx.run, omp, mode: args.checkout ? "checkout" : "managed", appDir: paths.appDir }));
-	reporter.report(await removeBinaryLink(paths));
+	if (node) {
+		reporter.report(await removeBinaryLink(paths));
+	} else {
+		// The service first: its runner reconnects to a VM that pauses under it.
+		reporter.reportAll(await removeUserUnits(paths, ctx.run));
+		reporter.report(await retireSandboxes(ctx, args.purge));
+		const omp = await findOmp(ctx);
+		reporter.reportAll(await ctx.parts.removePlugin({ run: ctx.run, omp, mode: args.checkout ? "checkout" : "managed", appDir: paths.appDir }));
+		reporter.report(await removeBinaryLink(paths));
+	}
 
 	const root = await runRootPart(ctx.run, ctx.self, rootArguments);
 	if (root.ok) {
@@ -146,6 +166,11 @@ export async function runUninstall(args: UninstallArgs, ctx: SetupContext): Prom
 	}
 	if (reporter.failed) return finish();
 
+	if (node) {
+		if (args.purge) reporter.report(await removeAppDir(paths));
+		reporter.note(`kept: ${args.purge ? paths.configDir : `${paths.appDir} and vibemon's data (omp-cloud uninstall --purge removes them)`}`);
+		return finish();
+	}
 	if (args.purge) {
 		reporter.report(await removeDir("uninstall.config", paths.configDir));
 		const personal = personalConfigPath(ctx.env, paths.home);

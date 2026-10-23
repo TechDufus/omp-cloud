@@ -85,6 +85,7 @@ function host(options: HostOptions = {}): Host {
 		vmonHealth: async () => 204,
 		pin: "v0.4.0",
 		helperScript: options.helperScript ?? "#!/bin/sh\n# the embedded helper\n",
+		syncScript: "#!/bin/sh\n# the embedded sync script\n",
 	};
 	return { deps, runner, human, stdout, secrets, report: () => parseSystemReport(stdout.at(-1)?.trim() ?? "") };
 }
@@ -97,11 +98,11 @@ describe("parseSystemArgs", () => {
 	test("takes every documented flag, with defaults for the rest", () => {
 		expect(parseSystemArgs(["--user", "alice"])).toEqual({
 			ok: true,
-			args: { user: "alice", team: "omp-cloud", maxSandboxes: 32, packages: [], mintKey: false, noLinger: false, migrateTeam: false, uninstall: false, purge: false },
+			args: { user: "alice", team: "omp-cloud", maxSandboxes: 32, packages: [], mintKey: false, noLinger: false, migrateTeam: false, uninstall: false, purge: false, clusterAddress: null, node: null },
 		});
 		expect(parseSystemArgs(["--user=alice", "--team", "my-team", "--max-sandboxes=1000", "--packages", "curl,git,curl", "--mint-key", "--no-linger", "--migrate-team"])).toEqual({
 			ok: true,
-			args: { user: "alice", team: "my-team", maxSandboxes: 1000, packages: ["curl", "git"], mintKey: true, noLinger: true, migrateTeam: true, uninstall: false, purge: false },
+			args: { user: "alice", team: "my-team", maxSandboxes: 1000, packages: ["curl", "git"], mintKey: true, noLinger: true, migrateTeam: true, uninstall: false, purge: false, clusterAddress: null, node: null },
 		});
 		expect(parseSystemArgs(["--uninstall", "--purge"])).toMatchObject({ ok: true, args: { uninstall: true, purge: true } });
 		expect(parseSystemArgs(["--uninstall", "--user", "alice"])).toMatchObject({ ok: true, args: { user: "alice", uninstall: true } });
@@ -454,7 +455,7 @@ describe("runSystem: units, health and the team", () => {
 		const h = host({ teams: `9f1d\tomp-cloud\tomp-cloud\t${COUNTS}\n` });
 		await runSystem([...ARGS, "--mint-key"], h.deps);
 		expect(h.report().key).toBe(OTHER_KEY);
-		expect(h.report().team.created).toBe(false);
+		expect(h.report().team?.created).toBe(false);
 	});
 
 	test("--migrate-team creates the standard team (or mints for it) and reports a key", async () => {
@@ -650,13 +651,15 @@ describe("the report", () => {
 		const report = again.report();
 		expect(report.steps.filter((step) => step.status === "changed")).toEqual([]);
 		expect(report).not.toHaveProperty("key");
-		expect(report.team.created).toBe(false);
+		expect(report.team?.created).toBe(false);
 	});
 
 	test("parseSystemReport accepts a failure report and rejects anything malformed", () => {
 		const good: SystemReport = { ok: false, steps: [{ id: "a", status: "failed", detail: "x", fix: "y" }], team: { slug: "t", created: false }, netPool: "", linger: false };
 		const secrets: SystemReport = { ...good, adminToken: "a".repeat(256), clusterSecret: "s3cret" };
 		expect(parseSystemReport(JSON.stringify(secrets))).toEqual(secrets);
+		expect(parseSystemReport(JSON.stringify({ ...good, team: null }))).toEqual({ ...good, team: null });
+		expect(() => parseSystemReport(JSON.stringify({ ...good, team: "t" }))).toThrow("malformed team");
 		expect(parseSystemReport(JSON.stringify(good))).toEqual(good);
 		const bad: unknown[] = [
 			{ ...good, ok: "yes" },
@@ -725,5 +728,308 @@ describe("systemChecks", () => {
 		await systemChecks(runner.run, { root, user: "alice" });
 		for (const line of runner.lines()) expect(line).toMatch(/^(systemctl is-(enabled|active) |ip -o -4 addr show |curl |sudo -n -l )/);
 		await mkdir(root, { recursive: true });
+	});
+});
+
+const LAN = "192.168.1.20";
+const PIN = `sha256//${"A".repeat(43)}=`;
+const NODE_FLAGS = ["--node", "--user", "alice", "--vmon", "v0.4.0", "--server", LAN, "--remote-port", "8443", "--pin", PIN, "--secret-file", "/tmp/omp-cloud-node-x/secret"];
+const without = (argv: string[], flag: string): string[] => {
+	const at = argv.indexOf(flag);
+	return at === -1 ? argv : argv.filter((_, index) => index !== at && index !== at + (flag === "--node" || flag === "--route" ? 0 : 1));
+};
+const SECRET = "node-cluster-secret-from-the-server";
+
+describe("parseSystemArgs: cluster address and node flags", () => {
+	test("--cluster-address takes an IPv4 address, and only when setting up", () => {
+		expect(parseSystemArgs([...ARGS, "--cluster-address", LAN])).toMatchObject({ ok: true, args: { clusterAddress: LAN, node: null } });
+		for (const bad of ["192.168.1", "192.168.1.256", "lan.example", "::1", "192.168.1.20/24", "0.0.0.0", "127.0.0.1", "224.0.0.1", "255.255.255.255", "8.8.8.8", "192.169.1.1", "172.32.0.1", "192.168.01.20"]) {
+			expect(parseSystemArgs([...ARGS, "--cluster-address", bad])).toEqual({ ok: false, error: `--cluster-address ${JSON.stringify(bad)} is not a private LAN IPv4 address (10.x, 172.16-31.x or 192.168.x, no leading zeros)` });
+		}
+		for (const good of ["10.0.0.5", "172.16.0.1", "172.31.255.254", "192.168.1.20"]) {
+			expect(parseSystemArgs([...ARGS, "--cluster-address", good])).toMatchObject({ ok: true, args: { clusterAddress: good } });
+		}
+		expect(parseSystemArgs(["--uninstall", "--cluster-address", LAN])).toEqual({ ok: false, error: "--cluster-address cannot be combined with --uninstall" });
+	});
+
+	test("--node takes its flags and yields the node arguments", () => {
+		expect(parseSystemArgs(NODE_FLAGS)).toMatchObject({
+			ok: true,
+			args: { user: "alice", uninstall: false, clusterAddress: null, node: { vmon: "v0.4.0", server: LAN, remotePort: 8443, pin: PIN, secretFile: "/tmp/omp-cloud-node-x/secret", route: false } },
+		});
+		expect(parseSystemArgs([...NODE_FLAGS, "--route", "--packages", "curl"])).toMatchObject({ ok: true, args: { packages: ["curl"], node: { route: true } } });
+	});
+
+	test.each(["--vmon", "--server", "--remote-port", "--pin", "--secret-file"])("%s without --node is refused as needing --node", (flag) => {
+		const value = NODE_FLAGS[NODE_FLAGS.indexOf(flag) + 1] ?? "";
+		expect(parseSystemArgs([...ARGS, flag, value])).toEqual({ ok: false, error: `${flag} needs --node` });
+	});
+
+	test("--route without --node is refused as needing --node", () => {
+		expect(parseSystemArgs([...ARGS, "--route"])).toEqual({ ok: false, error: "--route needs --node" });
+	});
+
+	test.each([
+		["--team", "x"],
+		["--max-sandboxes", "3"],
+		["--mint-key"],
+		["--no-linger"],
+		["--migrate-team"],
+		["--cluster-address", LAN],
+	] satisfies string[][])("--node refuses %s", (...extra: string[]) => {
+		expect(parseSystemArgs([...NODE_FLAGS, ...extra])).toEqual({ ok: false, error: `${extra[0]} cannot be combined with --node` });
+	});
+
+	test.each(["--vmon", "--server", "--remote-port", "--pin", "--secret-file"])("--node without %s is refused", (flag) => {
+		expect(parseSystemArgs(without(NODE_FLAGS, flag))).toEqual({ ok: false, error: `${flag} is required with --node` });
+	});
+
+	test.each([
+		["a vibemon tag without v", ["--vmon", "0.4.0"]],
+		["a vibemon tag with a suffix", ["--vmon", "v0.4.0-rc1"]],
+		["a server that is a host name", ["--server", "server.lan"]],
+		["a server of 0.0.0.0", ["--server", "0.0.0.0"]],
+		["a loopback server", ["--server", "127.0.0.1"]],
+		["a multicast server", ["--server", "224.0.0.1"]],
+		["the broadcast address as the server", ["--server", "255.255.255.255"]],
+		["a server with a leading zero", ["--server", "192.168.01.20"]],
+		["a port of 0", ["--remote-port", "0"]],
+		["a port of 65536", ["--remote-port", "65536"]],
+		["a port that is not a number", ["--remote-port", "https"]],
+		["a pin without the prefix", ["--pin", "A".repeat(44)]],
+		["a pin of the wrong length", ["--pin", `sha256//${"A".repeat(42)}=`]],
+		["a relative secret path", ["--secret-file", "secret"]],
+		["a secret path with ..", ["--secret-file", "/tmp/../etc/shadow"]],
+		["a secret path with a space", ["--secret-file", "/tmp/a b"]],
+	])("--node refuses %s", (_name, [flag, value]) => {
+		const argv = [...without(NODE_FLAGS, flag ?? ""), flag ?? "", value ?? ""];
+		expect(parseSystemArgs(argv).ok).toBe(false);
+	});
+
+	test("--node cannot be combined with --uninstall, and neither can any node flag", () => {
+		expect(parseSystemArgs(["--uninstall", "--node"])).toEqual({ ok: false, error: "--node cannot be combined with --uninstall" });
+		expect(parseSystemArgs(["--uninstall", "--route"])).toEqual({ ok: false, error: "--route cannot be combined with --uninstall" });
+	});
+});
+
+describe("runSystem: cluster mode", () => {
+	const vmonUnit = () => readFile(join(root, "/etc/systemd/system/vmon.service"), "utf8");
+	const vmonActive = (argv: readonly string[]) => (argv[1] === "is-active" && argv[2] === "vmon.service" ? { code: 0 } : argv[1] === "is-enabled" ? { code: 0 } : undefined);
+
+	test("a server with a cluster address listens on it, never on 0.0.0.0, and reports the cluster secret and the admin token", async () => {
+		const h = host();
+		expect(await runSystem([...ARGS, "--cluster-address", LAN], h.deps)).toBe(0);
+		const unit = await vmonUnit();
+		expect(unit).toContain(`--cluster-listen ${LAN}:7947 --gossip-listen ${LAN}:7946`);
+		expect(unit).not.toContain("0.0.0.0");
+		const report = h.report();
+		expect(report.clusterSecret).toBe(h.secrets[0]);
+		expect(report.adminToken).toBe(h.secrets[1]);
+		const admin = h.runner.calls.filter((call) => call.argv[1] === "admin");
+		expect(admin.length).toBeGreaterThan(0);
+		for (const call of admin) expect(call.argv.slice(2, 4)).toEqual(["--cluster-url", `http://${LAN}:7947`]);
+	});
+
+	test("neither secret appears in any step, human line or command line", async () => {
+		const h = host();
+		await runSystem([...ARGS, "--cluster-address", LAN], h.deps);
+		const everything = [JSON.stringify(h.deps.reporter.steps), h.human.join(""), ...h.runner.lines()].join("\n");
+		for (const secret of h.secrets) expect(everything).not.toContain(secret);
+	});
+
+	test("a server without a cluster address listens on loopback only and reports no cluster secret", async () => {
+		const h = host();
+		await runSystem(ARGS, h.deps);
+		expect(await vmonUnit()).toContain("--cluster-listen 127.0.0.1:7947 --gossip-listen 127.0.0.1:7946");
+		expect(h.report()).not.toHaveProperty("clusterSecret");
+		for (const call of h.runner.calls.filter((call) => call.argv[1] === "admin")) expect(call.argv.slice(2, 4)).toEqual(["--cluster-url", "http://127.0.0.1:7947"]);
+	});
+
+	test("vmon restarts only when the address it listens on changes", async () => {
+		await runSystem(ARGS, host().deps);
+
+		const toLan = host({ respond: vmonActive });
+		await runSystem([...ARGS, "--cluster-address", LAN], toLan.deps);
+		expect(toLan.runner.lines()).toContain("systemctl restart vmon.service");
+		expect(toLan.report().steps.find((step) => step.id === "system.unit.vmon")).toMatchObject({ status: "changed", detail: `vmon.service restarted to listen for other vibemon machines on ${LAN}` });
+
+		const same = host({ respond: vmonActive });
+		await runSystem([...ARGS, "--cluster-address", LAN], same.deps);
+		expect(same.runner.lines()).not.toContain("systemctl restart vmon.service");
+		expect(same.report().steps.find((step) => step.id === "system.unit.vmon")?.status).toBe("ok");
+
+		const back = host({ respond: vmonActive });
+		await runSystem(ARGS, back.deps);
+		expect(back.runner.lines()).toContain("systemctl restart vmon.service");
+		expect(back.report().steps.find((step) => step.id === "system.unit.vmon")?.detail).toBe("vmon.service restarted to listen on 127.0.0.1 only");
+		expect(await vmonUnit()).toContain("--cluster-listen 127.0.0.1:7947");
+	});
+
+	test("a vmon that is not running is not restarted when its address changes", async () => {
+		await runSystem(ARGS, host().deps);
+		const h = host();
+		await runSystem([...ARGS, "--cluster-address", LAN], h.deps);
+		expect(h.runner.lines().some((line) => line.includes("restart"))).toBe(false);
+	});
+
+	test("a vmon that will not restart is a failed unit step and the run stops before the team", async () => {
+		await runSystem(ARGS, host().deps);
+		const h = host({ respond: (argv) => (argv[1] === "restart" ? { code: 1, stderr: "Job failed" } : vmonActive(argv)) });
+		expect(await runSystem([...ARGS, "--cluster-address", LAN], h.deps)).toBe(1);
+		expect(h.report().steps.at(-1)).toMatchObject({ id: "system.unit.vmon", status: "failed" });
+	});
+});
+
+describe("runSystem: node mode", () => {
+	const secretFile = () => join(root, "tmp", "secret");
+	const nodeArgs = (...extra: string[]) => [...without(NODE_FLAGS, "--secret-file"), "--secret-file", secretFile(), ...extra];
+	const active = (argv: readonly string[]) => (argv[1] === "is-active" ? { code: 0 } : argv[1] === "is-enabled" ? { code: 1 } : undefined);
+	const file = (path: string) => readFile(join(root, path), "utf8");
+
+	beforeEach(async () => {
+		await putFile(root, "/tmp/secret", `${SECRET}\n`, 0o600);
+	});
+
+	test("sets a machine up as a node: the steps in order, no team, no sudoers rule, no linger", async () => {
+		const h = host({ respond: active });
+		expect(await runSystem(nodeArgs(), h.deps)).toBe(0);
+		const report = h.report();
+		expect(report.team).toBeNull();
+		expect(report).not.toHaveProperty("key");
+		expect(report).not.toHaveProperty("adminToken");
+		expect(report.steps.map((step) => step.id)).toEqual([
+			"system.packages",
+			"system.user",
+			"system.node.guard",
+			"system.helper",
+			"system.vmon",
+			"system.env",
+			"system.node.conf",
+			"system.unit.omp-cloud-node-net",
+			"system.unit.vmon",
+			"system.unit.omp-cloud-vmon-sync",
+			"system.health",
+		]);
+		expect(h.runner.lines()).toContain(`${HELPER} v0.4.0`);
+		expect(await exists(SUDOERS_FILE)).toBe(false);
+		expect(h.runner.lines().some((line) => line.startsWith("loginctl") || line.includes(" admin "))).toBe(false);
+	});
+
+	test("writes both scripts, the secret-only env, node.env without a secret, and the node units", async () => {
+		const h = host({ respond: active });
+		await runSystem(nodeArgs(), h.deps);
+		expect(await file(HELPER)).toBe("#!/bin/sh\n# the embedded helper\n");
+		expect(await file("/usr/local/libexec/omp-cloud/vmon-sync")).toBe("#!/bin/sh\n# the embedded sync script\n");
+		expect(await modeOf("/usr/local/libexec/omp-cloud/vmon-sync")).toBe(0o755);
+		expect(await file("/etc/vmon/env")).toBe(`VMON_CLUSTER_SECRET=${SECRET}\n`);
+		expect(await modeOf("/etc/vmon/env")).toBe(0o600);
+		expect(await file("/etc/omp-cloud/node.env")).toBe(`SERVER_URL=https://${LAN}:8443\nSERVER_PIN=${PIN}\n`);
+		expect(await modeOf("/etc/omp-cloud/node.env")).toBe(0o644);
+		expect(await file("/etc/omp-cloud/node.env")).not.toContain(SECRET);
+		const vmon = await file("/etc/systemd/system/vmon.service");
+		expect(vmon).toContain(`ExecStart=/opt/vmon/vmon serve --role node --data-dir /var/lib/vmon --join ${LAN}:7946 --egress-internal-allow 10.254.254.1/32 --registry-mirror https://mirror.gcr.io --net-pool 172.20.0.0/16`);
+		expect(vmon).not.toContain("--listen");
+		for (const unit of ["omp-cloud-node-net.service", "omp-cloud-vmon-sync.service", "omp-cloud-vmon-sync.timer"]) expect(await exists(`/etc/systemd/system/${unit}`)).toBe(true);
+		expect(h.runner.lines()).toContain("systemctl enable --now omp-cloud-node-net.service");
+		expect(h.runner.lines()).toContain("systemctl enable --now vmon.service");
+		expect(h.runner.lines()).toContain("systemctl enable --now omp-cloud-vmon-sync.timer");
+	});
+
+	test("the secret appears in no step, human line, report or command line", async () => {
+		const h = host({ respond: active });
+		await runSystem(nodeArgs(), h.deps);
+		const everything = [JSON.stringify(h.deps.reporter.steps), h.human.join(""), h.stdout.join(""), ...h.runner.lines()].join("\n");
+		expect(everything).not.toContain(SECRET);
+	});
+
+	test("with --route the node-net unit routes the service address through the server, without it no route is touched", async () => {
+		await runSystem(nodeArgs("--route"), host({ respond: active }).deps);
+		const routed = await file("/etc/systemd/system/omp-cloud-node-net.service");
+		expect(routed).toContain(`ip route replace 10.254.254.1/32 via ${LAN};`);
+		expect(routed).toContain("ip route del 10.254.254.1/32");
+		await rm(join(root, "/etc/systemd/system"), { recursive: true });
+		await runSystem(nodeArgs(), host({ respond: active }).deps);
+		const plain = await file("/etc/systemd/system/omp-cloud-node-net.service");
+		expect(plain).not.toContain("ip route");
+	});
+
+	test("an existing env file with the same secret is kept; another cluster's secret is refused and left alone", async () => {
+		await putFile(root, "/etc/vmon/env", `VMON_CLUSTER_SECRET=${SECRET}\n`, 0o644);
+		const same = host({ respond: active });
+		expect(await runSystem(nodeArgs(), same.deps)).toBe(0);
+		expect(same.report().steps.find((step) => step.id === "system.env")).toMatchObject({ status: "ok" });
+		expect(await modeOf("/etc/vmon/env")).toBe(0o600);
+
+		await putFile(root, "/etc/vmon/env", "VMON_CLUSTER_SECRET=somebody-else\nVMON_ADMIN_TOKEN=x\n", 0o600);
+		await rm(join(root, "/etc/omp-cloud/node.env"));
+		const other = host({ respond: active });
+		expect(await runSystem(nodeArgs(), other.deps)).toBe(1);
+		expect(other.report().steps.at(-1)).toMatchObject({ id: "system.env", status: "failed", detail: "/etc/vmon/env holds another cluster's secret", fix: "omp-cloud uninstall --purge first" });
+		expect(await file("/etc/vmon/env")).toBe("VMON_CLUSTER_SECRET=somebody-else\nVMON_ADMIN_TOKEN=x\n");
+		expect(await exists("/etc/omp-cloud/node.env")).toBe(false);
+	});
+
+	test("a missing or empty secret file fails the env step", async () => {
+		await rm(secretFile());
+		const missing = host({ respond: active });
+		expect(await runSystem(nodeArgs(), missing.deps)).toBe(1);
+		expect(missing.report().steps.at(-1)).toMatchObject({ id: "system.env", status: "failed" });
+		await putFile(root, "/tmp/secret", "  \n", 0o600);
+		const empty = host({ respond: active });
+		expect(await runSystem(nodeArgs(), empty.deps)).toBe(1);
+		expect(empty.report().steps.at(-1)).toMatchObject({ id: "system.env", status: "failed" });
+	});
+
+	test("a secret that EnvironmentFile would not carry byte for byte is refused, and /etc/vmon/env is not written", async () => {
+		for (const odd of ['abc"def', "abc'def", "abc\\ndef", "abc$HOME", "abc#def", "abc def", "x".repeat(257)]) {
+			await putFile(root, "/tmp/secret", odd, 0o600);
+			const h = host({ respond: active });
+			expect(await runSystem(nodeArgs(), h.deps)).toBe(1);
+			expect(h.report().steps.at(-1)).toMatchObject({ id: "system.env", status: "failed" });
+			expect(await exists("/etc/vmon/env")).toBe(false);
+		}
+		await putFile(root, "/tmp/secret", "Ab0._~+/=:-", 0o600);
+		expect(await runSystem(nodeArgs(), host({ respond: active }).deps)).toBe(0);
+		expect(await file("/etc/vmon/env")).toBe("VMON_CLUSTER_SECRET=Ab0._~+/=:-\n");
+	});
+
+	test("a machine that runs a vibemon server is refused before anything is installed", async () => {
+		await runSystem(ARGS, host().deps);
+		const h = host({ respond: active });
+		expect(await runSystem(nodeArgs(), h.deps)).toBe(1);
+		expect(h.report().steps.at(-1)).toMatchObject({ id: "system.node.guard", status: "failed", fix: "omp-cloud uninstall --purge, then omp-cloud setup node --join <user@server>" });
+		expect(await exists("/etc/omp-cloud/node.env")).toBe(false);
+	});
+
+	test("a vmon that never stays active for 10 s fails the health step; one that settles passes", async () => {
+		const flapping = host({ respond: (argv) => (argv[1] === "is-active" ? { code: 3 } : argv[1] === "is-enabled" ? { code: 1 } : undefined) });
+		expect(await runSystem(nodeArgs(), flapping.deps)).toBe(1);
+		expect(flapping.report().steps.at(-1)).toMatchObject({ id: "system.health", status: "failed", detail: "vmon did not stay active for 10 s within 60 s" });
+
+		let polls = 0;
+		const settling = host({ respond: (argv) => (argv[1] === "is-active" && argv.includes("--quiet") ? { code: ++polls < 4 ? 3 : 0 } : active(argv)) });
+		expect(await runSystem(nodeArgs(), settling.deps)).toBe(0);
+		expect(polls).toBe(13);
+	});
+
+	test("a rerun changes nothing and restarts nothing", async () => {
+		await runSystem(nodeArgs(), host({ respond: active }).deps);
+		await putFile(root, "/opt/vmon/vmon", "#!/bin/sh\n", 0o755);
+		const again = host({ respond: (argv) => (argv[1] === "is-active" || argv[1] === "is-enabled" ? { code: 0 } : undefined) });
+		expect(await runSystem(nodeArgs(), again.deps)).toBe(0);
+		expect(again.report().steps.filter((step) => step.status === "changed")).toEqual([]);
+		expect(again.runner.lines().some((line) => line.includes("restart"))).toBe(false);
+	});
+
+	test("an uninstall removes the node's units, scripts, server record and sync state", async () => {
+		await runSystem(nodeArgs(), host({ respond: active }).deps);
+		await putFile(root, "/var/lib/omp-cloud/vmon-sync.failed", "v0.4.1 1700000000\n");
+		const h = host();
+		expect(await runSystem(["--uninstall"], h.deps)).toBe(0);
+		expect(h.runner.lines()).toContain("systemctl disable --now omp-cloud-vmon-sync.timer omp-cloud-vmon-sync.service vmon.service omp-cloud-node-net.service");
+		for (const path of ["/etc/systemd/system/vmon.service", "/etc/systemd/system/omp-cloud-node-net.service", "/etc/systemd/system/omp-cloud-vmon-sync.timer", "/etc/systemd/system/omp-cloud-vmon-sync.service", "/usr/local/libexec/omp-cloud/vmon-sync", HELPER, "/etc/omp-cloud/node.env", "/var/lib/omp-cloud/vmon-sync.failed"]) {
+			expect(await exists(path)).toBe(false);
+		}
+		expect(await exists("/etc/vmon/env")).toBe(true);
 	});
 });

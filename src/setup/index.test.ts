@@ -7,6 +7,7 @@ import { VMON_PIN } from "../vmon/pin";
 import { defaultServiceConfig } from "./config";
 import { parseSetupArgs, runSetup, type SetupArgs, setupMain } from "./index";
 import { packagesFor } from "./packages";
+import { NODE_ENV_FILE, type SystemReport } from "./system";
 import { ADMIN_TOKEN, rootReport, rig, type RigOptions, type TestRig, TEST_USER } from "./test-support";
 
 let dir: string;
@@ -44,7 +45,7 @@ describe("parseSetupArgs", () => {
 	test("reads every flag", () => {
 		expect(parseSetupArgs(["--yes", "--no-login", "--no-plugin", "--no-linger", "--no-wait", "--team", "acme", "--max-sandboxes", "12", "--migrate-team", "--checkout", "--json"])).toEqual({
 			ok: true,
-			args: { yes: true, noLogin: true, noPlugin: true, noLinger: true, noWait: true, team: "acme", maxSandboxes: 12, migrateTeam: true, checkout: true, json: true },
+			args: { yes: true, noLogin: true, noPlugin: true, noLinger: true, noWait: true, team: "acme", maxSandboxes: 12, migrateTeam: true, noCluster: false, checkout: true, json: true },
 		});
 	});
 
@@ -485,7 +486,7 @@ describe("checkout mode", () => {
 describe("preflight and the template wait", () => {
 	test("a failed preflight stops before the plan, the prompt and sudo", async () => {
 		const testRig = await rig(dir);
-		testRig.ctx.preflight.exists = async (path) => path !== "/dev/kvm";
+		testRig.ctx.preflight.exists = async (path) => path !== "/dev/kvm" && path !== NODE_ENV_FILE;
 		expect(await runSetup(args("--yes"), testRig.ctx)).toBe(1);
 		expect(testRig.err.join("")).toContain("preflight.kvm");
 		expect(testRig.out.join("")).not.toContain("will:");
@@ -508,5 +509,86 @@ describe("preflight and the template wait", () => {
 		expect(await runSetup(args("--yes"), testRig.ctx)).toBe(0);
 		expect(testRig.out.join("")).toContain("building the VM template omp-agent:18.12.3-abc");
 		expect(testRig.ctx.reporter.steps.find((step) => step.id === "health.template")).toMatchObject({ status: "changed" });
+	});
+});
+
+describe("cluster mode", () => {
+	const LAN = "192.168.1.20";
+	const SECRET = "cluster-secret-from-the-root-part";
+	const lanHost = (argv: readonly string[]) => (argv.includes("addr") ? { stdout: `2: eth0    inet ${LAN}/24 brd 192.168.1.255 scope global eth0\n` } : undefined);
+	const cluster = (over: Partial<SystemReport> = {}) => rootReport({ clusterSecret: SECRET, ...over });
+	const serviceJson = () => join(dir, ".config", "omp-cloud", "service.json");
+	const secretFile = () => join(dir, ".config", "omp-cloud", "vmon-cluster.secret");
+
+	test("--cluster-address and --no-cluster parse, and together are a usage error", () => {
+		expect(parseSetupArgs(["--cluster-address", LAN])).toMatchObject({ ok: true, args: { clusterAddress: LAN, noCluster: false } });
+		expect(parseSetupArgs(["--no-cluster"])).toMatchObject({ ok: true, args: { noCluster: true } });
+		expect(parseSetupArgs(["--cluster-address", LAN, "--no-cluster"])).toEqual({ ok: false, error: "--cluster-address and --no-cluster cannot be used together" });
+		expect(parseSetupArgs(["--cluster-address"]).ok).toBe(false);
+		expect(parseSetupArgs(["--cluster-address", "lan.example"]).ok).toBe(false);
+	});
+
+	test("a machine that is a vibemon node refuses before preflight or sudo", async () => {
+		const { rig: testRig, code } = await run({ node: true }, "--yes");
+		expect(code).toBe(1);
+		expect(testRig.err.join("")).toContain("this machine is a vibemon node; omp-cloud uninstall first");
+		expect(testRig.host.calls).toEqual([]);
+	});
+
+	test("--cluster-address goes to the root part, shows in the plan, and lands in service.json with the secret in a 0600 file", async () => {
+		const { rig: testRig, code } = await run({ host: { respond: lanHost, root: [cluster()] } }, "--yes", "--cluster-address", LAN);
+		expect(code).toBe(0);
+		expect(sudoCalls(testRig)[0]).toContain("--cluster-address");
+		expect(sudoCalls(testRig)[0]?.join(" ")).toContain(`--cluster-address ${LAN}`);
+		expect(testRig.out.join("")).toContain(`let other vibemon machines join: vmon listens for them on ${LAN} (ports 7946 and 7947) and restarts, so a turn running now is re-run`);
+		const config = parseConfig(JSON.parse(await text(serviceJson())));
+		expect(config.vmon.clusterAddress).toBe(LAN);
+		expect(config.vmon.clusterSecretFile).toBe(secretFile());
+		expect(await text(secretFile())).toBe(SECRET);
+		expect(await mode(secretFile())).toBe(0o600);
+		expect(testRig.out.join("") + testRig.err.join("") + testRig.stdout.join("")).not.toContain(SECRET);
+		expect(JSON.stringify(testRig.ctx.reporter.steps)).not.toContain(SECRET);
+	});
+
+	test("a rerun keeps the recorded address without a flag and changes nothing in the plan", async () => {
+		await run({ host: { respond: lanHost, root: [cluster()] } }, "--yes", "--cluster-address", LAN);
+		const { rig: again, code } = await run({ host: { respond: lanHost, root: [cluster()] } }, "--yes");
+		expect(code).toBe(0);
+		expect(sudoCalls(again)[0]?.join(" ")).toContain(`--cluster-address ${LAN}`);
+		expect(again.out.join("")).not.toContain("let other vibemon machines join");
+		expect(await text(secretFile())).toBe(SECRET);
+	});
+
+	test("--no-cluster stops it: no flag for the root part, the plan says so, the keys and the secret file go", async () => {
+		await run({ host: { respond: lanHost, root: [cluster()] } }, "--yes", "--cluster-address", LAN);
+		const { rig: off, code } = await run({ host: { respond: lanHost } }, "--yes", "--no-cluster");
+		expect(code).toBe(0);
+		expect(sudoCalls(off)[0]).not.toContain("--cluster-address");
+		expect(off.out.join("")).toContain("stop listening for other vibemon machines");
+		const vmon = JSON.parse(await text(serviceJson())).vmon as Record<string, unknown>;
+		expect(vmon).not.toHaveProperty("clusterAddress");
+		expect(vmon).not.toHaveProperty("clusterSecretFile");
+		expect(await Bun.file(secretFile()).exists()).toBe(false);
+	});
+
+	test("an address that is not this machine's fails preflight before the plan", async () => {
+		const { rig: testRig, code } = await run({}, "--yes", "--cluster-address", LAN);
+		expect(code).toBe(1);
+		expect(testRig.err.join("")).toContain(`preflight.cluster-address`);
+		expect(sudoCalls(testRig)).toEqual([]);
+	});
+
+	test("a root part that reports no cluster secret fails instead of leaving service.json half set", async () => {
+		const { rig: testRig, code } = await run({ host: { respond: lanHost } }, "--yes", "--cluster-address", LAN);
+		expect(code).toBe(1);
+		expect(testRig.err.join("")).toContain("config.cluster");
+		expect(await Bun.file(secretFile()).exists()).toBe(false);
+	});
+
+	test("the key-minting second call keeps the cluster address", async () => {
+		const { rig: testRig } = await run({ host: { respond: lanHost, root: [cluster({ key: undefined })] } }, "--yes", "--cluster-address", LAN);
+		const calls = sudoCalls(testRig);
+		expect(calls.length).toBeGreaterThan(1);
+		for (const call of calls) expect(call.join(" ")).toContain(`--cluster-address ${LAN}`);
 	});
 });

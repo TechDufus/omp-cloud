@@ -129,15 +129,23 @@ function sha256Hex(text: string): string {
 }
 
 /**
- * The service.json a new install gets: listeners, paths, broker, gateway, models and `vmon.team`.
+ * The service.json a new install gets: listeners, paths, broker, gateway, models and `vmon.team`. A server that takes
+ * other vibemon machines (`clusterAddress`) also gets `vmon.clusterAddress` and `vmon.clusterSecretFile`.
  * `apiTokenSha256` is the digest of the token text in `service.token`.
  */
-export function defaultServiceConfig(paths: SetupPaths, apiTokenSha256: string, team: string): Record<string, unknown> {
+export function defaultServiceConfig(paths: SetupPaths, apiTokenSha256: string, team: string, clusterAddress: string | null = null): Record<string, unknown> {
 	return {
 		listen: "127.0.0.1:8080",
 		apiTokenSha256,
 		dataDir: paths.dataDir,
-		vmon: { url: "http://127.0.0.1:3000", keyFile: paths.vmonKey, adminTokenFile: paths.vmonAdminToken, template: "omp-agent", team },
+		vmon: {
+			url: "http://127.0.0.1:3000",
+			keyFile: paths.vmonKey,
+			adminTokenFile: paths.vmonAdminToken,
+			template: "omp-agent",
+			team,
+			...(clusterAddress === null ? {} : { clusterAddress, clusterSecretFile: paths.vmonClusterSecret }),
+		},
 		gateway: { url: `http://${SERVICE_IP}:4000`, clientsFile: paths.clientsFile },
 		broker: { url: BROKER_URL, tokenFile: join(paths.authHome, ".omp", "auth-broker.token") },
 		dashboard: { listen: DASHBOARD_LISTEN },
@@ -185,17 +193,18 @@ export interface ServiceConfigOutcome {
 }
 
 /**
- * `service.json` (0600) and `service.token` (0600): written once, with `vmon.team` set to `team`. An existing file is migrated
- * in place (see `migrateServiceConfig`) and has `vmon.team` set when it differs; a file `parseConfig` refuses is reported and
- * left alone. Rewrites nothing when nothing changes.
+ * `service.json` (0600) and `service.token` (0600): written once, with `vmon.team` set to `team` and, for a server that takes
+ * other vibemon machines, `vmon.clusterAddress` and `vmon.clusterSecretFile` (removed again when `clusterAddress` is null).
+ * An existing file is migrated in place (see `migrateServiceConfig`) and has `vmon.team` set when it differs; a file
+ * `parseConfig` refuses is reported and left alone. Rewrites nothing when nothing changes.
  */
-export async function ensureServiceConfig(paths: SetupPaths, team: string): Promise<ServiceConfigOutcome> {
+export async function ensureServiceConfig(paths: SetupPaths, team: string, clusterAddress: string | null = null): Promise<ServiceConfigOutcome> {
 	if (!TEAM_SLUG.test(team)) throw new Error(`not a team slug: ${team}`);
 	const text = await readIfExists(paths.serviceJson);
 	if (text === null) {
 		const token = newToken();
 		await writeFileAtomic(paths.serviceToken, token, 0o600);
-		await writeFileAtomic(paths.serviceJson, `${JSON.stringify(defaultServiceConfig(paths, sha256Hex(token), team), null, 2)}\n`, 0o600);
+		await writeFileAtomic(paths.serviceJson, `${JSON.stringify(defaultServiceConfig(paths, sha256Hex(token), team, clusterAddress), null, 2)}\n`, 0o600);
 		return {
 			steps: [
 				{ id: "config.token", status: "changed", detail: `API token written to ${paths.serviceToken}; keep it in a password manager and delete the file if you like (service.json holds only its SHA-256)` },
@@ -216,6 +225,16 @@ export async function ensureServiceConfig(paths: SetupPaths, team: string): Prom
 	if (isRecord(vmon) && vmon.team !== team) {
 		migrated.config.vmon = { ...vmon, team };
 		migrated.notes.push(`vmon.team set to ${team}`);
+	}
+	if (isRecord(migrated.config.vmon)) {
+		const { clusterAddress: oldAddress, clusterSecretFile: oldFile, ...vmonRest } = migrated.config.vmon;
+		if (clusterAddress === null && (oldAddress !== undefined || oldFile !== undefined)) {
+			migrated.config.vmon = vmonRest;
+			migrated.notes.push("vmon.clusterAddress and vmon.clusterSecretFile removed");
+		} else if (clusterAddress !== null && (oldAddress !== clusterAddress || oldFile !== paths.vmonClusterSecret)) {
+			migrated.config.vmon = { ...vmonRest, clusterAddress, clusterSecretFile: paths.vmonClusterSecret };
+			migrated.notes.push(`vmon.clusterAddress set to ${clusterAddress}`);
+		}
 	}
 	try {
 		parseConfig(migrated.config);
@@ -247,6 +266,17 @@ export async function recordedTeam(paths: SetupPaths): Promise<string | null> {
 	}
 }
 
+/** The LAN address this server takes other vibemon machines on (`vmon.clusterAddress` of service.json); null when it takes none or the file is absent or unreadable. A rerun of setup keeps this mode. */
+export async function recordedClusterAddress(paths: SetupPaths): Promise<string | null> {
+	try {
+		const raw: unknown = JSON.parse((await readIfExists(paths.serviceJson)) ?? "null");
+		const vmon = isRecord(raw) ? raw.vmon : undefined;
+		return isRecord(vmon) && typeof vmon.clusterAddress === "string" ? vmon.clusterAddress : null;
+	} catch {
+		return null;
+	}
+}
+
 /** The team key in vmon.key (trimmed); null when missing or empty. */
 export async function readVmonKey(paths: SetupPaths): Promise<string | null> {
 	const key = ((await readIfExists(paths.vmonKey)) ?? "").trim();
@@ -268,6 +298,24 @@ export async function ensureAdminToken(paths: SetupPaths, token: string | undefi
 	if (((await readIfExists(paths.vmonAdminToken)) ?? "").trim() === token) return { id: "config.admin", status: "ok", detail };
 	await writeFileAtomic(paths.vmonAdminToken, token, 0o600);
 	return { id: "config.admin", status: "changed", detail };
+}
+
+/**
+ * The vibemon cluster secret as a bare 0600 file, only on a server that takes other vibemon machines (`node-join-info` hands
+ * it to a machine that joins). Out of cluster mode the file is deleted. Null when there is nothing to say: no cluster and no
+ * file. The secret is never in the step's text.
+ */
+export async function ensureClusterSecret(paths: SetupPaths, clusterAddress: string | null, secret: string | undefined): Promise<StepResult | null> {
+	if (clusterAddress === null) {
+		if ((await readIfExists(paths.vmonClusterSecret)) === null) return null;
+		await rm(paths.vmonClusterSecret, { force: true });
+		return { id: "config.cluster", status: "changed", detail: `${paths.vmonClusterSecret} removed: this server takes no other vibemon machines` };
+	}
+	if (secret === undefined) return { id: "config.cluster", status: "failed", detail: "the root part reported no vibemon cluster secret", fix: "omp-cloud setup" };
+	const detail = `the vibemon cluster secret is in ${paths.vmonClusterSecret}; machines that join read it through omp-cloud node-join-info`;
+	if (((await readIfExists(paths.vmonClusterSecret)) ?? "").trim() === secret) return { id: "config.cluster", status: "ok", detail };
+	await writeFileAtomic(paths.vmonClusterSecret, secret, 0o600);
+	return { id: "config.cluster", status: "changed", detail };
 }
 
 /**

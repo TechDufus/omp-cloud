@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { helperVerdict, installedVmonVersion, VMON_HELPER_PATH, VMON_HELPER_SCRIPT, VMON_PIN, vmonHelper, runVmonHelper } from "./pin";
+import { helperVerdict, installedVmonVersion, VMON_HELPER_PATH, VMON_HELPER_SCRIPT, VMON_PIN, VMON_SYNC_PATH, VMON_SYNC_SCRIPT, vmonHelper, runVmonHelper } from "./pin";
 
 let dir: string;
 
@@ -35,6 +35,15 @@ describe("VMON_HELPER_SCRIPT", () => {
 		expect(VMON_HELPER_SCRIPT).toBe(file);
 		expect(VMON_HELPER_SCRIPT.startsWith("#!/usr/bin/env bash\n")).toBe(true);
 		expect(VMON_HELPER_PATH).toBe("/usr/local/libexec/omp-cloud/vmon-install");
+	});
+});
+
+describe("VMON_SYNC_SCRIPT", () => {
+	test("is infra/vmon-sync.sh byte for byte, carried by the binary", async () => {
+		const file = await Bun.file(join(import.meta.dir, "..", "..", "infra", "vmon-sync.sh")).text();
+		expect(VMON_SYNC_SCRIPT).toBe(file);
+		expect(VMON_SYNC_SCRIPT.startsWith("#!/usr/bin/env bash\n")).toBe(true);
+		expect(VMON_SYNC_PATH).toBe("/usr/local/libexec/omp-cloud/vmon-sync");
 	});
 });
 

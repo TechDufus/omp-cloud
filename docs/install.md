@@ -98,6 +98,8 @@ Pass flags after `--` through the installer, for example `curl … | sh -s -- --
 | `--team <slug>` | The vibemon team (default `omp-cloud`): lowercase letters, digits and hyphens, at most 63 characters, not `system`. A host keeps the team it has: another `--team` is refused (exit 2) unless `--migrate-team` is given |
 | `--max-sandboxes <n>` | The team's concurrent-sandbox limit, 1 to 1000 |
 | `--migrate-team` | Switch the host from its recorded team (`vmon.team` in `service.json`) to `--team` (default `omp-cloud`). Paused threads then come back as cold restores and the VM template rebuilds; the old key is kept as `vmon.key.<old slug>` |
+| `--cluster-address <ip>` | Let other vibemon machines join this server ([More vibemon machines](#more-vibemon-machines)): vmon listens for them on that one private LAN address of this machine (10/8, 172.16/12 or 192.168/16, never `0.0.0.0`) and restarts once, so a turn running then is re-run. A host keeps its mode: a rerun without a flag keeps the recorded address |
+| `--no-cluster` | Stop listening for other vibemon machines (vmon restarts; machines that joined lose contact, and threads whose VMs ran there are restored on this server). Not together with `--cluster-address` |
 | `--checkout` | Developer mode, for a git checkout (below) |
 | `--json` | One JSON report on stdout (`{ok, steps}`); the human lines go to stderr |
 
@@ -117,6 +119,36 @@ omp-cloud login anthropic    # or name one
 It prints the login URL in full first, then the device code. Open the URL in a browser on any machine, approve, and (for a provider that redirects to a page that does not load) paste the redirect URL or code back into the terminal. The command waits up to 6 minutes; the service itself ends a login after 5 ([Logins](api.md#logins)). Setup's login step skips itself when the cloud already runs a provider; `omp-cloud login` always logs in to the provider you pick, again if need be. With no provider and no terminal (an agent, a script) it prints the providers the service offers and exits 2: pick one and run `omp-cloud login <provider>`. The credentials live in the broker's vault (`~/.local/share/omp-cloud/auth-home`); sandboxes never see them. See [Security](security.md).
 
 `omp-cloud login mcp:<https url>` logs the service in to an MCP server's OAuth the same way, for an http MCP server that wants a login ([Secrets and MCP servers](secrets-and-mcp.md#logging-the-service-in-to-an-mcp-server)); the login is kept in the service's database, not the broker's vault.
+
+## More vibemon machines
+
+One server can run its VMs on more than one machine. The extra machines join the server's vibemon cluster as nodes: the service stays on the server, a thread's VM is placed on whichever machine has room, and the dashboard's capacity counts them all. A machine is either the server or a node, never both.
+
+1. **On the server**, once, with its static private LAN address (the address must be one of the machine's own, in 10/8, 172.16/12 or 192.168/16):
+
+   ```sh
+   omp-cloud setup --cluster-address 192.168.1.20
+   ```
+
+   Setup shows the plan line `let other vibemon machines join` before it changes anything: vmon restarts to listen on that address. The Add a machine box of the dashboard's VMs page shows the join command once this is done.
+2. **On the new machine** (Linux x86_64 with `/dev/kvm`, a user with sudo, ssh to the server with a key, since nothing here ever asks for a password):
+
+   ```sh
+   curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh -s -- node --join you@192.168.1.20
+   ```
+
+   `omp-cloud setup node --join <user@server>` (what the line runs) asks the server for its join information over ssh, prints its plan and asks `Continue? [Y/n]`, then does one `sudo` for the root part: vibemon at the server's version, `/etc/vmon/env` with the cluster secret, `/etc/omp-cloud/node.env` (the server's address and certificate pin, no secret), and the system units `vmon` (role node), `omp-cloud-node-net` and the `omp-cloud-vmon-sync` timer. It ends by asking the server whether it sees the machine (`node.member`) and whether `10.254.254.1:4000` answers from here (`node.gateway`).
+
+**Network requirements.** Setup never opens a firewall port, so allow:
+
+- from the node to the server: TCP 4000 and 4100 (to `10.254.254.1`, the gateway and the MCP proxy that the node's VMs use) and TCP 8443 (the remote listener, which the sync timer reads the server's vibemon version from);
+- between every pair of vibemon machines, both ways: TCP 7947, and TCP and UDP 7946.
+
+A node on the server's subnet gets a host route for `10.254.254.1` through the server's address. A node on another subnet needs that route on your router (`10.254.254.1/32` to the server's address): omp-cloud states it and checks it (`node.gateway`) but never changes your router. Tailscale-only paths are not supported, and the server's cluster address must stay the same (give it a static or reserved address).
+
+**Versions.** A node follows the server's vibemon: `omp-cloud-vmon-sync.timer` checks the server's `vmon` version every minute and installs it through the root helper, so a server update that moves vibemon moves every node within a few minutes. A failed install is not retried for an hour. A node never downgrades vibemon: if the server rolls back, `omp-cloud doctor` on the server names the machines that are ahead, and the fix is `omp-cloud uninstall --purge` on the node, then joining again.
+
+**Checking and removing.** `omp-cloud doctor` on the node checks its units, route, gateway and version against the server; on the server it lists a machine that is not alive or runs another vibemon version (`doctor.cluster`). `omp-cloud uninstall [--purge]` on a node removes its units, scripts and server record; VMs running there are lost, and the server restores their threads on its other machines. `--no-cluster` on the server stops it taking machines.
 
 ## Doctor
 

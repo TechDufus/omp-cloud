@@ -2,7 +2,25 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installSystemUnits, NET_UNIT, removeSystemUnits, renderNetUnit, renderVmonUnit, SYSTEM_UNIT_DIR, VMON_UNIT, writeIfChanged } from "./system-units";
+import {
+	clusterListenOfUnit,
+	installNodeUnits,
+	installSystemUnits,
+	NET_UNIT,
+	NODE_NET_UNIT,
+	removeSystemUnits,
+	renderNetUnit,
+	renderNodeNetUnit,
+	renderNodeVmonUnit,
+	renderSyncTimer,
+	renderSyncUnit,
+	renderVmonUnit,
+	SYNC_TIMER,
+	SYNC_UNIT,
+	SYSTEM_UNIT_DIR,
+	VMON_UNIT,
+	writeIfChanged,
+} from "./system-units";
 import { fakeRunner, putFile } from "./system-fakes";
 
 let root: string;
@@ -205,5 +223,168 @@ describe("removeSystemUnits", () => {
 		const steps = await removeSystemUnits({ root, runner: runner.run });
 		expect(steps[0]).toMatchObject({ status: "failed" });
 		expect(await stat(unitFile(VMON_UNIT))).toBeTruthy();
+	});
+});
+
+describe("the vmon unit with a cluster address", () => {
+	test("binds the cluster and gossip listeners to that address only", () => {
+		const unit = renderVmonUnit("172.20.0.0/16", "192.168.1.20");
+		expect(unit).toContain("--cluster-listen 192.168.1.20:7947 --gossip-listen 192.168.1.20:7946");
+		expect(unit).not.toContain("0.0.0.0");
+		expect(unit).toContain("--listen 127.0.0.1:3000");
+		expect(renderVmonUnit("172.20.0.0/16")).toBe(renderVmonUnit("172.20.0.0/16", null));
+		expect(renderVmonUnit("172.20.0.0/16")).toContain("--cluster-listen 127.0.0.1:7947 --gossip-listen 127.0.0.1:7946");
+	});
+
+	test("clusterListenOfUnit reads the host, and nothing from a text without the flag", () => {
+		expect(clusterListenOfUnit(renderVmonUnit("172.20.0.0/16", "10.0.0.5"))).toBe("10.0.0.5");
+		expect(clusterListenOfUnit(renderVmonUnit("172.20.0.0/16"))).toBe("127.0.0.1");
+		expect(clusterListenOfUnit("ExecStart=/opt/vmon/vmon serve --net-pool 172.20.0.0/16")).toBeNull();
+	});
+
+	test("a rerun with the same address never restarts vmon, a change of address does, once", async () => {
+		const running = fakeRunner((argv) => (argv[1] === "is-active" || argv[1] === "is-enabled" ? { code: 0 } : argv[0] === "ip" ? { stdout: DEFAULT_ROUTES } : undefined));
+		await installSystemUnits({ root, runner: freshHost().run, clusterAddress: "10.0.0.5" });
+		const same = await installSystemUnits({ root, runner: running.run, clusterAddress: "10.0.0.5" });
+		expect(same.steps.map((step) => step.status)).toEqual(["ok", "ok"]);
+		expect(running.lines().some((line) => line.includes("restart"))).toBe(false);
+		const moved = fakeRunner((argv) => (argv[1] === "is-active" || argv[1] === "is-enabled" ? { code: 0 } : undefined));
+		const outcome = await installSystemUnits({ root, runner: moved.run, clusterAddress: "10.0.0.6" });
+		expect(moved.lines().filter((line) => line.includes("restart"))).toEqual(["systemctl restart vmon.service"]);
+		expect(outcome.steps.at(-1)?.detail).toBe("vmon.service restarted to listen for other vibemon machines on 10.0.0.6");
+	});
+});
+
+describe("node units", () => {
+	test("vmon runs in the node role, joins the server and keeps the service address exemption", () => {
+		const unit = renderNodeVmonUnit("172.29.0.0/16", "192.168.1.20");
+		expect(unit).toContain("ExecStart=/opt/vmon/vmon serve --role node --data-dir /var/lib/vmon --join 192.168.1.20:7946 --egress-internal-allow 10.254.254.1/32 --registry-mirror https://mirror.gcr.io --net-pool 172.29.0.0/16");
+		expect(unit).not.toContain("--listen");
+		expect(unit).not.toContain("--cluster-listen");
+		for (const line of ["Requires=omp-cloud-node-net.service", "After=network-online.target omp-cloud-node-net.service", "Wants=network-online.target\n", "EnvironmentFile=/etc/vmon/env", "KillMode=process", "TimeoutStopSec=60", "Restart=on-failure", "RestartSec=5", "WantedBy=multi-user.target"]) {
+			expect(unit).toContain(line);
+		}
+	});
+
+	test("the renderers refuse anything but a plain dotted quad: no leading zeros, no octet above 255, nothing a shell would read", () => {
+		for (const address of ["0.0.0.0/0", "192.168.01.20", "192.168.1.256", "1.2.3", "192.168.1.20'; reboot; '", "192.168.1.20 --x", "", "::1"]) {
+			expect(() => renderVmonUnit("172.20.0.0/16", address)).toThrow("is not a plain IPv4 address");
+			expect(() => renderNodeVmonUnit("172.20.0.0/16", address)).toThrow("is not a plain IPv4 address");
+			expect(() => renderNodeNetUnit(address)).toThrow("is not a plain IPv4 address");
+		}
+	});
+
+	test("the node-net unit limits VMs to TCP 4000 and 4100 of the service address, in both chains, and undoes it on stop", () => {
+		const unit = renderNodeNetUnit(null);
+		for (const line of ["Type=oneshot", "RemainAfterExit=yes", "Before=vmon.service", "After=network-online.target", "Restart=on-failure", "RestartSec=5", "WantedBy=multi-user.target"]) expect(unit).toContain(line);
+		expect(unit).toContain("for chain in OUTPUT FORWARD");
+		expect(unit).toContain("iptables -w -I $$chain 1 -d 10.254.254.1/32 -p tcp -m multiport ! --dports 4000,4100 -j REJECT");
+		expect(unit).toContain("iptables -w -I $$chain 1 -d 10.254.254.1/32 ! -p tcp -j REJECT");
+		expect(unit).not.toContain("-A $$chain");
+		expect(unit).toContain("iptables -w -C $$chain -d 10.254.254.1/32 -p tcp -m multiport ! --dports 4000,4100 -j REJECT");
+		expect(unit).toMatch(/^ExecStop=-\/bin\/sh -c '.*iptables -w -D \$\$chain -d 10\.254\.254\.1\/32 ! -p tcp -j REJECT/m);
+		expect(unit).not.toContain("ip route");
+	});
+
+	test("with a route the unit installs and removes the host route to the server", () => {
+		const unit = renderNodeNetUnit("192.168.1.20");
+		expect(unit).toContain("ExecStart=/bin/sh -ec 'ip route replace 10.254.254.1/32 via 192.168.1.20; for chain");
+		expect(unit).toMatch(/^ExecStop=.*; ip route del 10\.254\.254\.1\/32/m);
+	});
+
+	test("the sync service runs the root-owned script, and the timer fires 2 min after boot and every minute", () => {
+		expect(renderSyncUnit()).toContain("Type=oneshot");
+		expect(renderSyncUnit()).toContain("ExecStart=/usr/local/libexec/omp-cloud/vmon-sync");
+		const timer = renderSyncTimer();
+		for (const line of ["OnBootSec=2min", "OnUnitActiveSec=1min", "WantedBy=timers.target"]) expect(timer).toContain(line);
+	});
+
+	test("systemd-analyze verify accepts the node units, Restart=on-failure on the oneshot included", async () => {
+		if (Bun.which("systemd-analyze") === null) return;
+		await putFile(root, "/opt/vmon/vmon", "#!/bin/sh\n", 0o755);
+		await putFile(root, "/etc/vmon/env", "A=b\n", 0o600);
+		await putFile(root, "/bin/sh", "#!/bin/sh\n", 0o755);
+		await putFile(root, "/usr/local/libexec/omp-cloud/vmon-sync", "#!/bin/sh\n", 0o755);
+		const units: Array<[string, string]> = [
+			[NODE_NET_UNIT, renderNodeNetUnit("192.168.1.20")],
+			[VMON_UNIT, renderNodeVmonUnit("172.20.0.0/16", "192.168.1.20")],
+			[SYNC_UNIT, renderSyncUnit()],
+			[SYNC_TIMER, renderSyncTimer()],
+		];
+		for (const [name, text] of units) await putFile(root, `${SYSTEM_UNIT_DIR}/${name}`, text);
+		const probe = Bun.spawnSync(["systemd-analyze", `--root=${root}`, "verify", ...units.map(([name]) => `${SYSTEM_UNIT_DIR}/${name}`)], { stdout: "pipe", stderr: "pipe" });
+		const output = `${probe.stdout.toString()}${probe.stderr.toString()}`;
+		expect(output).not.toMatch(/Unknown (key|section)|Invalid argument|Failed to parse|Missing '='|Unbalanced quote|not a valid|Restart=/i);
+	});
+});
+
+describe("installNodeUnits", () => {
+	const options = { server: "192.168.1.20", route: false };
+	const fresh = () =>
+		fakeRunner((argv) => {
+			if (argv[0] === "ip") return { stdout: DEFAULT_ROUTES };
+			if (argv[1] === "is-enabled") return { code: 1 };
+			if (argv[1] === "is-active") return { code: 3 };
+			return undefined;
+		});
+
+	test("a fresh machine: writes the four units with the first free pool, reloads, enables the net unit, vmon and the timer in that order", async () => {
+		const runner = fresh();
+		const outcome = await installNodeUnits({ root, runner: runner.run, ...options });
+		expect(outcome.netPool).toBe("172.20.0.0/16");
+		expect(outcome.steps.map((step) => [step.id, step.status])).toEqual([
+			["system.unit.omp-cloud-node-net", "changed"],
+			["system.unit.vmon", "changed"],
+			["system.unit.omp-cloud-vmon-sync", "changed"],
+		]);
+		expect(changes(runner.lines())).toEqual(["systemctl daemon-reload", `systemctl enable --now ${NODE_NET_UNIT}`, "systemctl enable --now vmon.service", `systemctl enable --now ${SYNC_TIMER}`]);
+		expect(await readFile(unitFile(VMON_UNIT), "utf8")).toBe(renderNodeVmonUnit("172.20.0.0/16", "192.168.1.20"));
+		expect(await readFile(unitFile(NODE_NET_UNIT), "utf8")).toBe(renderNodeNetUnit(null));
+	});
+
+	test("--route puts the route in the net unit", async () => {
+		await installNodeUnits({ root, runner: fresh().run, server: "192.168.1.20", route: true });
+		expect(await readFile(unitFile(NODE_NET_UNIT), "utf8")).toBe(renderNodeNetUnit("192.168.1.20"));
+	});
+
+	test("a rerun changes nothing and restarts nothing; the pool of the existing unit stays", async () => {
+		await installNodeUnits({ root, runner: fresh().run, ...options });
+		const again = fakeRunner((argv) => (argv[1] === "is-active" || argv[1] === "is-enabled" ? { code: 0 } : undefined));
+		const outcome = await installNodeUnits({ root, runner: again.run, ...options });
+		expect(outcome.steps.map((step) => step.status)).toEqual(["ok", "ok", "ok"]);
+		expect(again.lines().some((line) => line.includes("restart") || line.startsWith("ip "))).toBe(false);
+	});
+
+	test("a running vmon whose unit text changed is restarted", async () => {
+		await installNodeUnits({ root, runner: fresh().run, ...options });
+		const running = fakeRunner((argv) => (argv[1] === "is-active" || argv[1] === "is-enabled" ? { code: 0 } : undefined));
+		const outcome = await installNodeUnits({ root, runner: running.run, server: "192.168.1.30", route: false });
+		expect(running.lines()).toContain("systemctl restart vmon.service");
+		expect(outcome.steps.find((step) => step.id === "system.unit.vmon")).toMatchObject({ status: "changed" });
+		expect(await readFile(unitFile(VMON_UNIT), "utf8")).toContain("--join 192.168.1.30:7946");
+	});
+
+	test("a unit that will not start is a failed step and stops what follows", async () => {
+		const runner = fakeRunner((argv) => {
+			if (argv[0] === "ip") return { stdout: DEFAULT_ROUTES };
+			if (argv[1] === "enable" && argv[3] === NODE_NET_UNIT) return { code: 1, stderr: "Job failed\n" };
+			return argv[1] === "is-enabled" ? { code: 1 } : undefined;
+		});
+		const outcome = await installNodeUnits({ root, runner: runner.run, ...options });
+		expect(outcome.steps).toHaveLength(1);
+		expect(outcome.steps[0]).toMatchObject({ id: "system.unit.omp-cloud-node-net", status: "failed", fix: "journalctl -u omp-cloud-node-net -n 50 --no-pager" });
+		expect(runner.lines()).not.toContain("systemctl enable --now vmon.service");
+	});
+});
+
+describe("removeSystemUnits on a node", () => {
+	test("disables the timer, the sync service, vmon and the node-net unit and deletes all four files", async () => {
+		await installNodeUnits({ root, runner: freshHost().run, server: "192.168.1.20", route: false });
+		const runner = fakeRunner((argv) => (argv[2] === "ompsvc0" ? { code: 1 } : undefined));
+		const steps = await removeSystemUnits({ root, runner: runner.run });
+		expect(steps).toEqual([{ id: "system.uninstall.units", status: "changed", detail: "removed omp-cloud-vmon-sync.timer, omp-cloud-vmon-sync.service, vmon.service and omp-cloud-node-net.service" }]);
+		expect(runner.lines()[0]).toBe("systemctl disable --now omp-cloud-vmon-sync.timer omp-cloud-vmon-sync.service vmon.service omp-cloud-node-net.service");
+		for (const name of [VMON_UNIT, NODE_NET_UNIT, SYNC_UNIT, SYNC_TIMER]) expect(await stat(unitFile(name)).catch(() => null)).toBeNull();
+		expect(await stat(unitFile(NET_UNIT)).catch(() => null)).toBeNull();
 	});
 });

@@ -5,9 +5,9 @@ import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LoginManager } from "./auth/login";
-import { type PairOutput, sshPair } from "./cli";
+import { type NodeJoinOptions, type NodeJoinOutput, nodeJoinInfo, type PairOutput, sshPair } from "./cli";
 import { GitService } from "./git";
-import { loadIdentity } from "./pairing/identity";
+import { loadIdentity, spkiPin } from "./pairing/identity";
 import { RemoteAccess } from "./pairing/remote";
 import { sha256Hex } from "./pairing/secrets";
 import { MIGRATIONS } from "./store/schema";
@@ -18,6 +18,7 @@ import { isRecord } from "./guards";
 import { Settings } from "./settings";
 import { Store } from "./store";
 import { API_VERSION, SERVICE_VERSION } from "./version";
+import { type ClusterNode, type ClusterView, VmonAdminRefused } from "./vmon/admin";
 
 const CLI = join(import.meta.dir, "cli.ts");
 const SSH = { SSH_CONNECTION: "10.0.0.7 51234 10.0.0.2 22" };
@@ -277,5 +278,282 @@ describe("omp-cloud (process)", () => {
 		expect(unknown.code).toBe(1);
 		expect(JSON.parse(unknown.stdout.trimEnd())).toEqual({ ompCloudPair: 1, error: expect.stringContaining('unknown command "frobnicate"') });
 		expect(store.devices("owner")).toEqual([]);
+	});
+});
+
+/** The pin as `openssl` computes it, the way the plan's curl check does. */
+async function opensslPin(certFile: string): Promise<string> {
+	const script = `openssl x509 -in '${certFile}' -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64 -w0`;
+	const proc = Bun.spawn(["sh", "-c", script], { stdout: "pipe", stderr: "pipe" });
+	const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+	if (code !== 0) throw new Error("openssl could not compute the pin");
+	return `sha256//${out.trim()}`;
+}
+
+describe("spkiPin", () => {
+	test("is sha256// and the base64 SHA-256 of the certificate's SPKI DER, as openssl computes it", async () => {
+		const pin = spkiPin(await Bun.file(identity.certFile).text());
+		expect(pin).toMatch(/^sha256\/\/[A-Za-z0-9+/]{43}=$/);
+		expect(pin).toBe(await opensslPin(identity.certFile));
+	});
+});
+
+describe("omp-cloud node-join-info", () => {
+	const SECRET = "cluster-secret-0123456789abcdef";
+	let secretFile: string;
+	let tokenFile: string;
+
+	function node(extra: Partial<ClusterNode>): ClusterNode {
+		return { id: "n1", hostname: "box", addrs: ["192.168.1.20"], alive: true, status: "ready", version: "0.4.0", server: false, cpus: 4, vcpusUsed: 0, memoryMB: 8192, memoryUsedMB: 0, diskFreeMB: 10000, sandboxes: 0, ...extra };
+	}
+
+	/** A service.json that takes machines; `vmon` keys and `remote` can be changed or dropped (`null`). */
+	async function nodeConfig(options: { vmon?: Record<string, unknown>; remote?: Record<string, unknown> | null } = {}): Promise<string> {
+		const path = join(dir, "node-service.json");
+		const config = {
+			listen: "127.0.0.1:18080",
+			apiTokenSha256: sha256Hex("owner-token"),
+			dataDir: join(dir, "no-database-here"),
+			vmon: { url: "http://127.0.0.1:1", keyFile: join(dir, "vmon.key"), template: "omp-agent", clusterAddress: "192.168.1.10", clusterSecretFile: secretFile, adminTokenFile: tokenFile, ...options.vmon },
+			gateway: { url: "http://127.0.0.2:2", clientsFile: join(dir, "clients.json") },
+			broker: { url: "http://127.0.0.1:3", tokenFile: join(dir, "broker.token") },
+			models: { default: "fake/fake-model" },
+			...(options.remote === null ? {} : { remote: options.remote ?? remoteConfig({ listen: "0.0.0.0:8444" }) }),
+		};
+		await Bun.write(path, JSON.stringify(config));
+		return path;
+	}
+
+	/** The seams, with a clock that only the fake sleep moves; `views` is what vibemon answers per look (the last repeats). */
+	function seams(views: (ClusterView | Error)[], installed: string | null = "v0.4.0") {
+		const state = { now: 0, looks: 0, sleeps: [] as number[], opened: [] as { url: string; tokenFile: string }[] };
+		const options: NodeJoinOptions = {
+			installedVmon: async () => installed,
+			openAdmin: async (open) => {
+				state.opened.push(open);
+				return {
+					cluster: async () => {
+						const view = views[Math.min(state.looks++, views.length - 1)];
+						if (view === undefined || view instanceof Error) throw view ?? new Error("no view");
+						return view;
+					},
+				};
+			},
+			now: () => state.now,
+			sleep: async (ms) => {
+				state.sleeps.push(ms);
+				state.now += ms;
+			},
+		};
+		return { state, options };
+	}
+
+	function view(...nodes: ClusterNode[]): ClusterView {
+		return { localId: "server", nodes, history: [] };
+	}
+
+	function nodeFailed(output: NodeJoinOutput): string {
+		if (!("error" in output)) throw new Error(`node-join-info succeeded: ${JSON.stringify(output)}`);
+		return output.error;
+	}
+
+	beforeEach(async () => {
+		secretFile = join(dir, "vmon-cluster.secret");
+		tokenFile = join(dir, "vmon-admin.token");
+		await Bun.write(secretFile, `  ${SECRET}\n`);
+		await Bun.write(tokenFile, "admin-token\n");
+	});
+
+	test("reports the server's address, remote port, certificate pin and versions, and vibemon's join address, version and cluster secret", async () => {
+		const path = await nodeConfig();
+		const out = await nodeJoinInfo(["--config", path], {}, seams([], "v0.4.0").options);
+		expect(out).toEqual({
+			ompCloudNode: 1,
+			server: { address: "192.168.1.10", remotePort: 8444, pin: await opensslPin(identity.certFile), version: SERVICE_VERSION },
+			vmon: { version: "v0.4.0", join: "192.168.1.10:7946", clusterSecret: SECRET },
+		});
+	});
+
+	test("reads the config from OMP_CLOUD_CONFIG, opens no store and contacts nothing", async () => {
+		const path = await nodeConfig();
+		const { state, options } = seams([]);
+		const out = await nodeJoinInfo([], { OMP_CLOUD_CONFIG: path }, options);
+		expect("server" in out).toBe(true);
+		expect(state.opened).toEqual([]);
+		await expect(stat(join(dir, "no-database-here"))).rejects.toThrow();
+	});
+
+	describe("refusals", () => {
+		test("a server without cluster keys does not take machines", async () => {
+			const path = await writeConfig(remoteConfig());
+			expect(nodeFailed(await nodeJoinInfo(["--config", path], {}, seams([]).options))).toBe(
+				"this server does not take vibemon machines: run omp-cloud setup --cluster-address <its LAN address> on it first",
+			);
+		});
+
+		test("a server without a remote listener cannot be pinned", async () => {
+			const path = await nodeConfig({ remote: null });
+			expect(nodeFailed(await nodeJoinInfo(["--config", path], {}, seams([]).options))).toBe("the server has no remote listener: run omp-cloud setup on it");
+		});
+
+		test("vibemon that is not installed is refused", async () => {
+			const path = await nodeConfig();
+			expect(nodeFailed(await nodeJoinInfo(["--config", path], {}, seams([], null).options))).toBe("vibemon is not installed on the server");
+		});
+
+		test("--member without an admin token file is refused, before vibemon is asked", async () => {
+			const path = await nodeConfig({ vmon: { adminTokenFile: undefined } });
+			const { state, options } = seams([view(node({}))]);
+			expect(nodeFailed(await nodeJoinInfo(["--config", path, "--member", "192.168.1.20"], {}, options))).toBe(
+				"this server has no vibemon admin token yet: run omp-cloud setup on it",
+			);
+			expect(state.opened).toEqual([]);
+			// Without --member the token is not needed.
+			expect("server" in (await nodeJoinInfo(["--config", path], {}, seams([]).options))).toBe(true);
+		});
+
+		test("the checks run in order: cluster keys, remote, vibemon, admin token", async () => {
+			const noKeys = await writeConfig(null);
+			expect(nodeFailed(await nodeJoinInfo(["--config", noKeys, "--member", "192.168.1.20"], {}, seams([], null).options))).toContain("does not take vibemon machines");
+			const noRemote = await nodeConfig({ remote: null, vmon: { adminTokenFile: undefined } });
+			expect(nodeFailed(await nodeJoinInfo(["--config", noRemote, "--member", "192.168.1.20"], {}, seams([], null).options))).toContain("no remote listener");
+			const noVmon = await nodeConfig({ vmon: { adminTokenFile: undefined } });
+			expect(nodeFailed(await nodeJoinInfo(["--config", noVmon, "--member", "192.168.1.20"], {}, seams([], null).options))).toBe("vibemon is not installed on the server");
+		});
+
+		test("an unreadable cluster secret file or certificate is an error naming the file, never a secret", async () => {
+			const gone = await nodeConfig({ vmon: { clusterSecretFile: join(dir, "absent.secret") } });
+			expect(nodeFailed(await nodeJoinInfo(["--config", gone], {}, seams([]).options))).toBe(`cannot read vmon.clusterSecretFile ${join(dir, "absent.secret")}: ENOENT`);
+			const noCert = await nodeConfig({ remote: remoteConfig({ listen: "0.0.0.0:8444", certFile: join(dir, "absent.pem") }) });
+			expect(nodeFailed(await nodeJoinInfo(["--config", noCert], {}, seams([]).options))).toBe(`cannot read remote.certFile ${join(dir, "absent.pem")}: ENOENT`);
+		});
+
+		test("a missing config is an error line, not a throw", async () => {
+			expect(nodeFailed(await nodeJoinInfo(["--config", join(dir, "nope.json")], {}, seams([]).options))).not.toBe("");
+		});
+
+		test("bad flags are error lines with the usage", async () => {
+			const path = await nodeConfig();
+			const options = seams([]).options;
+			expect(nodeFailed(await nodeJoinInfo(["--frobnicate"], {}, options))).toContain('unknown argument "--frobnicate"; usage: omp-cloud node-join-info');
+			expect(nodeFailed(await nodeJoinInfo(["--config"], {}, options))).toContain("--config needs a value");
+			expect(nodeFailed(await nodeJoinInfo(["--config", path, "--config", path], {}, options))).toContain("--config given twice");
+			expect(nodeFailed(await nodeJoinInfo(["--config", path, "--member", "box.lan"], {}, options))).toContain("--member must be an IPv4 address");
+			expect(nodeFailed(await nodeJoinInfo(["--config", path, "--member", "fe80::1"], {}, options))).toContain("--member must be an IPv4 address");
+		});
+	});
+
+	describe("--member", () => {
+		const IP = "192.168.1.20";
+
+		test("a machine the server's vibemon already sees is reported at once, from the admin API at the configured url and token file", async () => {
+			const path = await nodeConfig();
+			const { state, options } = seams([view(node({ id: "server", hostname: "srv", addrs: ["192.168.1.10"], server: true }), node({ hostname: "laptop-2", version: "0.4.1", status: "ready" }))]);
+			const out = await nodeJoinInfo(["--config", path, "--member", IP], {}, options);
+			expect(out).toEqual({ ompCloudNode: 1, member: { hostname: "laptop-2", status: "ready", version: "0.4.1" } });
+			expect(state.opened).toEqual([{ url: "http://127.0.0.1:1", tokenFile }]);
+			expect(state.sleeps).toEqual([]);
+		});
+
+		test("a machine that appears after a few looks is found; the poll is every 2 s", async () => {
+			const path = await nodeConfig();
+			const { state, options } = seams([view(), view(), view(node({ id: "other", addrs: ["192.168.1.99"] })), view(node({ hostname: "late" }))]);
+			const out = await nodeJoinInfo(["--config", path, "--member", IP], {}, options);
+			expect(out).toEqual({ ompCloudNode: 1, member: { hostname: "late", status: "ready", version: "0.4.0" } });
+			expect(state.looks).toBe(4);
+			expect(state.sleeps).toEqual([2000, 2000, 2000]);
+		});
+
+		test("a machine never seen is an error after 60 s, looked for every 2 s", async () => {
+			const path = await nodeConfig();
+			const { state, options } = seams([view(node({ addrs: ["192.168.1.99"] }))]);
+			expect(nodeFailed(await nodeJoinInfo(["--config", path, "--member", IP], {}, options))).toBe(`the server's vibemon has not seen a machine at ${IP} within 60 s`);
+			expect(state.now).toBe(60_000);
+			expect(state.looks).toBe(31);
+			expect(new Set(state.sleeps)).toEqual(new Set([2000]));
+		});
+
+		test("vibemon's gossip addresses carry a port, a mask or brackets: the host part is what matches, and only whole hosts", async () => {
+			const path = await nodeConfig();
+			for (const addr of [`${IP}:7946`, `${IP}/24`, `[${IP}]:7946`]) {
+				const { options } = seams([view(node({ hostname: "ported", addrs: ["192.168.1.200:7946", addr] }))]);
+				expect(await nodeJoinInfo(["--config", path, "--member", IP], {}, options)).toEqual({ ompCloudNode: 1, member: { hostname: "ported", status: "ready", version: "0.4.0" } });
+			}
+			const { options } = seams([view(node({ addrs: ["192.168.1.200:7946", "192.168.1.2:7946", "x192.168.1.20:7946"] }))]);
+			expect(nodeFailed(await nodeJoinInfo(["--config", path, "--member", IP], {}, options))).toContain("has not seen a machine at");
+		});
+
+		test("a dead, suspect or left machine at that address is not accepted", async () => {
+			const path = await nodeConfig();
+			for (const status of ["dead", "suspect", "left"]) {
+				const { options } = seams([view(node({ alive: false, status }))]);
+				expect(nodeFailed(await nodeJoinInfo(["--config", path, "--member", IP], {}, options))).toContain("has not seen a machine at");
+			}
+		});
+
+		test("a machine that was dead and comes alive is found", async () => {
+			const path = await nodeConfig();
+			const { options } = seams([view(node({ alive: false, status: "suspect" })), view(node({ hostname: "back" }))]);
+			expect(await nodeJoinInfo(["--config", path, "--member", IP], {}, options)).toMatchObject({ member: { hostname: "back" } });
+		});
+
+		test("vibemon that does not answer for a moment is waited for; one that never answers is named in the error", async () => {
+			const path = await nodeConfig();
+			const flaky = seams([new Error("connection refused"), view(node({ hostname: "up" }))]);
+			expect(await nodeJoinInfo(["--config", path, "--member", IP], {}, flaky.options)).toMatchObject({ member: { hostname: "up" } });
+			const down = seams([new Error("connection refused")]);
+			expect(nodeFailed(await nodeJoinInfo(["--config", path, "--member", IP], {}, down.options))).toBe("the server's vibemon did not answer: connection refused");
+		});
+
+		test("a refused admin token stops the wait at once", async () => {
+			const path = await nodeConfig();
+			const { state, options } = seams([new VmonAdminRefused(tokenFile)]);
+			expect(nodeFailed(await nodeJoinInfo(["--config", path, "--member", IP], {}, options))).toContain(tokenFile);
+			expect(state.looks).toBe(1);
+		});
+
+		test("an admin token file that is missing is an error naming the file, not the token", async () => {
+			const path = await nodeConfig({ vmon: { adminTokenFile: join(dir, "absent.token") } });
+			const out = await nodeJoinInfo(["--config", path, "--member", IP, "--member", IP], {}, seams([]).options);
+			expect(nodeFailed(out)).toContain("--member given twice");
+			const real = await nodeJoinInfo(["--config", path, "--member", IP], {}, { installedVmon: async () => "v0.4.0" });
+			expect(nodeFailed(real)).toBe(`cannot read the vibemon admin token file ${join(dir, "absent.token")}`);
+		});
+
+		test("the cluster secret is not read for --member", async () => {
+			const path = await nodeConfig({ vmon: { clusterSecretFile: join(dir, "absent.secret") } });
+			const { options } = seams([view(node({}))]);
+			expect(await nodeJoinInfo(["--config", path, "--member", IP], {}, options)).toMatchObject({ member: { hostname: "box" } });
+		});
+	});
+
+	describe("(process)", () => {
+		async function run(args: string[], env: Record<string, string> = {}): Promise<{ stdout: string; stderr: string; code: number }> {
+			const proc = Bun.spawn(["bun", CLI, ...args], { env: { ...process.env, OMP_CLOUD_CONFIG: configPath, ...env }, stdout: "pipe", stderr: "pipe" });
+			const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+			return { stdout, stderr, code };
+		}
+
+		test("an error is one {ompCloudNode: 1, error} line on stdout and exit 1", async () => {
+			const out = await run(["node-join-info"]);
+			expect(out.code).toBe(1);
+			expect(out.stdout.trimEnd().split("\n")).toHaveLength(1);
+			expect(JSON.parse(out.stdout.trimEnd())).toEqual({ ompCloudNode: 1, error: expect.stringContaining("does not take vibemon machines") });
+		});
+
+		test("the secret is on the last stdout line only, when vibemon is installed", async () => {
+			const out = await run(["node-join-info", "--config", await nodeConfig()]);
+			const parsed: unknown = JSON.parse(out.stdout.trimEnd().split("\n").at(-1) ?? "");
+			if (isRecord(parsed) && "error" in parsed) {
+				// No vibemon installed on this machine: the only acceptable failure, and it carries no secret.
+				expect(parsed.error).toBe("vibemon is not installed on the server");
+				expect(out.code).toBe(1);
+			} else {
+				expect(out.code).toBe(0);
+				expect(parsed).toMatchObject({ ompCloudNode: 1, vmon: { clusterSecret: SECRET } });
+			}
+			expect(out.stdout.trimEnd().split("\n")).toHaveLength(1);
+			expect(out.stderr).not.toContain(SECRET);
+		});
 	});
 });
