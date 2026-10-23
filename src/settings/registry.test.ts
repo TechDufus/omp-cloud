@@ -262,6 +262,24 @@ describe("policy.egress", () => {
 	});
 });
 
+describe("service.name", () => {
+	const parse = (raw: unknown) => REGISTRY["service.name"].parse(raw);
+	const message = "service.name must be empty or 1 to 64 letters, digits, spaces, ., _ or -";
+
+	test("is empty by default and takes empty or a trimmed device-style name", () => {
+		expect(REGISTRY["service.name"].default).toBe("");
+		expect(parse("")).toBe("");
+		expect(parse("   ")).toBe("");
+		expect(parse("  home lab-1.a_b ")).toBe("home lab-1.a_b");
+		expect(parse("x".repeat(64))).toBe("x".repeat(64));
+	});
+
+	test("refuses other characters, more than 64 characters and non-strings with the rule", () => {
+		for (const bad of ["a/b", "has\nnewline", "<b>", "x".repeat(65), 3, null]) expect(() => parse(bad)).toThrow(message);
+		expect(() => parse("a/b")).toThrow(SettingError);
+	});
+});
+
 describe("update.*", () => {
 	test("mode takes off, notify and auto; notify is the default", () => {
 		expect(REGISTRY["update.mode"].default).toBe("notify");

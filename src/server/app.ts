@@ -1,3 +1,4 @@
+import { hostname } from "node:os";
 import type { LoginManager } from "../auth/login";
 import type { GitService } from "../git";
 import type { SigningKey } from "../git/signing-key";
@@ -89,6 +90,8 @@ export interface AppOptions {
 	mcp?: { proxy: boolean; selfHosts: readonly string[] };
 	/** Relays `/api/v1/threads/{id}/ports/{port}`: the vmon address and the runner's lookup of the thread's running sandbox. Absent when the runner is off: those routes answer 409. */
 	preview?: PreviewOptions;
+	/** Reads the vibemon tag installed on the server, for `GET /api/v1/health`. Called in the background, at most once at a time and every 30 s; the answer never waits for it. Absent: health reports `vmon: null`. */
+	vmonVersion?: () => Promise<string | null>;
 }
 
 /** What the GitHub and signing routes work with. */
@@ -97,6 +100,9 @@ export interface GithubWiring {
 	api: GitHubApi;
 	signingKey: SigningKey;
 }
+
+/** `health` answers with the vibemon tag read at most this long ago. */
+export const HEALTH_VMON_TTL_MS = 30_000;
 
 /** A device's `last_seen_at` is written at most this often. */
 const LAST_SEEN_INTERVAL_MS = 60_000;
@@ -135,6 +141,7 @@ const CAPABILITIES: readonly string[] = [
 	"threads.readonly",
 	"threads.subagent",
 	"devices.access",
+	"logins.list",
 ];
 
 /** A message body: its text plus JSON framing. */
@@ -281,6 +288,25 @@ export function createApp(options: AppOptions): App {
 		vmonDashboard: options.vmonDashboard,
 	});
 	const aborts = new DeviceAborts();
+	// The vibemon tag the health answer carries is read in the background: a health check never waits for it.
+	const vmonVersion = options.vmonVersion ?? (async () => null);
+	let vmonTag: string | null = null;
+	let vmonReadAt = 0;
+	let vmonReading = false;
+	function refreshVmonTag(force: boolean): void {
+		if (vmonReading || (!force && Date.now() - vmonReadAt < HEALTH_VMON_TTL_MS)) return;
+		vmonReading = true;
+		vmonVersion().then(
+			(tag) => {
+				vmonTag = tag;
+			},
+			() => {},
+		).finally(() => {
+			vmonReading = false;
+			vmonReadAt = Date.now();
+		});
+	}
+	refreshVmonTag(true);
 	const pairing = new PairingRoutes({ store, remote, limiter: new SourceLimiter(), aborts });
 
 	async function download(thread: Thread, route: "result" | "conversation", caller: Caller, req: Request): Promise<Response> {
@@ -385,7 +411,7 @@ export function createApp(options: AppOptions): App {
 		const pathname = new URL(req.url).pathname;
 		requireScope(caller, req.method, pathname);
 		if (pathname === LOGINS_PATH || pathname.startsWith(`${LOGINS_PATH}/`)) {
-			return handleLogins(req, pathname.slice(LOGINS_PATH.length).split("/").slice(1), logins);
+			return handleLogins(req, pathname.slice(LOGINS_PATH.length).split("/").slice(1), logins, caller, () => store.mcpCredentialUrls());
 		}
 		if (pathname === SETTINGS_PATH || pathname.startsWith(`${SETTINGS_PATH}/`)) {
 			return handleSettings(req, pathname.slice(SETTINGS_PATH.length).split("/").slice(1), settings, principal);
@@ -421,7 +447,7 @@ export function createApp(options: AppOptions): App {
 			case "whoami":
 				return json(200, {
 					user: principal,
-					service: { version: SERVICE_VERSION, api: API_VERSION },
+					service: { version: SERVICE_VERSION, api: API_VERSION, name: settings.get("service.name") || hostname() },
 					capabilities: CAPABILITIES,
 					limits: {
 						maxMessageBytes: MAX_TEXT_BYTES,
@@ -444,7 +470,7 @@ export function createApp(options: AppOptions): App {
 					threads: store.countThreads(principal),
 					device: caller.device,
 					remote: remote === undefined ? null : { fingerprint: remote.fingerprint },
-					update: await updateSummary(update),
+					update: { ...(await updateSummary(update)), mode: settings.get("update.mode") },
 				});
 			case "list":
 				return json(
@@ -519,7 +545,10 @@ export function createApp(options: AppOptions): App {
 				return json(403, { error: "forbidden" });
 			}
 			const pathname = new URL(req.url).pathname;
-			if (req.method === "GET" && pathname === HEALTH_PATH) return json(200, healthBody());
+			if (req.method === "GET" && pathname === HEALTH_PATH) {
+				refreshVmonTag(false);
+				return json(200, healthBody(vmonTag));
+			}
 			if (pairing.isPublic(req.method, pathname)) return pairing.handlePublic(req, pathname, address);
 			const caller = authenticate(req, { apiTokenSha256, store, deviceOnly: remoteListener });
 			if (caller === null) return json(401, { error: "unauthorized" }, { "WWW-Authenticate": 'Bearer realm="omp-cloud"' });

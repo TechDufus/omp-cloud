@@ -2,10 +2,13 @@
  * The settings registry: every key an operator can change at run time, with its type, default, documentation and
  * validator. The store keeps only the values that differ from the default, so `service.json` stays bootstrap-only.
  */
+import { parseDeviceName } from "../pairing/names";
 import { DEFAULT_FEED, parseFeedSpec } from "../update/feed-spec";
 import { OMP_UNITS } from "../update/omp-units";
 import { isRecord } from "../guards";
 import { THINKING_LEVELS } from "../store/types";
+
+const SERVICE_NAME_MESSAGE = "service.name must be empty or 1 to 64 letters, digits, spaces, ., _ or -";
 
 /** A rejected setting: unknown key or a value its validator refuses. The message names the key; the API serves it as a 400. */
 export class SettingError extends Error {
@@ -177,6 +180,8 @@ export interface SettingValues {
 	"policy.models.allowed": readonly string[];
 	/** Days without activity before an idle thread's VM is released; 0 never archives. */
 	"lifecycle.archiveAfterDays": number;
+	/** The name this cloud shows in the dashboard header, the omp footer and /cloud status; empty uses the server's host name. */
+	"service.name": string;
 	/** `off`: never checks by itself; `notify`: checks and downloads, the owner installs; `auto`: also installs when that is safe. */
 	"update.mode": (typeof UPDATE_MODES)[number];
 	/** `github:<owner>/<repo>` or an http(s) base URL. */
@@ -467,6 +472,20 @@ export const REGISTRY: Registry = {
 				throw new SettingError("lifecycle.archiveAfterDays must be a number of days, 0 or more (0 never archives)");
 			}
 			return raw;
+		},
+	},
+	"service.name": {
+		key: "service.name",
+		type: "string",
+		default: "",
+		doc: "The name this cloud shows in the dashboard header, the omp footer and /cloud status. Empty uses the server's host name.",
+		parse(raw) {
+			if (typeof raw !== "string") throw new SettingError(SERVICE_NAME_MESSAGE);
+			const trimmed = raw.trim();
+			if (trimmed === "") return "";
+			const name = parseDeviceName(trimmed);
+			if (name === null) throw new SettingError(SERVICE_NAME_MESSAGE);
+			return name;
 		},
 	},
 	"update.mode": {

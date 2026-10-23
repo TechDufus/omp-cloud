@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitService } from "../git";
 import { SigningKey } from "../git/signing-key";
@@ -310,7 +310,7 @@ describe("whoami", () => {
 		expect(res.status).toBe(200);
 		expect(await jsonOf(res)).toEqual({
 			user: OWNER,
-			service: { version: SERVICE_VERSION, api: API_VERSION },
+			service: { version: SERVICE_VERSION, api: API_VERSION, name: hostname() },
 			capabilities: [
 				"threads.paging",
 				"threads.meta",
@@ -334,6 +334,7 @@ describe("whoami", () => {
 				"threads.readonly",
 				"threads.subagent",
 				"devices.access",
+				"logins.list",
 			],
 			limits: { maxMessageBytes: MAX_TEXT_BYTES, maxAnswerBytes: MAX_QUESTION_TEXT_BYTES, maxUploadBytes: MAX_SOURCE_BYTES, listMax: 200, maxTurns: MAX_TURNS },
 			spend: { todayUSD: 0, dayCapUSD: 0 },
@@ -350,7 +351,7 @@ describe("whoami", () => {
 			threads: { starting: 1, working: 1, waiting: 1, idle: 1, failed: 1 },
 			device: null,
 			remote: null,
-			update: { state: "unsupported", available: null },
+			update: { state: "unsupported", available: null, mode: "notify" },
 		});
 	});
 

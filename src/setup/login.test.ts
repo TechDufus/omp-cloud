@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type LoginController, type LoginFlow, LoginManager } from "../auth/login";
+import { OWNER_CALLER } from "../server/auth";
 import { handleLogins } from "../server/logins";
 import { LOGINS_PATH } from "../server/paths";
 import { chooseProvider, type LoginIo, loginMain, loginStep, type LoginStepOptions, type ProviderChoice } from "./login";
@@ -75,7 +76,7 @@ beforeEach(async () => {
 			if (req.headers.get("authorization") !== `Bearer ${TOKEN}`) return Response.json({ error: "unauthorized" }, { status: 401 });
 			if (url.pathname === "/api/v1/whoami") return Response.json({ modelPatterns: patterns });
 			if (url.pathname === LOGINS_PATH || url.pathname.startsWith(`${LOGINS_PATH}/`)) {
-				return handleLogins(req, url.pathname.slice(LOGINS_PATH.length).split("/").slice(1), manager);
+				return handleLogins(req, url.pathname.slice(LOGINS_PATH.length).split("/").slice(1), manager, OWNER_CALLER, () => []);
 			}
 			return Response.json({ error: "not found" }, { status: 404 });
 		},

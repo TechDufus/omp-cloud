@@ -1,3 +1,4 @@
+import { type Caller, hasFullAccess } from "./auth";
 import { LoginError, type LoginManager } from "../auth/login";
 import { isRecord } from "../guards";
 
@@ -58,13 +59,15 @@ function loginFailure(error: unknown): Response {
 }
 
 /**
- * The routes under `/api/v1/logins`; `segments` is the path after it. Answers `404` for any other path or method.
- * Authentication is the caller's.
+ * The routes under `/api/v1/logins`; `segments` is the path after it. `GET` on the collection lists the cloud's logins
+ * (accounts only for a caller with full access; `mcpUrls` are the MCP servers logged in). Answers `404` for any other path
+ * or method. Authentication and the access gate are the caller's (`requireScope`).
  */
-export async function handleLogins(req: Request, segments: string[], manager: LoginManager): Promise<Response> {
+export async function handleLogins(req: Request, segments: string[], manager: LoginManager, caller: Caller, mcpUrls: () => string[]): Promise<Response> {
 	const [id, action, ...rest] = segments;
 	try {
 		if (id === undefined) {
+			if (req.method === "GET") return json(200, await manager.list(hasFullAccess(caller), mcpUrls()));
 			if (req.method !== "POST") return failure(404, NOT_FOUND);
 			const body = await readBody(req);
 			if (body instanceof Response) return body;

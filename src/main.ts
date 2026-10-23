@@ -27,6 +27,7 @@ import { Settings } from "./settings";
 import { join } from "node:path";
 import { Store } from "./store";
 import { Vmon } from "./vmon";
+import { installedVmonVersion } from "./vmon/pin";
 import { MIGRATIONS } from "./store/schema";
 import { createUpdateService, openUpdateContext } from "./update/real";
 import type { UpdateService } from "./update/service";
@@ -215,6 +216,7 @@ export async function serve(args: readonly string[]): Promise<void> {
 			preview: started === undefined ? undefined : { vmonUrl: config.vmon.url, vmFor: threadId => started.vmFor(threadId) },
 			remote: remote?.settings,
 			update,
+			vmonVersion: installedVmonVersion,
 		});
 		// The dashboard binds next: when its port is taken, nothing else is left running.
 		if (config.dashboard !== undefined) {

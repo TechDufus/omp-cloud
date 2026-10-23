@@ -17,9 +17,12 @@ export interface UpdateApi {
 	apply(): Promise<{ version: string }>;
 }
 
-/** The answer of `GET /api/v1/health`: this process's version, build and the schema its database runs at. */
-export function healthBody(): { status: "ok"; version: string; build: typeof BUILD; schema: number } {
-	return { status: "ok", version: SERVICE_VERSION, build: BUILD, schema: MIGRATIONS.length };
+/**
+ * The answer of `GET /api/v1/health`: this process's version, build, the schema its database runs at and the vibemon tag
+ * installed on the server (`vmon`, null when unknown): the other machines of a cluster follow that tag.
+ */
+export function healthBody(vmon: string | null): { status: "ok"; version: string; build: typeof BUILD; schema: number; vmon: string | null } {
+	return { status: "ok", version: SERVICE_VERSION, build: BUILD, schema: MIGRATIONS.length, vmon };
 }
 
 /** `whoami.update` for a service that has an updater, else a checkout-like `unsupported`. */

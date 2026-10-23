@@ -14,6 +14,10 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 - **Access levels for devices.** `whoami.device` carries `access`, `GET /api/v1/devices` lists it, `POST /api/v1/pairing/offers/{id}/approve` takes `{"access": "full" | "threads"}`, and `PATCH /api/v1/devices/{id}` changes it. The capability is `devices.access`. A device with full access can do everything the owner token can, and sees every device.
 - **Every caller can read the update state.** `GET /api/v1/update` is open to every device; `POST /api/v1/update/check` and `/apply` need full access.
+- **The cloud has a name.** The new setting `service.name` (empty by default, 1 to 64 letters, digits, spaces, `.`, `_` or `-`) is what the cloud calls itself; `whoami.service.name` returns it, or the server's host name when it is empty.
+- **The update mode is visible to every caller.** `whoami.update` now carries `mode`, the `update.mode` setting, next to `state` and `available`.
+- **A list of the cloud's logins.** `GET /api/v1/logins` returns every provider login the cloud broker holds, its disabled ones with the reason, and the MCP servers the service is logged in to, each with the account, when it was made and, for Anthropic, the date to renew by. Every caller may read it; accounts show only with full access. The capability is `logins.list`.
+- **Health carries the server's vibemon version.** `GET /api/v1/health` answers `vmon`, the vibemon tag installed on the server (`null` when unknown). The service reads it in the background, so a health check never waits for it.
 
 ### Changed
 

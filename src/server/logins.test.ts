@@ -1,8 +1,10 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import type { Server } from "bun";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type LoginFlow, LoginManager, type LoginView } from "../auth/login";
+import { type Caller, OWNER, OWNER_CALLER } from "./auth";
 import { handleLogins } from "./logins";
 
 const AUTH_URL = "https://auth.example.com/authorize?state=s";
@@ -42,7 +44,7 @@ function request(method: string, body?: unknown, raw?: string): Request {
 }
 
 async function call(logins: LoginManager, method: string, segments: string[], body?: unknown, raw?: string): Promise<{ status: number; body: Record<string, unknown> }> {
-	const response = await handleLogins(request(method, body, raw), segments, logins);
+	const response = await handleLogins(request(method, body, raw), segments, logins, OWNER_CALLER, () => []);
 	expect(response.headers.get("content-type")).toBe("application/json");
 	return { status: response.status, body: (await response.json()) as Record<string, unknown> };
 }
@@ -121,7 +123,7 @@ describe("handleLogins", () => {
 	test("a body over 8 KiB is 413, declared or streamed", async () => {
 		const logins = manager();
 		const big = JSON.stringify({ provider: "anthropic", pad: "x".repeat(8 * 1024) });
-		const declared = await handleLogins(new Request("http://service/api/v1/logins", { method: "POST", body: big, headers: { "content-length": String(big.length) } }), [], logins);
+		const declared = await handleLogins(new Request("http://service/api/v1/logins", { method: "POST", body: big, headers: { "content-length": String(big.length) } }), [], logins, OWNER_CALLER, () => []);
 		expect(declared.status).toBe(413);
 		const streamed = await handleLogins(
 			new Request("http://service/api/v1/logins", {
@@ -136,6 +138,8 @@ describe("handleLogins", () => {
 			} as RequestInit),
 			[],
 			logins,
+			OWNER_CALLER,
+			() => [],
 		);
 		expect(streamed.status).toBe(413);
 	});
@@ -144,7 +148,6 @@ describe("handleLogins", () => {
 		const logins = manager();
 		const view = await started(logins);
 		for (const [method, segments] of [
-			["GET", []],
 			["PUT", []],
 			["POST", [view.id]],
 			["GET", [view.id, "input"]],
@@ -153,5 +156,59 @@ describe("handleLogins", () => {
 		] as const) {
 			expect(await call(logins, method, [...segments], {})).toEqual({ status: 404, body: { error: "not found" } });
 		}
+	});
+
+	describe("GET on the collection", () => {
+		const THREADS_ONLY: Caller = { kind: "device", principal: OWNER, device: { id: "d1", name: "phone", access: "threads" } };
+		let broker: Server<undefined>;
+		let listed: LoginManager;
+
+		beforeAll(() => {
+			broker = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				fetch(req) {
+					const path = new URL(req.url).pathname;
+					if (path === "/v1/snapshot") {
+						return Response.json({ credentials: [{ id: 1, provider: "anthropic", credential: { type: "oauth", email: "owner@example.com", authorizedAt: Date.parse("2026-10-01T00:00:00Z") } }] });
+					}
+					return Response.json({ disabled: [] });
+				},
+			});
+			listed = new LoginManager({ brokerUrl: `http://127.0.0.1:${broker.port}`, brokerTokenFile: tokenFile, flow });
+		});
+
+		afterAll(() => {
+			void broker.stop(true);
+		});
+
+		async function list(caller: Caller): Promise<{ status: number; body: unknown }> {
+			const response = await handleLogins(request("GET"), [], listed, caller, () => ["https://mcp.example.com/sse"]);
+			return { status: response.status, body: await response.json() };
+		}
+
+		test("answers {logins, brokerError} with accounts for the owner and a full-access device", async () => {
+			const entries = [
+				{ provider: "anthropic", kind: "provider", account: "owner@example.com", loggedInAt: "2026-10-01T00:00:00.000Z", renewBy: "2026-10-31T00:00:00.000Z", disabled: false, note: "" },
+				{ provider: "mcp:https://mcp.example.com/sse", kind: "mcp", account: "mcp.example.com", loggedInAt: "", renewBy: "", disabled: false, note: "" },
+			];
+			expect(await list(OWNER_CALLER)).toEqual({ status: 200, body: { logins: entries, brokerError: "" } });
+			const full: Caller = { kind: "device", principal: OWNER, device: { id: "d2", name: "laptop", access: "full" } };
+			expect(await list(full)).toEqual({ status: 200, body: { logins: entries, brokerError: "" } });
+		});
+
+		test("a threads-only device gets the list with every account blank", async () => {
+			const answer = await list(THREADS_ONLY);
+			expect(answer.status).toBe(200);
+			expect(answer.body).toMatchObject({ brokerError: "", logins: [{ provider: "anthropic", account: "", renewBy: "2026-10-31T00:00:00.000Z" }, { provider: "mcp:https://mcp.example.com/sse", account: "" }] });
+		});
+
+		test("a down broker is brokerError on a 200, with the MCP rows", async () => {
+			const response = await handleLogins(request("GET"), [], manager(), OWNER_CALLER, () => ["https://mcp.example.com/sse"]);
+			expect(response.status).toBe(200);
+			const body = (await response.json()) as { logins: { provider: string }[]; brokerError: string };
+			expect(body.brokerError).toStartWith("the cloud broker did not answer: ");
+			expect(body.logins.map((entry) => entry.provider)).toEqual(["mcp:https://mcp.example.com/sse"]);
+		});
 	});
 });

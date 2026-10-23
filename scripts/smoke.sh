@@ -177,6 +177,14 @@ expect_jq '.ompVersion | test("^[0-9]+[.][0-9]+[.][0-9]+$")' "whoami"
 expect_header Cache-Control no-store "whoami"
 ok "whoami -> owner, zero threads, model patterns, omp version, no-store"
 
+expect_jq '(.service.name | type == "string" and length > 0) and (.update.mode | IN("off", "notify", "auto"))' "whoami"
+ok "whoami -> service.name and update.mode"
+
+status=$(curl -sS -o "$body" -D "$headers" -w '%{http_code}' "$base/api/v1/health")
+expect_status 200 "health without a token"
+expect_jq 'has("vmon") and (.vmon == null or (.vmon | type == "string"))' "health"
+ok "health -> a vmon key (the installed vibemon tag, or null)"
+
 # --- create -----------------------------------------------------------------
 create_args=(
 	-F "request=@$fx/request.json;type=application/json"
