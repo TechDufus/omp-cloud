@@ -1,5 +1,7 @@
 /** Every route under this prefix is `handleLogins`'s. */
 export const LOGINS_PATH = "/api/v1/logins";
+/** `GET` is `handleUpdate`'s status, open to every caller; `/check` and `/apply` need full access. */
+export const UPDATE_PATH = "/api/v1/update";
 /** Every route under this prefix is `handleSettings`'s. */
 export const SETTINGS_PATH = "/api/v1/settings";
 /** Every route under this prefix is `handleGithub`'s: the GitHub App. Owner only. */

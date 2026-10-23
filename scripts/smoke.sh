@@ -442,7 +442,7 @@ ok "the token is delivered once: a second claim -> 401"
 
 device GET /api/v1/whoami
 expect_status 200 "device whoami on the remote port"
-expect_jq ".device.name == \"smoke phone\" and .device.id == \"$device_id\" and .remote.fingerprint == \"$fingerprint\" and .user == \"owner\"" "device whoami on the remote port"
+expect_jq ".device.name == \"smoke phone\" and .device.id == \"$device_id\" and .device.access == \"threads\" and .remote.fingerprint == \"$fingerprint\" and .user == \"owner\"" "device whoami on the remote port"
 ok "remote: device token whoami -> the device and the server fingerprint"
 
 status=$(curl -sS -o "$body" -w '%{http_code}' -H "Authorization: Bearer $device_token" "$base/api/v1/whoami")
@@ -460,10 +460,10 @@ ok "devices: the device sees itself (current), the owner sees all"
 
 device POST /api/v1/pairing/offers "${json[@]}" -d '{}'
 expect_status 403 "device token on POST /pairing/offers"
-expect_jq '.error | startswith("only the owner token")' "device token on POST /pairing/offers"
+expect_jq '.error | startswith("this device has threads-only access")' "device token on POST /pairing/offers"
 device PUT /api/v1/settings "${json[@]}" -d '{"settings":{}}'
 expect_status 403 "device token on PUT /settings"
-ok "owner-only routes refuse a device token -> 403"
+ok "routes that need full access refuse a threads-only device token -> 403"
 
 request DELETE "/api/v1/devices/$device_id"
 expect_status 200 "revoke"

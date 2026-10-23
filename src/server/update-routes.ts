@@ -2,13 +2,10 @@ import { MIGRATIONS } from "../store/schema";
 import { BUILD, SERVICE_VERSION } from "../version";
 import type { UpdateState } from "../update/policy";
 import { UpdateConflict, type UpdateStatus } from "../update/service";
-import type { Caller } from "./auth";
-import { ApiError } from "./errors";
-import { OWNER_ONLY_MESSAGE } from "./scopes";
+import { UPDATE_PATH } from "./paths";
 
 /** Public, no authentication: what the updater's health check (and any monitor) polls. */
 export const HEALTH_PATH = "/api/v1/health";
-export const UPDATE_PATH = "/api/v1/update";
 
 /** What the routes need of the updater (`UpdateService`). */
 export interface UpdateApi {
@@ -35,17 +32,16 @@ function json(status: number, body: unknown): Response {
 }
 
 /**
- * `GET /api/v1/update`, `POST /api/v1/update/check` and `POST /api/v1/update/apply`, owner token only (a device gets
- * 403: it sees the state in `whoami`). Null when `pathname`/`method` is not one of them. Without an updater the routes
- * do not exist (404).
+ * `GET /api/v1/update`, `POST /api/v1/update/check` and `POST /api/v1/update/apply`. Null when `pathname`/`method` is
+ * none of them. Without an updater the routes do not exist (404). Who may call is `requireScope`'s: the status is open to
+ * every caller, `check` and `apply` need full access.
  */
-export async function handleUpdate(update: UpdateApi | undefined, caller: Caller, req: Request, pathname: string): Promise<Response | null> {
+export async function handleUpdate(update: UpdateApi | undefined, req: Request, pathname: string): Promise<Response | null> {
 	const get = req.method === "GET" && pathname === UPDATE_PATH;
 	const check = req.method === "POST" && pathname === `${UPDATE_PATH}/check`;
 	const apply = req.method === "POST" && pathname === `${UPDATE_PATH}/apply`;
 	if (!get && !check && !apply) return null;
 	if (update === undefined) return null;
-	if (caller.device !== null) throw new ApiError(403, OWNER_ONLY_MESSAGE);
 	if (get) return json(200, await update.status());
 	if (check) {
 		void update.check();

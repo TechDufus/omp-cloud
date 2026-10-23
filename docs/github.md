@@ -8,7 +8,7 @@ What it needs: the dashboard ([Configuration](configuration.md#service-config)),
 
 ## Set it up (once)
 
-1. **Connect the App.** Open the dashboard's GitHub page, optionally name an organization to own the App, and press Connect. The page sends your browser to GitHub with a manifest; confirm the App there. GitHub redirects back to the dashboard, which hands the one-time code to the service, and the service stores the App's id and private key. Do it from the dashboard on the service host: a paired device is refused (`only the owner token can do this`).
+1. **Connect the App.** Open the dashboard's GitHub page, optionally name an organization to own the App, and press Connect. The page sends your browser to GitHub with a manifest; confirm the App there. GitHub redirects back to the dashboard, which hands the one-time code to the service, and the service stores the App's id and private key. Do it from the dashboard on the service host or through a device with full access: a device with threads-only access is refused (`this device has threads-only access`).
 2. **Install it.** Press "Install on repositories" and pick the repositories (or all). A repository the App is not installed on is not reachable through it.
 3. **Make the signing key** (optional, for Verified commits). On the GitHub page press Generate. Add the public key it shows to GitHub as a **Signing Key** (`https://github.com/settings/ssh/new`, "Key type: Signing Key"; an authentication key does not make a commit Verified). The page shows `registered` when GitHub lists the key for the App's owner.
 4. **Turn it on.** Set `git.sign` to `ssh` to sign, `git.push` to `auto` (or `ask`) and `git.pr` to `draft` (the default), on the GitHub page or in Settings.

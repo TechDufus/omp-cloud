@@ -107,6 +107,8 @@ export async function sshPair(args: readonly string[], env: Record<string, strin
 				platform: parsed.platform,
 				tokenSha256: sha256Hex(token),
 				pairedFrom: pairedFrom(env),
+				// Reaching the service's account over ssh is the proof of ownership: the device is the owner, with full access.
+				access: "full",
 			});
 		} finally {
 			store.close();

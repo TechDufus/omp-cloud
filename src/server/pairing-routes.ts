@@ -5,8 +5,8 @@ import { parseDeviceName, parsePlatform } from "../pairing/names";
 import { advertiseAddresses, type RemoteSettings } from "../pairing/remote";
 import { newDeviceToken, randomBase64Url, sha256Hex } from "../pairing/secrets";
 import type { Store } from "../store";
-import type { Device, PairingOffer } from "../store/types";
-import type { Caller } from "./auth";
+import type { Device, DeviceAccess, PairingOffer } from "../store/types";
+import { type Caller, hasFullAccess } from "./auth";
 import { readJsonObject } from "./body";
 import { type DeviceAborts, requireActive } from "./devices";
 import { ApiError } from "./errors";
@@ -58,8 +58,17 @@ function deviceView(device: Device, current: boolean): Record<string, unknown> {
 		pairedFrom: device.pairedFrom,
 		lastSeenAt: device.lastSeenAt,
 		lastSeenAddress: device.lastSeenAddress,
+		access: device.access,
 		current,
 	};
+}
+
+/** The `access` of a request body: `full` or `threads`. A missing one is `threads` unless `required`; anything else is ApiError 400. */
+function accessField(body: Record<string, unknown>, required: boolean): DeviceAccess {
+	const value = body.access;
+	if (value === undefined && !required) return "threads";
+	if (value === "full" || value === "threads") return value;
+	throw new ApiError(400, "access must be full or threads");
 }
 
 /**
@@ -145,7 +154,10 @@ export class PairingRoutes {
 		if (pathname === DEVICES_PATH) return req.method === "GET" ? this.#listDevices(caller) : null;
 		if (pathname.startsWith(`${DEVICES_PATH}/`)) {
 			const id = pathname.slice(DEVICES_PATH.length + 1);
-			return req.method === "DELETE" && ID_PATTERN.test(id) ? this.#revoke(caller, id, req.signal) : null;
+			if (!ID_PATTERN.test(id)) return null;
+			if (req.method === "DELETE") return this.#revoke(caller, id, req.signal);
+			if (req.method === "PATCH") return this.#setAccess(caller, id, req);
+			return null;
 		}
 		return null;
 	}
@@ -163,7 +175,9 @@ export class PairingRoutes {
 		}
 		if (req.method !== "POST" || (action !== "approve" && action !== "decline")) return null;
 		this.#ownedOffer(caller, id);
-		const decision = this.options.store.decideOffer(id, action);
+		// An approval says what access the device gets; no body is an old client, which gets threads only.
+		const access = action === "approve" ? accessField(await readJsonObject(req, MAX_OFFER_BODY_BYTES, true), false) : "threads";
+		const decision = this.options.store.decideOffer(id, action, access);
 		if (decision === "not_found") throw new ApiError(404, "not found");
 		if (decision === "not_waiting") throw new ApiError(409, "this pairing is not waiting for approval");
 		return new Response(null, { status: 204 });
@@ -197,8 +211,16 @@ export class PairingRoutes {
 	#listDevices(caller: Caller): Response {
 		const devices = this.options.store
 			.devices(caller.principal)
-			.filter(device => caller.device === null || device.id === caller.device.id);
+			.filter(device => hasFullAccess(caller) || device.id === caller.device?.id);
 		return json(200, { devices: devices.map(device => deviceView(device, device.id === caller.device?.id)) });
+	}
+
+	async #setAccess(caller: Caller, id: string, req: Request): Promise<Response> {
+		const access = accessField(await readJsonObject(req, MAX_OFFER_BODY_BYTES), true);
+		requireActive(this.options.store, caller, req.signal);
+		const device = this.options.store.setDeviceAccess(id, caller.principal, access);
+		if (device === null) throw new ApiError(404, "not found");
+		return json(200, { device: deviceView(device, device.id === caller.device?.id) });
 	}
 
 	#revoke(caller: Caller, id: string, signal: AbortSignal): Response {

@@ -635,8 +635,8 @@ function seed(dataDir: string): SeedSummary {
 function seedDevices(store: Store, clock: { ms: number }): { id: string; name: string }[] {
 	const paired: { id: string; name: string }[] = [];
 	const people = [
-		{ name: "macbook-pro", platform: "darwin", address: "192.168.1.42", agoH: 216, seenAgoMin: 12 },
-		{ name: "work-laptop", platform: "linux", address: "10.20.4.18", agoH: 70, seenAgoMin: 190 },
+		{ name: "macbook-pro", platform: "darwin", address: "192.168.1.42", agoH: 216, seenAgoMin: 12, access: "full" as const },
+		{ name: "work-laptop", platform: "linux", address: "10.20.4.18", agoH: 70, seenAgoMin: 190, access: "threads" as const },
 	];
 	for (const person of people) {
 		clock.ms = NOW - person.agoH * HOUR;
@@ -655,7 +655,7 @@ function seedDevices(store: Store, clock: { ms: number }): { id: string; name: s
 			address: person.address,
 		});
 		clock.ms += 40_000;
-		if (store.decideOffer(offerId, "approve") !== "done") throw new Error("seed: the pairing offer was not approved");
+		if (store.decideOffer(offerId, "approve", person.access) !== "done") throw new Error("seed: the pairing offer was not approved");
 		clock.ms += 2000;
 		const claimed = store.claimOffer(requestId, sha256Hex(requestSecret), { id: randomBase64Url(9), tokenSha256: sha256Hex(newDeviceToken()) });
 		if (claimed.kind !== "created") throw new Error("seed: the pairing request did not create a device");

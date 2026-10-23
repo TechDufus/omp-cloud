@@ -1811,7 +1811,7 @@ async function run(): Promise<void> {
 		const whoami = await remoteFetch("/whoami", { authorization: `Bearer ${deviceToken}` });
 		expectEqual("device token whoami on the remote port", whoami.status, 200);
 		const who = obj(await whoami.json(), "whoami");
-		expectEqual("whoami device", JSON.stringify(who.device), JSON.stringify({ id: deviceId, name: "scenario-b" }));
+		expectEqual("whoami device", JSON.stringify(who.device), JSON.stringify({ id: deviceId, name: "scenario-b", access: "threads" }));
 		expectEqual("whoami remote", JSON.stringify(who.remote), JSON.stringify({ fingerprint: identity.fingerprint }));
 		const ownerOnly = await remoteFetch("/pairing/offers", { authorization: `Bearer ${deviceToken}`, "content-type": "application/json" }, { method: "POST", body: "{}" });
 		expectEqual("device token on POST /pairing/offers", ownerOnly.status, 403);
@@ -2031,7 +2031,7 @@ async function run(): Promise<void> {
 		const whoami = await remoteFetch("/whoami", { authorization: `Bearer ${deviceToken}` });
 		expectEqual("device token whoami on the remote port", whoami.status, 200);
 		const who = obj(await whoami.json(), "whoami");
-		expectEqual("whoami device", JSON.stringify(who.device), JSON.stringify({ id: paired.id, name: "scenario-ssh" }));
+		expectEqual("whoami device", JSON.stringify(who.device), JSON.stringify({ id: paired.id, name: "scenario-ssh", access: "full" }));
 		expectEqual("whoami remote", JSON.stringify(who.remote), JSON.stringify({ fingerprint: identity.fingerprint }));
 		const seen = device.notices.length;
 		await cloud(device.client, "status");

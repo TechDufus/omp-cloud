@@ -134,6 +134,7 @@ const CAPABILITIES: readonly string[] = [
 	"threads.setup",
 	"threads.readonly",
 	"threads.subagent",
+	"devices.access",
 ];
 
 /** A message body: its text plus JSON framing. */
@@ -407,7 +408,7 @@ export function createApp(options: AppOptions): App {
 		if (pairingResponse !== null) return pairingResponse;
 		const dashboardResponse = await dashboardRoutes.handle(caller, req, pathname, server);
 		if (dashboardResponse !== null) return dashboardResponse;
-		const updateResponse = await handleUpdate(update, caller, req, pathname);
+		const updateResponse = await handleUpdate(update, req, pathname);
 		if (updateResponse !== null) return updateResponse;
 		const route = matchRoute(req.method, pathname);
 		if (route === null) return json(404, { error: "not found" });

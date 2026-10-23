@@ -338,6 +338,7 @@ export interface DeviceRow {
 	last_seen_at: string | null;
 	last_seen_address: string | null;
 	revoked_at: string | null;
+	access: string;
 }
 
 /** A devices row as the domain `Device`; the token hash stays in the row. */
@@ -352,6 +353,7 @@ export function deviceFromRow(row: DeviceRow): Device {
 		lastSeenAt: row.last_seen_at,
 		lastSeenAddress: row.last_seen_address,
 		revokedAt: row.revoked_at,
+		access: row.access === "full" ? "full" : "threads",
 	};
 }
 
@@ -371,6 +373,7 @@ export interface OfferRow {
 	request_address: string | null;
 	requested_at: string | null;
 	device_id: string | null;
+	access: string;
 	device_name: string | null;
 }
 

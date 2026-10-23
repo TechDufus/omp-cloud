@@ -12,11 +12,12 @@ import { UpdateConflict, type UpdateStatus } from "../update/service";
 import { BUILD, SERVICE_VERSION } from "../version";
 import { type App, createApp } from "./app";
 import { tokenSha256 } from "./auth";
-import { OWNER_ONLY_MESSAGE } from "./scopes";
+import { FULL_ACCESS_MESSAGE } from "./scopes";
 import type { UpdateApi } from "./update-routes";
 
 const TOKEN = "owner-token";
 const DEVICE_TOKEN = "ompd_device-token-for-the-update-tests-0123456789";
+const FULL_DEVICE_TOKEN = "ompd_full-device-token-for-the-update-tests-012345";
 const ORIGIN = "http://omp.test";
 
 let dir: string;
@@ -29,7 +30,8 @@ beforeEach(async () => {
 	store = Store.open({ dataDir: dir });
 	settings = Settings.load(store);
 	git = await GitService.open({ dataDir: dir, hosts: {}, fetchTimeoutSeconds: 30, pushTimeoutSeconds: 30 });
-	store.addDevice({ id: "dev1", owner: "owner", name: "laptop", platform: "linux", tokenSha256: tokenSha256(DEVICE_TOKEN), pairedFrom: "ssh" });
+	store.addDevice({ id: "dev1", owner: "owner", name: "laptop", platform: "linux", tokenSha256: tokenSha256(DEVICE_TOKEN), pairedFrom: "ssh", access: "threads" });
+	store.addDevice({ id: "dev2", owner: "owner", name: "desktop", platform: "linux", tokenSha256: tokenSha256(FULL_DEVICE_TOKEN), pairedFrom: "ssh", access: "full" });
 });
 afterEach(async () => {
 	store.close();
@@ -121,7 +123,7 @@ describe("GET /api/v1/health", () => {
 });
 
 describe("the update routes' auth", () => {
-	test("without a token they are 401; a device token is 403 with the owner-only message; the owner is served", async () => {
+	test("without a token they are 401; a threads-only device may read the status but not check or apply; the owner and a full device are served", async () => {
 		const update = fake();
 		const app = appWith(update);
 		for (const [method, path] of [
@@ -132,11 +134,17 @@ describe("the update routes' auth", () => {
 			expect((await call(app, method, path, null)).status).toBe(401);
 			expect((await call(app, method, path, "wrong")).status).toBe(401);
 			const device = await call(app, method, path, DEVICE_TOKEN);
+			if (method === "GET") {
+				expect([method, path, device.status]).toEqual([method, path, 200]);
+				continue;
+			}
 			expect([method, path, device.status]).toEqual([method, path, 403]);
-			expect(await body(device)).toEqual({ error: OWNER_ONLY_MESSAGE });
+			expect(await body(device)).toEqual({ error: FULL_ACCESS_MESSAGE });
 		}
 		expect(update.calls).toEqual([]);
 		expect((await call(app, "GET", "/api/v1/update")).status).toBe(200);
+		expect((await call(app, "POST", "/api/v1/update/check", FULL_DEVICE_TOKEN)).status).toBe(202);
+		expect((await call(app, "POST", "/api/v1/update/apply", FULL_DEVICE_TOKEN)).status).toBe(202);
 	});
 
 	test("without an updater the routes do not exist", async () => {

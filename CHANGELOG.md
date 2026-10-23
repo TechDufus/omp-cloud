@@ -6,6 +6,20 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 ## Unreleased
 
+### Upgrade notes
+
+- **Devices have access levels (schema migration 17, Service API 6).** A paired device is now the owner on its machine, with `full` access (everything the owner token can do) or `threads` access (threads and reads). On upgrade, devices paired over ssh become `full` and devices paired with a code stay `threads`; an approval that names no access, which is what the current plugin sends, grants `threads`. Change one with `PATCH /api/v1/devices/{id}`. The service must restart to migrate the database before `omp-cloud ssh-pair` works again.
+
+### Added
+
+- **Access levels for devices.** `whoami.device` carries `access`, `GET /api/v1/devices` lists it, `POST /api/v1/pairing/offers/{id}/approve` takes `{"access": "full" | "threads"}`, and `PATCH /api/v1/devices/{id}` changes it. The capability is `devices.access`. A device with full access can do everything the owner token can, and sees every device.
+- **Every caller can read the update state.** `GET /api/v1/update` is open to every device; `POST /api/v1/update/check` and `/apply` need full access.
+
+### Changed
+
+- **A refusal names the fix.** A device with threads-only access that calls a route needing full access gets `403` `this device has threads-only access; a connection with full access can change that (Devices in the dashboard, or /cloud devices access <device> full)` instead of `only the owner token can do this`.
+- **Devices paired over ssh have full access.** `omp-cloud ssh-pair` creates a `full` device, because a login on the service's account is already ownership.
+
 ## 0.7.0 (2026-10-22)
 
 Cloud agents the model starts now behave like `task` subagents, each omp session picks its cloud, and plan mode delegates read-only agents. This is Service API 5, with no database migration.

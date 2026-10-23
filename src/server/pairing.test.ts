@@ -17,7 +17,7 @@ import type { ApiServer } from "./api-server";
 import { type App, createApp } from "./app";
 import { tokenSha256 } from "./auth";
 import { serveRemote } from "./remote";
-import { OWNER_ONLY_MESSAGE } from "./scopes";
+import { FULL_ACCESS_MESSAGE } from "./scopes";
 
 const TOKEN = "s3cret-token";
 const ORIGIN = "http://omp.test";
@@ -137,13 +137,13 @@ interface PairedViaApi {
 	offerId: string;
 }
 
-/** The whole flow through the API: offer, redeem, approve, claim. */
-async function pair(name = "laptop", address = "10.0.0.5"): Promise<PairedViaApi> {
+/** The whole flow through the API: offer, redeem, approve (with `access`, else with no body like an old client), claim. */
+async function pair(name = "laptop", address = "10.0.0.5", access?: "full" | "threads"): Promise<PairedViaApi> {
 	const offer = await newOffer();
 	const redeemed = await remote("POST", "/api/v1/pairing/redeem", { body: redeemBody(offer, { name }) }, address);
 	expect(redeemed.status).toBe(202);
 	const requested = await bodyOf(redeemed);
-	expect((await loopback("POST", `/api/v1/pairing/offers/${offer.id}/approve`)).status).toBe(204);
+	expect((await loopback("POST", `/api/v1/pairing/offers/${offer.id}/approve`, access === undefined ? {} : { body: { access } })).status).toBe(204);
 	const claimed = await remote("POST", "/api/v1/pairing/claim", { body: { request: requested.request, requestSecret: requested.requestSecret } }, address);
 	expect(claimed.status).toBe(201);
 	const body = await bodyOf(claimed);
@@ -205,7 +205,7 @@ describe("the remote entry point", () => {
 		const res = await remote("GET", "/api/v1/whoami", { token: device.token });
 		expect(res.status).toBe(200);
 		const body = await bodyOf(res);
-		expect(body.device).toEqual({ id: device.id, name: "laptop" });
+		expect(body.device).toEqual({ id: device.id, name: "laptop", access: "threads" });
 		expect(body.remote).toEqual({ fingerprint: FINGERPRINT });
 		expect(body.user).toBe("owner");
 	});
@@ -253,7 +253,7 @@ describe("the remote entry point", () => {
 		expect((await loopback("GET", "/api/v1/whoami")).status).toBe(200);
 		const res = await loopback("GET", "/api/v1/whoami", { token: device.token });
 		expect(res.status).toBe(200);
-		expect((await bodyOf(res)).device).toEqual({ id: device.id, name: "laptop" });
+		expect((await bodyOf(res)).device).toEqual({ id: device.id, name: "laptop", access: "threads" });
 		expect((await bodyOf(await loopback("GET", "/api/v1/whoami"))).device).toBeNull();
 	});
 
@@ -642,7 +642,7 @@ describe("claim", () => {
 });
 
 describe("scopes", () => {
-	test("a device token on every owner-only route is 403 with the contract body, on both entry points", async () => {
+	test("a threads-only device on every route that needs full access is 403 with the contract body, on both entry points", async () => {
 		const device = await pair("laptop");
 		const other = await pair("other");
 		const routes: [string, string][] = [
@@ -653,34 +653,49 @@ describe("scopes", () => {
 			["POST", "/api/v1/pairing/offers/abc/decline"],
 			["DELETE", `/api/v1/devices/${other.id}`],
 			["DELETE", "/api/v1/devices/unknown"],
+			["PATCH", `/api/v1/devices/${device.id}`],
+			["PATCH", `/api/v1/devices/${other.id}`],
 			["PUT", "/api/v1/settings"],
 			["PUT", "/api/v1/settings/import"],
-			["GET", "/api/v1/logins"],
+			["GET", "/api/v1/logins/abc"],
 			["POST", "/api/v1/logins/anthropic"],
 			["POST", "/api/v1/logins/abc/input"],
 			["DELETE", "/api/v1/logins/abc"],
+			["POST", "/api/v1/update/check"],
+			["POST", "/api/v1/update/apply"],
 			["POST", "/api/v1/dashboard/links"],
 		];
 		for (const [method, path] of routes) {
 			for (const res of [await remote(method, path, { token: device.token }), await loopback(method, path, { token: device.token })]) {
 				expect([method, path, res.status]).toEqual([method, path, 403]);
-				expect(await bodyOf(res)).toEqual({ error: OWNER_ONLY_MESSAGE });
+				expect(await bodyOf(res)).toEqual({ error: FULL_ACCESS_MESSAGE });
 			}
 		}
-		expect(OWNER_ONLY_MESSAGE).toBe("only the owner token can do this; it works on the server machine");
+		expect(FULL_ACCESS_MESSAGE).toBe(
+			"this device has threads-only access; a connection with full access can change that (Devices in the dashboard, or /cloud devices access <device> full)",
+		);
 		expect(store.device(other.id)).not.toBeNull();
+		expect(store.device(device.id)?.access).toBe("threads");
 		expect(store.settingRows()).toEqual([]);
 	});
 
-	test("the owner token is not refused on those routes", async () => {
-		for (const [method, path] of [
+	test("a threads-only device may list the logins, and a full device or the owner is not refused on any of those routes", async () => {
+		const threads = await pair("threads");
+		expect((await remote("GET", "/api/v1/logins", { token: threads.token })).status).not.toBe(403);
+		const full = await pair("full", "10.0.0.6", "full");
+		const routes = [
 			["POST", "/api/v1/pairing/offers"],
 			["GET", "/api/v1/pairing/offers/abc"],
+			["PATCH", `/api/v1/devices/${threads.id}`],
 			["PUT", "/api/v1/settings"],
 			["GET", "/api/v1/logins"],
+			["GET", "/api/v1/logins/abc"],
+			["POST", "/api/v1/update/check"],
 			["POST", "/api/v1/dashboard/links"],
-		] as const) {
-			expect((await loopback(method, path)).status).not.toBe(403);
+		] as const;
+		for (const [method, path] of routes) {
+			expect([method, path, (await loopback(method, path)).status === 403]).toEqual([method, path, false]);
+			expect([method, path, (await remote(method, path, { token: full.token }, "10.0.0.6")).status === 403]).toEqual([method, path, false]);
 		}
 	});
 
@@ -691,13 +706,13 @@ describe("scopes", () => {
 		}
 	});
 
-	test("a device lists only itself and the owner lists all, current marking the caller's own", async () => {
+	test("a threads-only device lists only itself; the owner and a full device list all, current marking the caller's own", async () => {
 		const first = await pair("first");
 		clock += 1000;
 		const second = await pair("second", "10.0.0.6");
 		const asFirst = await bodyOf(await remote("GET", "/api/v1/devices", { token: first.token }));
 		expect(asFirst.devices).toEqual([
-			{ id: first.id, name: "first", platform: "linux", createdAt: new Date(T0).toISOString(), pairedFrom: "10.0.0.5", lastSeenAt: new Date(T0 + 1000).toISOString(), lastSeenAddress: "10.0.0.5", current: true },
+			{ id: first.id, name: "first", platform: "linux", createdAt: new Date(T0).toISOString(), pairedFrom: "10.0.0.5", lastSeenAt: new Date(T0 + 1000).toISOString(), lastSeenAddress: "10.0.0.5", access: "threads", current: true },
 		]);
 		const asOwner = await bodyOf(await loopback("GET", "/api/v1/devices"));
 		expect(asOwner.devices).toMatchObject([
@@ -706,9 +721,16 @@ describe("scopes", () => {
 		]);
 		const asSecond = await bodyOf(await loopback("GET", "/api/v1/devices", { token: second.token }));
 		expect(asSecond.devices).toMatchObject([{ id: second.id, current: true }]);
+		const full = await pair("full", "10.0.0.7", "full");
+		const asFull = await bodyOf(await remote("GET", "/api/v1/devices", { token: full.token }, "10.0.0.7"));
+		expect(asFull.devices).toMatchObject([
+			{ id: first.id, access: "threads", current: false },
+			{ id: second.id, access: "threads", current: false },
+			{ id: full.id, access: "full", current: true },
+		]);
 	});
 
-	test("a device can revoke only itself", async () => {
+	test("a device can revoke only itself, while a full device revokes any", async () => {
 		const first = await pair("first");
 		const second = await pair("second");
 		expect((await remote("DELETE", `/api/v1/devices/${second.id}`, { token: first.token })).status).toBe(403);
@@ -718,6 +740,9 @@ describe("scopes", () => {
 		expect(await bodyOf(own)).toEqual({ device: { id: first.id, name: "first" }, runningThreads: [] });
 		expect((await remote("GET", "/api/v1/whoami", { token: first.token })).status).toBe(401);
 		expect((await remote("GET", "/api/v1/whoami", { token: second.token })).status).toBe(200);
+		const full = await pair("full", "10.0.0.6", "full");
+		expect((await remote("DELETE", `/api/v1/devices/${second.id}`, { token: full.token }, "10.0.0.6")).status).toBe(200);
+		expect(store.device(second.id)).toBeNull();
 	});
 
 	test("the owner revokes any device; unknown and already revoked ones are 404", async () => {
@@ -728,6 +753,91 @@ describe("scopes", () => {
 		expect((await loopback("DELETE", "/api/v1/devices/bad%20id")).status).toBe(404);
 		expect((await loopback("GET", "/api/v1/devices/x")).status).toBe(404);
 		expect((await loopback("POST", "/api/v1/devices")).status).toBe(404);
+	});
+});
+
+describe("access levels", () => {
+	test("an approval with no body, an empty object or access threads gives a threads-only device; access full gives a full one", async () => {
+		expect(store.device((await pair("a")).id)?.access).toBe("threads");
+		expect(store.device((await pair("b", "10.0.0.5", "threads")).id)?.access).toBe("threads");
+		expect(store.device((await pair("c", "10.0.0.5", "full")).id)?.access).toBe("full");
+		const offer = await newOffer();
+		const redeemed = await bodyOf(await remote("POST", "/api/v1/pairing/redeem", { body: redeemBody(offer, { name: "empty" }) }));
+		expect((await loopback("POST", `/api/v1/pairing/offers/${offer.id}/approve`, { body: {} })).status).toBe(204);
+		const claimed = await bodyOf(await remote("POST", "/api/v1/pairing/claim", { body: { request: redeemed.request, requestSecret: redeemed.requestSecret } }));
+		expect(store.device(str((claimed.device as Record<string, unknown>).id))?.access).toBe("threads");
+	});
+
+	test("an approval with another access value is 400 and leaves the offer waiting", async () => {
+		const offer = await newOffer();
+		await remote("POST", "/api/v1/pairing/redeem", { body: redeemBody(offer) });
+		for (const access of ["owner", "", 1, null, "FULL"]) {
+			const res = await loopback("POST", `/api/v1/pairing/offers/${offer.id}/approve`, { body: { access } });
+			expect([access, res.status]).toEqual([access, 400]);
+			expect(await bodyOf(res)).toEqual({ error: "access must be full or threads" });
+		}
+		expect(store.offer(offer.id)?.status).toBe("pending");
+	});
+
+	test("a decline ignores access, and an approval's access is recorded once", async () => {
+		const offer = await newOffer();
+		const redeemed = await bodyOf(await remote("POST", "/api/v1/pairing/redeem", { body: redeemBody(offer) }));
+		expect((await loopback("POST", `/api/v1/pairing/offers/${offer.id}/decline`, { body: { access: "full" } })).status).toBe(204);
+		const res = await remote("POST", "/api/v1/pairing/claim", { body: { request: redeemed.request, requestSecret: redeemed.requestSecret } });
+		expect(res.status).toBe(403);
+	});
+
+	test("PATCH sets a device's access, answers the device and takes effect on the device's next request", async () => {
+		const device = await pair("laptop");
+		expect((await remote("PUT", "/api/v1/settings", { token: device.token, body: { settings: {} } })).status).toBe(403);
+		const res = await loopback("PATCH", `/api/v1/devices/${device.id}`, { body: { access: "full" } });
+		expect(res.status).toBe(200);
+		expect(await bodyOf(res)).toEqual({
+			device: {
+				id: device.id,
+				name: "laptop",
+				platform: "linux",
+				createdAt: new Date(T0).toISOString(),
+				pairedFrom: "10.0.0.5",
+				lastSeenAt: new Date(T0).toISOString(),
+				lastSeenAddress: "10.0.0.5",
+				access: "full",
+				current: false,
+			},
+		});
+		expect((await remote("GET", "/api/v1/whoami", { token: device.token })).status).toBe(200);
+		expect((await bodyOf(await remote("GET", "/api/v1/whoami", { token: device.token }))).device).toEqual({ id: device.id, name: "laptop", access: "full" });
+		expect((await remote("PUT", "/api/v1/settings", { token: device.token, body: { settings: {} } })).status).not.toBe(403);
+		// A full device changes access too, its own included, and the answer marks its own device current.
+		const own = await remote("PATCH", `/api/v1/devices/${device.id}`, { token: device.token, body: { access: "threads" } });
+		expect(own.status).toBe(200);
+		expect((await bodyOf(own)).device).toMatchObject({ access: "threads", current: true });
+		expect((await remote("PATCH", `/api/v1/devices/${device.id}`, { token: device.token, body: { access: "full" } })).status).toBe(403);
+	});
+
+	test("PATCH needs access to be full or threads (400), a body that is JSON (400) and a known active device (404)", async () => {
+		const device = await pair("laptop");
+		for (const body of [{}, { access: "owner" }, { access: 1 }, { access: null }, { access: "" }]) {
+			const res = await loopback("PATCH", `/api/v1/devices/${device.id}`, { body });
+			expect([JSON.stringify(body), res.status]).toEqual([JSON.stringify(body), 400]);
+			expect(await bodyOf(res)).toEqual({ error: "access must be full or threads" });
+		}
+		expect((await loopback("PATCH", `/api/v1/devices/${device.id}`, { body: "not json" })).status).toBe(400);
+		expect((await loopback("PATCH", `/api/v1/devices/${device.id}`)).status).toBe(400);
+		expect(store.device(device.id)?.access).toBe("threads");
+		expect((await loopback("PATCH", "/api/v1/devices/unknown", { body: { access: "full" } })).status).toBe(404);
+		expect((await loopback("PATCH", "/api/v1/devices/bad%20id", { body: { access: "full" } })).status).toBe(404);
+		expect((await loopback("DELETE", `/api/v1/devices/${device.id}`)).status).toBe(200);
+		const revoked = await loopback("PATCH", `/api/v1/devices/${device.id}`, { body: { access: "full" } });
+		expect(revoked.status).toBe(404);
+		expect(await bodyOf(revoked)).toEqual({ error: "not found" });
+		expect((await loopback("PATCH", "/api/v1/devices")).status).toBe(404);
+	});
+
+	test("whoami lists the access in the capabilities, and the API revision is 6", async () => {
+		const body = await bodyOf(await loopback("GET", "/api/v1/whoami"));
+		expect(body.capabilities).toContain("devices.access");
+		expect((body.service as Record<string, unknown>).api).toBe(6);
 	});
 });
 
@@ -952,7 +1062,7 @@ describe("requests that are already running when the device is revoked", () => {
 
 	test("a stale caller is refused before every write, whatever its signal says", async () => {
 		const device = await pair();
-		const caller = { kind: "device", principal: "owner", device: { id: device.id, name: device.name } } as const;
+		const caller = { kind: "device", principal: "owner", device: { id: device.id, name: device.name, access: "threads" } } as const;
 		seedRunning(THREAD);
 		store.askQuestions(THREAD, 1, [ask()], null);
 		store.revokeDevice(device.id, "owner");
@@ -973,7 +1083,7 @@ describe("requests that are already running when the device is revoked", () => {
 
 	test("an upload that already finished is refused by the check in front of the thread write", async () => {
 		const device = await pair();
-		const caller = { kind: "device", principal: "owner", device: { id: device.id, name: device.name } } as const;
+		const caller = { kind: "device", principal: "owner", device: { id: device.id, name: device.name, access: "threads" } } as const;
 		store.revokeDevice(device.id, "owner");
 		const form = new FormData();
 		form.append("request", JSON.stringify({ prompt: "fix it", repo: { name: "proj", handoffCommit: "a".repeat(40) } }));
@@ -1049,7 +1159,7 @@ describe("a real TLS listener", () => {
 			const pinned = { ca: identity.cert, checkServerIdentity: () => undefined };
 			const res = await fetch(`${url}/api/v1/whoami`, { headers: { Authorization: `Bearer ${device.token}` }, tls: pinned, redirect: "error" });
 			expect(res.status).toBe(200);
-			expect((await bodyOf(res)).device).toEqual({ id: device.id, name: "tls device" });
+			expect((await bodyOf(res)).device).toEqual({ id: device.id, name: "tls device", access: "threads" });
 			expect(store.device(device.id)?.lastSeenAddress).toBe("127.0.0.1");
 
 			const owner = await fetch(`${url}/api/v1/whoami`, { headers: { Authorization: `Bearer ${TOKEN}` }, tls: pinned });
