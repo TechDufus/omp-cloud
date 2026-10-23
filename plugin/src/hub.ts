@@ -9,6 +9,7 @@
 
 import type { Component, DescribeContext, KeyId, NativeNode, NativeUiEvent, Theme } from "@oh-my-pi/pi-tui";
 import { COUNT_BADGES, hoverRows, inventoryThread, nativeTile, patternProviders, type TuiModule } from "./cards";
+import { fullAccess } from "./access";
 import { shortName } from "./commands";
 import { eventLines, lineLabel, lineText } from "./event-lines";
 import { follow, LIFECYCLE_KINDS, type EventSource, type Follower, type FollowOptions } from "./events";
@@ -40,7 +41,7 @@ export interface HubDeps {
 	tui: Pick<TuiModule, "truncateToWidth" | "matchesKey" | "node" | "text" | "span" | "col" | "row" | "propNode" | "stableKey">;
 	requestRender(): void;
 	done(result: HubResult | undefined): void;
-	/** The host of the server when this machine is a paired device, which cannot log the server in; undefined on the owner token. */
+	/** The host of the server when this machine is a paired device; where a threads-only device sends its user to log the server in. Undefined on the owner token. */
 	serverHost?: string;
 	now?(): number;
 	pollMs?: number;
@@ -265,10 +266,10 @@ export class HubComponent implements Component {
 		}
 	}
 
-	/** The version waiting for the owner's click, as the last `whoami` says; undefined for a device, a service that reports no update, or nothing ready. */
+	/** The version waiting for a connection with full access to install it, as the last `whoami` says; undefined without full access, for a service that reports no update, or nothing ready. */
 	#updateReady(): string | undefined {
 		const who = this.#who;
-		return who && who.device === null && who.update?.state === "ready" && who.update.available !== null ? who.update.available : undefined;
+		return who && fullAccess(who) && who.update?.state === "ready" && who.update.available !== null ? who.update.available : undefined;
 	}
 
 	#move(delta: number): void {
@@ -349,7 +350,7 @@ export class HubComponent implements Component {
 		if (who) {
 			const providers = patternProviders(who.modelPatterns);
 			const facts = [
-				{ k: "runs", v: providers.length > 0 ? providers.join(", ") : `no providers · ${loginHint("<provider>", this.#d.serverHost)}` },
+				{ k: "runs", v: providers.length > 0 ? providers.join(", ") : `no providers · ${loginHint("<provider>", this.#d.serverHost, fullAccess(who))}` },
 				{ k: "model", v: `threads run their session's model (fallback ${who.defaultModel || "none"})` },
 				{ k: "omp", v: who.ompVersion || "?" },
 				{ k: "VMs", v: `${who.vms.running} running · ${who.vms.paused} paused` },
@@ -465,7 +466,7 @@ export class HubComponent implements Component {
 			const providers = patternProviders(who.modelPatterns);
 			const tail = `threads run their session's model (fallback ${who.defaultModel || "none"}) · omp ${who.ompVersion || "?"}`;
 			if (providers.length > 0) lines.push(`  runs ${providers.join(", ")} · ${tail}`);
-			else lines.push(`  runs ${theme.fg("warning", `no providers (${loginHint("<provider>", this.#d.serverHost)})`)}`, `  ${tail}`);
+			else lines.push(`  runs ${theme.fg("warning", `no providers (${loginHint("<provider>", this.#d.serverHost, fullAccess(who))})`)}`, `  ${tail}`);
 			const c = who.threads;
 			lines.push(theme.fg("muted", `  VMs ${who.vms.running} running, ${who.vms.paused} paused · threads ${c.working} working, ${c.waiting} waiting, ${c.idle} idle, ${c.failed} failed`));
 		}

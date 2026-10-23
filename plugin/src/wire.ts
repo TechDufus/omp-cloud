@@ -7,9 +7,13 @@
 import { isRecord } from "./guards";
 import type {
 	Claim,
+	Capacity,
 	DashboardLink,
 	Device,
+	DeviceAccess,
 	DeviceRef,
+	LoginEntry,
+	LoginList,
 	Login,
 	LoginState,
 	OfferState,
@@ -53,6 +57,7 @@ import type {
 	TurnTextPage,
 	UpdateState,
 	UpdateStatus,
+	WhoamiDevice,
 	WhoamiUpdate,
 } from "./types";
 
@@ -119,7 +124,7 @@ function options(o: Obj): QuestionOption[] {
 /** Null when the service sends no update state. */
 function parseWhoamiUpdate(v: unknown): WhoamiUpdate | null {
 	if (!isRecord(v)) return null;
-	return { state: oneOf(str(v, "state"), UPDATE_STATES, "idle"), available: strOrNull(v, "available") };
+	return { state: oneOf(str(v, "state"), UPDATE_STATES, "idle"), available: strOrNull(v, "available"), mode: oneOf(str(v, "mode"), UPDATE_MODES, "notify") };
 }
 
 /** `GET /api/v1/update`. Fields the service leaves out take their absent values. */
@@ -148,6 +153,15 @@ export function parseApplied(json: unknown): string {
 	return isRecord(o.applying) ? str(o.applying, "version") : "";
 }
 
+/** Anything but `full` is `threads`: the least a device can have, and what a service without access levels gives. */
+function accessOf(v: string): DeviceAccess {
+	return v === "full" ? "full" : "threads";
+}
+
+function whoamiDevice(v: unknown): WhoamiDevice | null {
+	return isRecord(v) ? { id: str(v, "id"), name: str(v, "name"), access: accessOf(str(v, "access")) } : null;
+}
+
 /** Fields the service leaves out take their absent values: api 1, no capabilities, the limits the service enforces by default. */
 export function parseWhoami(json: unknown): Whoami {
 	const o = obj(json, "whoami");
@@ -174,9 +188,9 @@ export function parseWhoami(json: unknown): Whoami {
 			idle: num(threads, "idle"),
 			failed: num(threads, "failed"),
 		},
-		device: deviceRef(o.device),
+		device: whoamiDevice(o.device),
 		remote: isRecord(o.remote) ? { fingerprint: str(o.remote, "fingerprint") } : null,
-		service: { version: str(service, "version"), api: numOrNull(service, "api") ?? 1 },
+		service: { version: str(service, "version"), api: numOrNull(service, "api") ?? 1, name: str(service, "name") },
 		capabilities: strings(o, "capabilities"),
 		limits: {
 			maxMessageBytes: numOrNull(limits, "maxMessageBytes") ?? 32768,
@@ -477,16 +491,71 @@ export function parseSettings(json: unknown): { key: string; value: unknown }[] 
 }
 
 export function parseDevices(json: unknown): Device[] {
-	return records(obj(json, "devices"), "devices").map(d => ({
+	return records(obj(json, "devices"), "devices").map(parseDevice);
+}
+
+function parseDevice(d: Obj): Device {
+	return {
 		id: str(d, "id"),
 		name: str(d, "name"),
 		platform: str(d, "platform"),
+		access: accessOf(str(d, "access")),
 		createdAt: str(d, "createdAt"),
 		pairedFrom: str(d, "pairedFrom"),
 		lastSeenAt: str(d, "lastSeenAt"),
 		lastSeenAddress: str(d, "lastSeenAddress"),
 		current: bool(d, "current"),
+	};
+}
+
+/** `PATCH /api/v1/devices/{id}`: `{device}`. */
+export function parseDeviceChanged(json: unknown): Device {
+	const o = obj(json, "device");
+	return parseDevice(isRecord(o.device) ? o.device : {});
+}
+
+/** `GET /api/v1/logins`: a login entry the plugin cannot read as an object is skipped. */
+export function parseLoginList(json: unknown): LoginList {
+	const o = obj(json, "logins");
+	const logins: LoginEntry[] = records(o, "logins").map(e => ({
+		provider: str(e, "provider"),
+		kind: str(e, "kind") === "mcp" ? "mcp" : "provider",
+		account: str(e, "account"),
+		loggedInAt: str(e, "loggedInAt"),
+		renewBy: str(e, "renewBy"),
+		disabled: bool(e, "disabled"),
+		note: str(e, "note"),
 	}));
+	return { logins, brokerError: str(o, "brokerError") };
+}
+
+/** `GET /api/v1/capacity`; the lists the plugin does not show (`history`, `members`) are not read. */
+export function parseCapacity(json: unknown): Capacity {
+	const o = obj(json, "capacity");
+	const pair = (key: string): { total: number; allocated: number } => {
+		const v = isRecord(o[key]) ? o[key] : {};
+		return { total: num(v, "total"), allocated: num(v, "allocated") };
+	};
+	const machines = isRecord(o.machines) ? o.machines : {};
+	const vms = isRecord(o.vms) ? o.vms : {};
+	const cloud = isRecord(vms.cloud) ? vms.cloud : {};
+	const size = isRecord(vms.size) ? vms.size : {};
+	const cluster = isRecord(o.cluster) ? o.cluster : {};
+	return {
+		available: bool(o, "available"),
+		problem: str(o, "problem"),
+		fix: str(o, "fix"),
+		machines: { total: num(machines, "total"), ready: num(machines, "ready") },
+		vcpus: pair("vcpus"),
+		memoryMB: pair("memoryMB"),
+		diskFreeMB: num(o, "diskFreeMB"),
+		vms: {
+			cluster: num(vms, "cluster"),
+			cloud: { running: num(cloud, "running"), paused: num(cloud, "paused"), limit: num(cloud, "limit") },
+			size: { vcpus: num(size, "vcpus"), memoryMB: num(size, "memoryMB") },
+		},
+		cluster: { accepting: bool(cluster, "accepting"), address: str(cluster, "address"), joinCommand: str(cluster, "joinCommand"), versionSkew: bool(cluster, "versionSkew") },
+	};
 }
 
 export function parseRevoked(json: unknown): Revoked {

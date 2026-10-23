@@ -11,6 +11,8 @@ import type { PullApply } from "./pull";
 import { repoLabel } from "./repo-key";
 import { asEnvelope, type AgentsDetail, type DelegateDetail, type DelegatedThread, type OpDetails, type OpOutput, type ThreadFailure, type ToolCloud, type ToolParams, type ToolSession } from "./tool";
 import { updateLine } from "./update";
+import { fullAccess, youLine } from "./access";
+import { capacityLine, readCapacity } from "./capacity";
 import type { Host, IrcReceiptKind, ThreadDetail, ThreadPhase, ThreadSummary, ThreadTurn, TurnPart } from "./types";
 
 /** Phases in which a thread has work in progress or waits for an answer. */
@@ -247,14 +249,15 @@ export async function info(env: Env): Promise<OpOutput> {
 	const view = await env.cloud.clouds(env.ctx);
 	const who = await env.session.client.whoami({ signal: env.signal });
 	const version = who.service.version === "" ? `unknown (api ${who.service.api})` : `${who.service.version} (api ${who.service.api})`;
-	const caller = who.device ? `device ${who.device.name}` : "owner";
+	const full = fullAccess(who);
+	const capacity = await readCapacity(env.session.client, who, env.signal);
 	const model = env.ctx.model ? `${env.ctx.model.provider}/${env.ctx.model.id}` : "";
 	const ids = who.models.map(m => m.id);
 	const shown = ids.slice(0, MODELS_LISTED).join(", ");
 	const l = who.limits;
 	const spend = who.spend === null ? "not reported by this service" : `${money(who.spend.todayUSD)} today, ${who.spend.dayCapUSD > 0 ? `day cap ${money(who.spend.dayCapUSD)}` : "no day cap"}`;
-	// A device cannot log the broker in: its owner does that on the server machine.
-	const loginOwner = who.device ? "ask the user to run omp-cloud login <provider> on the server machine" : "ask the user to run /cloud login <provider>";
+	// Only a connection with full access can log the broker in: a threads-only device's user does that on the server machine.
+	const loginOwner = full ? "ask the user to run /cloud login <provider>" : "ask the user to run omp-cloud login <provider> on the server machine";
 	const defaultServed = who.defaultModel !== "" && modelServed(who.modelPatterns, who.defaultModel);
 	const sessionModel =
 		model === ""
@@ -263,7 +266,7 @@ export async function info(env: Env): Promise<OpOutput> {
 				? `${model} (served)`
 				: `${model} (not served: ${defaultServed ? `delegations run the default model ${who.defaultModel}` : `pass model with one the cloud serves, or ${loginOwner}`})`;
 	const planning = env.cloud.planning(env.ctx);
-	// The settings are the owner's and a device may read them; a service that will not tell leaves the lines out.
+	// The settings are readable by any caller; a service that will not tell leaves the lines out.
 	let agents: AgentsReport | undefined;
 	let agentsError = "";
 	try {
@@ -274,7 +277,7 @@ export async function info(env: Env): Promise<OpOutput> {
 	}
 	const lines = [
 		...view.lines,
-		`service: omp-cloud ${version} · you are ${caller} (${who.user})`,
+		`service: ${who.service.name === "" ? "" : `${who.service.name} · `}omp-cloud ${version} · you: ${youLine(who)}`,
 		`capabilities: ${who.capabilities.length > 0 ? who.capabilities.join(", ") : "none reported"}`,
 		`models: ${ids.length > 0 ? `${shown}${ids.length > MODELS_LISTED ? ` and ${ids.length - MODELS_LISTED} more` : ""}` : `none yet (${loginOwner})`}`,
 		`default model: ${who.defaultModel || "none"} (runs when a delegation names no model and this session's model is not served)`,
@@ -284,17 +287,20 @@ export async function info(env: Env): Promise<OpOutput> {
 		`limits: message ${l.maxMessageBytes} bytes · answer ${l.maxAnswerBytes} bytes · upload ${formatTokens(l.maxUploadBytes)}B · list ${l.listMax} · turns per thread ${l.maxTurns}`,
 		`spend: ${spend}`,
 		`vms: ${who.vms.running} running, ${who.vms.paused} paused`,
+		...(capacity ? [`capacity: ${capacityLine(capacity)}`] : []),
 		`threads: ${who.threads.starting} starting, ${who.threads.working} working, ${who.threads.waiting} waiting, ${who.threads.idle} idle, ${who.threads.failed} failed`,
 	];
-	const updating = updateLine(who.update, who.device === null);
-	if (updating) lines.push(`update: ${updating}`);
+	if (who.update) {
+		const updating = updateLine(who.update, full);
+		if (updating) lines.push(`update: ${who.update.mode} · ${updating}`);
+	}
 	return {
 		summary: `omp-cloud ${who.service.version || "?"}`,
 		lines,
 		details: {
 			op: "info",
 			service: who.service,
-			caller: who.device ? { kind: "device", name: who.device.name } : { kind: "owner", name: who.user },
+			caller: who.device ? { kind: "device", name: who.device.name, access: who.device.access } : { kind: "owner", name: who.user, access: "full" },
 			clouds: view.known,
 			active: view.active ?? null,
 			chosen: view.chosen,

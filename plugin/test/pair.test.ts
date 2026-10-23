@@ -41,7 +41,7 @@ function rig(opts: { copyFails?: boolean; pollMs?: number; lingerMs?: number; no
 			if (failure) throw new Error(failure);
 			return state;
 		},
-		approvePairing: async id => void calls.push(`approve ${id}`),
+		approvePairing: async (id, access) => void calls.push(`approve ${id} ${access}`),
 		declinePairing: async id => void calls.push(`decline ${id}`),
 		cancelPairing: async id => void calls.push(`cancel ${id}`),
 	};
@@ -133,16 +133,25 @@ describe("the pair overlay", () => {
 		expect(text(r)).not.toContain("s3cr3t");
 	});
 
-	test("a device that redeemed the code is shown with its name, platform and address, and y approves it once", async () => {
+	test("a device that redeemed the code is shown with its name, platform and address, and y approves it once with full access", async () => {
 		const r = rig();
 		r.set("pending", { request: REQUEST });
 		await until(() => text(r).includes("laptop · linux · 10.0.0.7 wants to pair"));
-		expect(text(r)).toContain("y approve · n decline · esc cancel");
+		expect(text(r)).toContain("y approve with full access · t approve with threads-only access · n decline · esc cancel");
 
 		r.pair.handleInput("y");
 		r.pair.handleInput("y");
 		await until(() => r.calls.length > 0);
-		expect(r.calls).toEqual([`approve ${OFFER.id}`]);
+		expect(r.calls).toEqual([`approve ${OFFER.id} full`]);
+	});
+
+	test("t approves with threads-only access", async () => {
+		const r = rig();
+		r.set("pending", { request: REQUEST });
+		await until(() => text(r).includes("wants to pair"));
+		r.pair.handleInput("t");
+		await until(() => r.calls.length > 0);
+		expect(r.calls).toEqual([`approve ${OFFER.id} threads`]);
 	});
 
 	test("n declines", async () => {
@@ -162,6 +171,7 @@ describe("the pair overlay", () => {
 		const r = rig();
 		await until(() => r.renders() > 0);
 		r.pair.handleInput("y");
+		r.pair.handleInput("t");
 		r.pair.handleInput("n");
 		const before = r.renders();
 		await until(() => r.renders() >= before + 2);

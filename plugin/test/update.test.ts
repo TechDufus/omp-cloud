@@ -14,7 +14,7 @@ import { cleanup, FAST_RETRY, tmp } from "./helpers";
 afterEach(cleanup);
 
 /** The service as it reports itself in the session tests: as new as this plugin, so no test sees the older-plugin notice unless it asks for it. */
-const SERVICE = { version: PLUGIN_VERSION, api: 2 };
+const SERVICE = { version: PLUGIN_VERSION, api: 2, name: "" };
 
 const OLDER_SERVICE = "99.0.0";
 
@@ -43,11 +43,26 @@ describe("versions", () => {
 describe("what the service says", () => {
 	test("whoami carries the update; a whoami without it carries none", () => {
 		const { update: _update, ...old } = whoami();
-		expect(parseWhoami({ ...old, update: { state: "ready", available: "0.5.1" } }).update).toEqual({ state: "ready", available: "0.5.1" });
-		expect(parseWhoami({ ...old, update: { state: "idle", available: null } }).update).toEqual({ state: "idle", available: null });
+		expect(parseWhoami({ ...old, update: { state: "ready", available: "0.5.1", mode: "notify" } }).update).toEqual({ state: "ready", available: "0.5.1", mode: "notify" });
+		expect(parseWhoami({ ...old, update: { state: "idle", available: null, mode: "notify" } }).update).toEqual({ state: "idle", available: null, mode: "notify" });
 		expect(parseWhoami(old).update).toBeNull();
 		// A state this plugin does not know reads as idle: nothing is offered.
-		expect(parseWhoami({ ...old, update: { state: "rebooting", available: "" } }).update).toEqual({ state: "idle", available: null });
+		expect(parseWhoami({ ...old, update: { state: "rebooting", available: "", mode: "notify" } }).update).toEqual({ state: "idle", available: null, mode: "notify" });
+	});
+
+	test("a whoami from before access levels: a device is threads-only, the cloud has no name, the update mode is notify", () => {
+		const { device: _device, service: _service, update: _update, ...old } = whoami();
+		const before = parseWhoami({ ...old, device: { id: "d1", name: "laptop" }, service: { version: "0.5.0", api: 5 }, update: { state: "idle" } });
+		expect(before.device).toEqual({ id: "d1", name: "laptop", access: "threads" });
+		expect(before.service).toEqual({ version: "0.5.0", api: 5, name: "" });
+		expect(before.update).toEqual({ state: "idle", available: null, mode: "notify" });
+		const now = parseWhoami({ ...old, device: { id: "d1", name: "laptop", access: "full" }, service: { version: "0.6.0", api: 6, name: "home" }, update: { state: "idle", mode: "auto" } });
+		expect(now.device?.access).toBe("full");
+		expect(now.service.name).toBe("home");
+		expect(now.update?.mode).toBe("auto");
+		// Anything but `full` is the least a device can have.
+		expect(parseWhoami({ ...old, device: { id: "d1", name: "laptop", access: "root" } }).device?.access).toBe("threads");
+		expect(parseWhoami({ ...old, device: null }).device).toBeNull();
 	});
 
 	test("GET /update is read field by field; what the service leaves out is absent", () => {
@@ -82,13 +97,13 @@ describe("what the service says", () => {
 
 	test("one line says each state, for the owner and for a device", () => {
 		expect(updateLine(null, true)).toBeUndefined();
-		expect(updateLine({ state: "ready", available: "0.5.1" }, true)).toContain("/cloud update");
-		expect(updateLine({ state: "ready", available: "0.5.1" }, false)).toContain("the owner installs it");
-		expect(updateLine({ state: "downloading", available: "0.5.1" }, true)).toBe("downloading 0.5.1");
-		expect(updateLine({ state: "applying", available: "0.5.1" }, true)).toBe("installing 0.5.1: the service restarts");
-		expect(updateLine({ state: "failed", available: null }, false)).toContain("the owner sees why");
-		expect(updateLine({ state: "unsupported", available: null }, true)).toContain("git checkout");
-		expect(updateLine({ state: "idle", available: null }, true)).toBe("up to date");
+		expect(updateLine({ state: "ready", available: "0.5.1", mode: "notify" }, true)).toContain("/cloud update");
+		expect(updateLine({ state: "ready", available: "0.5.1", mode: "notify" }, false)).toContain("a connection with full access installs it");
+		expect(updateLine({ state: "downloading", available: "0.5.1", mode: "notify" }, true)).toBe("downloading 0.5.1");
+		expect(updateLine({ state: "applying", available: "0.5.1", mode: "notify" }, true)).toBe("installing 0.5.1: the service restarts");
+		expect(updateLine({ state: "failed", available: null, mode: "notify" }, false)).toContain("a connection with full access sees why");
+		expect(updateLine({ state: "unsupported", available: null, mode: "notify" }, true)).toContain("git checkout");
+		expect(updateLine({ state: "idle", available: null, mode: "notify" }, true)).toBe("up to date");
 	});
 
 	test("the footer adds `update ready` to what is there, or stands alone", () => {
@@ -96,6 +111,14 @@ describe("what the service says", () => {
 		expect(statusText(2, 1, 3, true)).toBe("☁ 2 working · 1 waiting · 3 unread · update ready");
 		expect(statusText(0, 0, 0, false)).toBeUndefined();
 		expect(statusText(1, 0)).toBe("☁ 1 working");
+	});
+
+	test("the cloud's name comes last, and stands alone in an idle footer", () => {
+		expect(statusText(0, 0, 0, false, "home")).toBe("☁ home");
+		expect(statusText(2, 1, 3, true, "home")).toBe("☁ 2 working · 1 waiting · 3 unread · update ready · home");
+		expect(statusText(1, 0, 0, false, "home")).toBe("☁ 1 working · home");
+		expect(statusText(0, 0, 0, false, "")).toBeUndefined();
+		expect(statusText(0, 0, 0, false, undefined)).toBeUndefined();
 	});
 });
 
@@ -150,13 +173,13 @@ describe("Updates", () => {
 		return p;
 	}
 
-	const ready = (version: string, over: Partial<Whoami> = {}): Whoami => whoami({ service: { version: "0.5.0", api: 2 }, update: { state: "ready", available: version }, ...over });
+	const ready = (version: string, over: Partial<Whoami> = {}): Whoami => whoami({ service: { version: "0.5.0", api: 2, name: "" }, update: { state: "ready", available: version, mode: "notify" }, ...over });
 
 	test("the owner gets the version, a footer change and one card; the same whoami again changes nothing", () => {
 		const p = probe();
 		p.updates.observe(ready("0.5.1"));
 		expect(p.updates.ready).toBe("0.5.1");
-		expect(p.updates.owner).toBe(true);
+		expect(p.updates.full).toBe(true);
 		expect(p.changes).toBe(1);
 		expect(p.cards).toEqual(["0.5.1"]);
 		p.updates.observe(ready("0.5.1"));
@@ -173,25 +196,45 @@ describe("Updates", () => {
 		expect(p.updates.ready).toBe("0.5.1");
 		p.updates.observe(ready("0.5.2"));
 		expect(p.cards).toEqual(["0.5.2"]);
-		p.updates.observe(whoami({ service: { version: "0.5.0", api: 2 }, update: { state: "idle", available: null } }));
+		p.updates.observe(whoami({ service: { version: "0.5.0", api: 2, name: "" }, update: { state: "idle", available: null, mode: "notify" } }));
 		p.updates.observe(ready("0.5.2"));
 		expect(p.cards).toEqual(["0.5.2"]);
 	});
 
 	test("a device is told the state but never gets the footer or the card", () => {
 		const p = probe();
-		p.updates.observe(ready("0.5.1", { device: { id: "d1", name: "laptop" } }));
-		expect(p.updates.owner).toBe(false);
-		expect(p.updates.update).toEqual({ state: "ready", available: "0.5.1" });
+		p.updates.observe(ready("0.5.1", { device: { id: "d1", name: "laptop", access: "threads" } }));
+		expect(p.updates.full).toBe(false);
+		expect(p.updates.update).toEqual({ state: "ready", available: "0.5.1", mode: "notify" });
 		expect(p.updates.ready).toBeUndefined();
 		expect(p.changes).toBe(0);
 		expect(p.cards).toEqual([]);
 	});
 
+	test("a device with full access installs like the owner: the footer, the card and the version", () => {
+		const p = probe();
+		p.updates.observe(ready("0.5.1", { device: { id: "d1", name: "laptop", access: "full" } }));
+		expect(p.updates.full).toBe(true);
+		expect(p.updates.ready).toBe("0.5.1");
+		expect(p.cards).toEqual(["0.5.1"]);
+	});
+
+	test("the cloud's name is kept, and the footer is refreshed when it changes", () => {
+		const p = probe();
+		p.updates.observe(whoami({ service: { version: "0.5.0", api: 6, name: "home" } }));
+		expect(p.updates.cloud).toBe("home");
+		expect(p.changes).toBe(1);
+		p.updates.observe(whoami({ service: { version: "0.5.0", api: 6, name: "home" } }));
+		expect(p.changes).toBe(1);
+		p.updates.observe(whoami({ service: { version: "0.5.0", api: 6, name: "lab" } }));
+		expect(p.changes).toBe(2);
+		expect(p.updates.cloud).toBe("lab");
+	});
+
 	test("only a ready update is waiting for a click: downloading, failed, unsupported and idle are not", () => {
 		const p = probe();
 		for (const state of ["downloading", "checking", "applying", "failed", "unsupported", "idle"] as const) {
-			p.updates.observe(whoami({ update: { state, available: "0.5.1" } }));
+			p.updates.observe(whoami({ update: { state, available: "0.5.1", mode: "notify" } }));
 			expect(p.updates.ready).toBeUndefined();
 		}
 		expect(p.cards).toEqual([]);
@@ -200,7 +243,7 @@ describe("Updates", () => {
 
 	test("a service that reports no update: nothing ready, nothing said", () => {
 		const p = probe();
-		p.updates.observe(whoami({ update: null, service: { version: "", api: 1 } }));
+		p.updates.observe(whoami({ update: null, service: { version: "", api: 1, name: "" } }));
 		expect(p.updates.update).toBeNull();
 		expect(p.updates.ready).toBeUndefined();
 		expect(p.cards).toEqual([]);
@@ -212,19 +255,19 @@ describe("Updates", () => {
 		p.updates.observe(ready("0.5.1"));
 		p.updates.applying("0.5.1");
 		expect(p.updates.ready).toBeUndefined();
-		expect(p.updates.update).toEqual({ state: "applying", available: "0.5.1" });
+		expect(p.updates.update).toEqual({ state: "applying", available: "0.5.1", mode: "notify" });
 		expect(p.changes).toBe(2);
 	});
 
 	test("a plugin older than the service says so once; the same, newer or unknown versions say nothing", () => {
 		const p = probe();
-		p.updates.observe(whoami({ service: { version: "0.6.0", api: 2 } }));
-		p.updates.observe(whoami({ service: { version: "0.7.0", api: 2 } }));
+		p.updates.observe(whoami({ service: { version: "0.6.0", api: 2, name: "" } }));
+		p.updates.observe(whoami({ service: { version: "0.7.0", api: 2, name: "" } }));
 		expect(p.notices).toEqual([pluginOlderText("0.5.0", "0.6.0")]);
 
 		for (const service of ["0.5.0", "0.4.9", "", "dev"]) {
 			const q = probe();
-			q.updates.observe(whoami({ service: { version: service, api: 2 } }));
+			q.updates.observe(whoami({ service: { version: service, api: 2, name: "" } }));
 			expect(q.notices).toEqual([]);
 		}
 	});
@@ -350,7 +393,7 @@ async function setup(): Promise<Rig> {
 const notes = (r: Rig): string[] => r.host.notes.map(n => n[0]);
 const posts = (): string[] => state.reqs.filter(q => q.method === "POST").map(q => q.path);
 const cards = (r: Rig) => r.pi.sent.map(s => s.message.details as CardDetails).filter(d => d.kind === "update");
-const READY = { state: "ready" as const, available: "0.5.1" };
+const READY = { state: "ready" as const, available: "0.5.1", mode: "notify" as const };
 
 describe("the footer and the card", () => {
 	test("the owner of a service with an update ready: `update ready` in the footer and one card, with the release notes, that does not wake the model", async () => {
@@ -378,7 +421,7 @@ describe("the footer and the card", () => {
 		await r.cloud.handle("list", r.host.host as never);
 		expect(cards(r)).toHaveLength(1);
 
-		state.who = whoami({ user: "dev", service: SERVICE, update: { state: "ready", available: "0.5.2" } });
+		state.who = whoami({ user: "dev", service: SERVICE, update: { state: "ready", available: "0.5.2", mode: "notify" } });
 		await r.cloud.handle("list", r.host.host as never);
 		await until(() => cards(r).length === 2);
 		expect(cards(r).map(c => (c.kind === "update" ? c.version : ""))).toEqual(["0.5.1", "0.5.2"]);
@@ -398,7 +441,7 @@ describe("the footer and the card", () => {
 	});
 
 	test("a device never gets the footer or the card, and nothing is asked of the owner's route", async () => {
-		state.who = whoami({ user: "dev", service: SERVICE, device: { id: "d1", name: "laptop" }, update: READY });
+		state.who = whoami({ user: "dev", service: SERVICE, device: { id: "d1", name: "laptop", access: "threads" }, update: READY });
 		state.status = status({ state: "ready", staged: "0.5.1" });
 		const r = await setup();
 		r.cloud.probeUpdates(r.host.host);
@@ -414,13 +457,13 @@ describe("the footer and the card", () => {
 		const r = await setup();
 		r.cloud.probeUpdates(r.host.host);
 		await until(() => r.host.status.at(-1) === "☁ update ready");
-		state.who = whoami({ user: "dev", service: { version: "0.5.1", api: 2 }, update: { state: "idle", available: null } });
+		state.who = whoami({ user: "dev", service: { version: "0.5.1", api: 2, name: "" }, update: { state: "idle", available: null, mode: "notify" } });
 		await r.cloud.handle("list", r.host.host as never);
 		expect(r.host.status.at(-1)).toBeUndefined();
 	});
 
 	test("a service that reports no update (none in whoami) is silent: no footer, no notice, no card, no request to the owner's route", async () => {
-		const { update: _update, ...old } = whoami({ user: "dev", service: { version: "", api: 1 } });
+		const { update: _update, ...old } = whoami({ user: "dev", service: { version: "", api: 1, name: "" } });
 		const r = await setup();
 		state.who = old;
 		r.cloud.probeUpdates(r.host.host);
@@ -435,7 +478,7 @@ describe("the footer and the card", () => {
 
 describe("the plugin older than the service", () => {
 	test("says so once per session, whichever surface sees it first, with the contract's text", async () => {
-		state.who = whoami({ user: "dev", service: { version: OLDER_SERVICE, api: 2 } });
+		state.who = whoami({ user: "dev", service: { version: OLDER_SERVICE, api: 2, name: "" } });
 		const r = await setup();
 		r.cloud.probeUpdates(r.host.host);
 		await until(() => notes(r).length === 1);
@@ -448,7 +491,7 @@ describe("the plugin older than the service", () => {
 	});
 
 	test("a plugin that is as new as the service says nothing", async () => {
-		state.who = whoami({ user: "dev", service: { version: PLUGIN_VERSION, api: 2 } });
+		state.who = whoami({ user: "dev", service: { version: PLUGIN_VERSION, api: 2, name: "" } });
 		const r = await setup();
 		r.cloud.probeUpdates(r.host.host);
 		await until(() => state.reqs.some(q => q.path === "/api/v1/whoami"));
@@ -490,7 +533,7 @@ describe("/cloud update", () => {
 	});
 
 	test("idle: a check is started and the owner is told how to read the result; nothing is asked", async () => {
-		state.who = whoami({ user: "dev", service: SERVICE, update: { state: "idle", available: null } });
+		state.who = whoami({ user: "dev", service: SERVICE, update: { state: "idle", available: null, mode: "notify" } });
 		state.status = status({ state: "idle", checkedAt: "2026-10-21T01:00:00Z" });
 		const r = await setup();
 		await r.cloud.handle("update", r.host.host as never);
@@ -506,7 +549,7 @@ describe("/cloud update", () => {
 		["failed", { state: "failed" as const, error: "vibemon v0.5.0 is needed" }, ["/api/v1/update/check"], `☁ omp-cloud ${PLUGIN_VERSION}: the last update failed: vibemon v0.5.0 is needed; checking again`],
 		["unsupported", { state: "unsupported" as const, message: "this omp-cloud runs from a git checkout; update it with git pull and restart it" }, [], "☁ this omp-cloud runs from a git checkout; update it with git pull and restart it"],
 	])("%s: says so", async (_name, over, expectedPosts, line) => {
-		state.who = whoami({ user: "dev", service: SERVICE, update: { state: over.state, available: null } });
+		state.who = whoami({ user: "dev", service: SERVICE, update: { state: over.state, available: null, mode: "notify" } });
 		state.status = status(over);
 		const r = await setup();
 		await r.cloud.handle("update", r.host.host as never);
@@ -516,10 +559,10 @@ describe("/cloud update", () => {
 	});
 
 	test("a device is told the state and the owner's route is never asked", async () => {
-		state.who = whoami({ user: "dev", service: SERVICE, device: { id: "d1", name: "laptop" }, update: READY });
+		state.who = whoami({ user: "dev", service: SERVICE, device: { id: "d1", name: "laptop", access: "threads" }, update: READY });
 		const r = await setup();
 		await r.cloud.handle("update", r.host.host as never);
-		expect(notes(r)).toEqual([`☁ omp-cloud ${PLUGIN_VERSION}: 0.5.1 is downloaded and ready: the owner installs it (/cloud update on the owner's connection)`]);
+		expect(notes(r)).toEqual([`☁ omp-cloud ${PLUGIN_VERSION}: 0.5.1 is downloaded and ready: a connection with full access installs it (/cloud update there)`]);
 		expect(state.reqs.map(q => q.path)).not.toContain("/api/v1/update");
 		expect(r.asked).toEqual([]);
 	});
@@ -530,7 +573,7 @@ describe("/cloud update", () => {
 		expect(notes(r)).toEqual(["☁ this omp-cloud service does not support updates: update it by hand"]);
 
 		reset();
-		state.who = whoami({ user: "dev", service: SERVICE, update: { state: "idle", available: null } });
+		state.who = whoami({ user: "dev", service: SERVICE, update: { state: "idle", available: null, mode: "notify" } });
 		const again = await setup();
 		await again.cloud.handle("update", again.host.host as never);
 		expect(notes(again)).toEqual(["☁ this omp-cloud service does not support updates: update it by hand"]);
@@ -569,7 +612,7 @@ describe("/cloud status", () => {
 		state.who = whoami({ user: "dev", service: SERVICE, update: READY });
 		const r = await setup();
 		await r.cloud.handle("status", r.host.host as never);
-		expect(notes(r).at(-1)).toContain("  update: 0.5.1 is downloaded and ready");
+		expect(notes(r).at(-1)).toContain("  updates: notify · 0.5.1 is downloaded and ready");
 
 		reset();
 		const old = await setup();

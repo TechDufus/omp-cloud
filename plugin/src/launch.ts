@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fullAccess } from "./access";
 import type { CloudClient, HandoffParts } from "./api";
 import type { CloudConfig, Env } from "./config";
 import { MAX_CONVERSATION_BYTES, packConversation, type ConversationResult } from "./conversation";
@@ -178,16 +179,17 @@ function resolveModel(who: Whoami, requested: string, sessionModel: string, orig
 	const model = requested !== "" ? requested : sessionModel;
 	if (model === "" || modelServed(who.modelPatterns, model)) return { model, warning: "" };
 	const provider = model.split("/")[0] ?? model;
-	if (origin === "user") throw new UserError(`☁ the cloud cannot run ${provider} models yet: ${loginHint(provider, serverHost)}`);
+	const full = fullAccess(who);
+	if (origin === "user") throw new UserError(`☁ the cloud cannot run ${provider} models yet: ${loginHint(provider, serverHost, full)}`);
 	if (who.modelPatterns.length === 0) {
-		throw new CloudError({ code: "not_configured", message: "this cloud has no model login yet", hint: `ask the user to ${userLoginStep(provider, serverHost)}`, retriable: false, outcomeKnown: true });
+		throw new CloudError({ code: "not_configured", message: "this cloud has no model login yet", hint: `ask the user to ${userLoginStep(provider, serverHost, full)}`, retriable: false, outcomeKnown: true });
 	}
 	if (requested === "" && who.defaultModel !== "" && modelServed(who.modelPatterns, who.defaultModel)) {
 		return { model: who.defaultModel, warning: `this session's model ${sessionModel} is not served by this cloud; it runs the cloud's default model ${who.defaultModel}` };
 	}
 	const ids = who.models.map(m => m.id);
 	const served = ids.length > 0 ? ` (${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""})` : "";
-	throw invalid(`this cloud does not serve ${model}`, `pass model with one it serves${served}, or ask the user to ${userLoginStep(provider, serverHost)}`);
+	throw invalid(`this cloud does not serve ${model}`, `pass model with one it serves${served}, or ask the user to ${userLoginStep(provider, serverHost, full)}`);
 }
 
 function invalid(message: string, hint?: string): CloudError {

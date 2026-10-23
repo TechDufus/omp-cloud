@@ -95,6 +95,8 @@ export interface PairingService extends FakeTls {
 	token: string;
 	/** The next claims' answers, in order; the default is pending twice, then approved. */
 	claims: (() => Response)[];
+	/** The access level its whoami reports for the device; `full` by default. */
+	access: "full" | "threads";
 }
 
 /** A fake omp-cloud remote listener: redeem, claim (scripted), whoami for its token, and device revocation. */
@@ -112,12 +114,13 @@ export function pairingService(cert: TestCert): PairingService {
 		if (req.method === "POST" && url.pathname === "/api/v1/pairing/claim") return (claims.shift() ?? (() => Response.json({ error: "gone" }, { status: 401 })))();
 		if (url.pathname === "/api/v1/whoami") {
 			if (req.headers.get("authorization") !== `Bearer ${token}`) return Response.json({ error: "unauthorized" }, { status: 401 });
-			return Response.json(whoami({ device: PAIRING_DEVICE, remote: { fingerprint: cert.fingerprint } }));
+			return Response.json(whoami({ device: { ...PAIRING_DEVICE, access: service.access }, remote: { fingerprint: cert.fingerprint } }));
 		}
 		if (req.method === "DELETE" && url.pathname.startsWith("/api/v1/devices/")) return Response.json({ device: { id: url.pathname.split("/").pop(), name: "old" }, runningThreads: [] });
 		return Response.json({ error: "not found" }, { status: 404 });
 	});
-	return Object.assign(fake, { token, claims });
+	const service: PairingService = Object.assign(fake, { token, claims, access: "full" as const });
+	return service;
 }
 
 /** A fresh device token: `ompd_` and 43 base64url characters. */

@@ -1,8 +1,8 @@
 import { afterAll, afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { CloudClient } from "../src/api";
 import { CloudError } from "../src/errors";
-import { runLogin } from "../src/login";
-import { UserError, type Login } from "../src/types";
+import { loginListLines, runLogin } from "../src/login";
+import { UserError, type Login, type LoginEntry } from "../src/types";
 import { login } from "./builders";
 import { fakeHost, type FakeHostOptions } from "./fakes";
 
@@ -257,5 +257,43 @@ describe("runLogin", () => {
 		expect(done.state).toBe("failed");
 		expect(p.shown).toEqual([]);
 		expect(h.notes).toEqual([["☁ login to nope failed: provider unknown", "error"]]);
+	});
+});
+
+describe("loginListLines", () => {
+	const entry = (over: Partial<LoginEntry>): LoginEntry => ({ provider: "anthropic", kind: "provider", account: "", loggedInAt: "", renewBy: "", disabled: false, note: "", ...over });
+	const FOOTER = "  /cloud login <provider> logs the cloud in (again)";
+
+	test("each login is one line with the parts it has, dates as YYYY-MM-DD", () => {
+		const lines = loginListLines({
+			brokerError: "",
+			logins: [
+				entry({ account: "me@example.com", loggedInAt: "2026-10-01T08:30:00.000Z", renewBy: "2026-11-01T00:00:00.000Z" }),
+				entry({ provider: "openai-codex", loggedInAt: "2026-10-02T00:00:00.000Z" }),
+				entry({ provider: "google", account: "g@example.com" }),
+				entry({ provider: "mcp:https://mcp.example/x", kind: "mcp", loggedInAt: "2026-10-03T00:00:00.000Z", renewBy: "2026-10-30T00:00:00.000Z" }),
+			],
+		});
+		expect(lines).toEqual([
+			"☁ the cloud is logged in to:",
+			"  anthropic · me@example.com · logged in 2026-10-01 · renew by 2026-11-01",
+			"  openai-codex · logged in 2026-10-02",
+			"  google · g@example.com",
+			"  mcp:https://mcp.example/x · logged in 2026-10-03 · renew by 2026-10-30",
+			FOOTER,
+		]);
+	});
+
+	test("a disabled login says why", () => {
+		expect(loginListLines({ brokerError: "", logins: [entry({ provider: "google", disabled: true, note: "refresh token revoked" })] })).toEqual([
+			"☁ the cloud is logged in to:",
+			"  google · disabled: refresh token revoked",
+			FOOTER,
+		]);
+	});
+
+	test("nothing yet, and a broker error line", () => {
+		expect(loginListLines({ brokerError: "", logins: [] })).toEqual(["☁ the cloud is logged in to:", "  nothing yet", FOOTER]);
+		expect(loginListLines({ brokerError: "broker unreachable", logins: [] })).toEqual(["☁ the cloud is logged in to:", "  nothing yet", "  ! broker unreachable", FOOTER]);
 	});
 });

@@ -10,16 +10,18 @@ import { CloudError, cloudErrorText } from "./errors";
 import { resolveParsed, resolveRef } from "./resolve";
 import { openPath } from "@oh-my-pi/pi-coding-agent/utils/open";
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
+import { fullAccess, youLine } from "./access";
+import { capacityLine, readCapacity } from "./capacity";
 import { DETAILS_REPLY_MAX, inventoryCard, loginCard, noticeCard, patternProviders, QUESTIONS, threadBranch, updateCard, type CardAct, type CardActions, type NoticeCard, type TuiModule } from "./cards";
-import { CLOUD_SOURCES, completions, parseCommand, shortName, USAGE_CONNECT, type Command, type Completion } from "./commands";
-import { cloudLines, knownClouds, readConfig, resolveConnection, statusLines, tilde, type CloudConfig, type CloudsView, type Connection, type ConnectionSource, type DeliverMode, type Env } from "./config";
+import { cloudLines, knownClouds, readConfig, resolveConnection, setDefaultCloud, statusLines, tilde, type CloudConfig, type CloudsView, type Connection, type ConnectionSource, type DeliverMode, type Env } from "./config";
+import { CLOUD_SOURCES, completions, parseCommand, shortName, USAGE_CONNECT, USAGE_LOGIN, type Command, type Completion } from "./commands";
 import { runConnect, type ConnectOutcome } from "./connect";
 import { readConnectionFile, type PairedConnection } from "./connection";
 import { runDashboard, showForwardedDashboard } from "./dashboard";
 import { CloudAgents, planModeFromEntries } from "./cloud-agents";
 import { CloudJobs } from "./cloud-jobs";
 import { Deliverer, launchCard, originsFromEntries, THREAD_ENTRY, threadsFromEntries } from "./deliver";
-import { devicesCard, runDisconnect, runRevoke } from "./devices";
+import { devicesCard, runAccess, runDisconnect, runRevoke } from "./devices";
 import { clip, metricsLine, plural, threadHeading, threadTag, truncateText } from "./format";
 import { isRecord } from "./guards";
 import { DashboardForwarder } from "./forwarder";
@@ -28,7 +30,7 @@ import { HubComponent, type HubResult } from "./hub";
 import { Inbox } from "./inbox";
 import { ProgramStatus, type TerminalSink } from "./program-status";
 import { launchBatch, modelServed, sessionModelOf, type LaunchedThread } from "./launch";
-import { loginHint, loginLines, runLogin, serverHostOf } from "./login";
+import { loginHint, loginLines, loginListLines, runLogin, serverHostOf } from "./login";
 import { PairComponent, type PairOutcome } from "./pair";
 import { refusePairingCode } from "./pairing";
 import { applyPull, isClean, notInRepository, pullBundle, type Applied } from "./pull";
@@ -36,7 +38,7 @@ import { repoKey } from "./repo-key";
 import { syncConversation, type SyncOutcome } from "./session-sync";
 import { git, gitRaw, resolveRemote } from "./snapshot";
 import { pinnedFetch } from "./transport";
-import { UserError, type AnswerBody, type CommandHost, type Host, type IrcReceiptKind, type Login, type PairingOffer, type PiHost, type Question, type ResultHeaders, type ThreadDetail, type ThreadOrigin, type ThreadSummary, type UpdateStatus, type Whoami } from "./types";
+import { UserError, type AnswerBody, type Capacity, type CommandHost, type Host, type IrcReceiptKind, type Login, type PairingOffer, type PiHost, type Question, type ResultHeaders, type ThreadDetail, type ThreadOrigin, type ThreadSummary, type UpdateStatus, type Whoami } from "./types";
 import type { DelegateRequest, DelegateResult, DelegateRun, PullRequest, ToolCloud, ToolSession } from "./tool";
 import { helpLines, resultLine, WIDGET_KEY, Watcher, type WatchSink } from "./watch";
 import type { WaitOptions, WaitResult } from "./wait";
@@ -73,7 +75,7 @@ interface Session {
 
 /** A client of `conn`: pinned to its certificate when it is a paired connection. */
 function clientFor(conn: Connection, tuning: ClientTuning): CloudClient {
-	return new CloudClient(conn.url, conn.token, conn.paired ? pinnedFetch(conn.paired.server) : undefined, tuning);
+	return new CloudClient(conn.url, conn.token, conn.paired ? pinnedFetch(conn.paired.server) : undefined, tuning, conn.unauthorizedHint);
 }
 
 function connectionKey(conn: Connection): string {
@@ -373,7 +375,14 @@ export class Cloud implements CardActions, ToolCloud {
 			this.#jobs = jobs;
 			// The watcher follows threads for as long as they run: it keeps the full retry schedule whichever command built it.
 			const steady = clientFor(s.conn, this.#tuning);
-			this.#watcher = new Watcher(ctx, steady, this.#watchSink(steady), undefined, { tui: () => this.#tui, jobs, agents: this.#agents, unread: () => this.#inbox.unread, update: () => this.#updates.ready !== undefined });
+			this.#watcher = new Watcher(ctx, steady, this.#watchSink(steady), undefined, {
+				tui: () => this.#tui,
+				jobs,
+				agents: this.#agents,
+				unread: () => this.#inbox.unread,
+				update: () => this.#updates.ready !== undefined,
+				cloud: () => (this.#updates.cloud === "" ? undefined : this.#updates.cloud),
+			});
 			this.#watcherKey = s.key;
 		} else {
 			this.#watcher.rebind(ctx);
@@ -524,20 +533,21 @@ export class Cloud implements CardActions, ToolCloud {
 	}
 
 	/**
-	 * `/cloud update`, the card's Restart to update button and the hub's `u`: a device is told what the service says; the owner
-	 * gets the updater's state, a check when nothing is ready, and, when a version is ready, a confirm before the service installs
-	 * it and restarts.
+	 * `/cloud update`, the card's Restart to update button and the hub's `u`: a connection without full access is told what the
+	 * service says; one with full access gets the updater's state, a check when nothing is ready, and, when a version is ready,
+	 * a confirm before the service installs it and restarts.
 	 */
 	async #updateCommand(ctx: Host, s: Session): Promise<void> {
 		const who = await s.client.whoami();
 		this.#observe(ctx, s, who);
-		const line = updateLine(who.update, who.device === null);
+		const full = fullAccess(who);
+		const line = updateLine(who.update, full);
 		if (line === undefined) {
 			ctx.ui.notify("☁ this omp-cloud service does not support updates: update it by hand", "info");
 			return;
 		}
 		const service = `omp-cloud ${who.service.version || "service"}`;
-		if (who.device) {
+		if (!full) {
 			ctx.ui.notify(`☁ ${service}: ${line}`, "info");
 			return;
 		}
@@ -623,6 +633,7 @@ export class Cloud implements CardActions, ToolCloud {
 				ctx.ui.notify(`☁ ${(await this.clouds(ctx)).lines.join("\n  ")}`, "info");
 				return;
 			}
+			if (parsed.makeDefault) return this.#useAsDefault(ctx, parsed.cloud);
 			const view = await this.#switchCloud(ctx, parsed.cloud);
 			ctx.ui.notify(`☁ this session uses ${parsed.cloud} (${view.known.find(c => c.source === parsed.cloud)?.url ?? ""})`, "info");
 			return;
@@ -634,6 +645,11 @@ export class Cloud implements CardActions, ToolCloud {
 		const s = await this.#session(ctx, "quick");
 		if (parsed.kind === "update") return this.#updateCommand(ctx, s);
 		if (parsed.kind === "login") {
+			if (parsed.provider === "") {
+				const who = await s.client.whoami();
+				ctx.ui.notify(who.capabilities.includes("logins.list") ? loginListLines(await s.client.logins()).join("\n") : USAGE_LOGIN, "info");
+				return;
+			}
 			await this.#loginFlow(ctx, s, parsed.provider);
 			return;
 		}
@@ -645,7 +661,8 @@ export class Cloud implements CardActions, ToolCloud {
 		}
 		if (parsed.kind === "pair") return this.#pair(ctx, s);
 		if (parsed.kind === "devices") {
-			if (parsed.revoke !== undefined) await runRevoke(s.client, ctx.ui, parsed.revoke);
+			if (parsed.access !== undefined) await runAccess(s.client, ctx.ui, parsed.access.target, parsed.access.value, s.conn.paired?.device.id);
+			else if (parsed.revoke !== undefined) await runRevoke(s.client, ctx.ui, parsed.revoke);
 			else this.#deliver.post(ctx, devicesCard(await s.client.devices(), Date.now()));
 			return;
 		}
@@ -736,7 +753,11 @@ export class Cloud implements CardActions, ToolCloud {
 		}
 	}
 
-	/** The connection and where it came from (never a token), then what the service says. Reported even when the service is unreachable. */
+	/**
+	 * The cloud this session talks to and as whom (its name, version, your access, updates, capacity), then the connection and
+	 * where it came from (never a token), the other clouds, and what the cloud can run. Reported even when the service is
+	 * unreachable: then only the connection rows and the error.
+	 */
 	async #status(ctx: Host): Promise<void> {
 		const { cfg } = await this.#config(ctx);
 		let conn: Connection | undefined;
@@ -746,36 +767,46 @@ export class Cloud implements CardActions, ToolCloud {
 		} catch (e) {
 			failure = e;
 		}
-		const lines = ["☁ omp-cloud", ...statusLines(cfg, conn)];
+		let who: Whoami | undefined;
+		let capacity: Capacity | undefined;
+		if (conn) {
+			const client = clientFor(conn, quickTuning(this.#tuning));
+			try {
+				who = await client.whoami();
+				capacity = await readCapacity(client, who);
+			} catch (e) {
+				failure = e;
+			}
+		}
+		const lines = [who ? ["☁ omp-cloud", who.service.name, who.service.version === "" ? "" : `omp-cloud ${who.service.version}`].filter(part => part !== "").join(" · ") : "☁ omp-cloud"];
+		if (who) {
+			lines.push(`  you: ${youLine(who)}`);
+			const updating = who.update ? updateLine(who.update, fullAccess(who)) : undefined;
+			if (who.update && updating) lines.push(`  updates: ${who.update.mode} · ${updating}`);
+			if (capacity) lines.push(`  capacity: ${capacityLine(capacity)}`);
+		}
+		lines.push(...statusLines(cfg, conn));
 		const known = await knownClouds(cfg);
 		const chosen = this.#targetOf(ctx) !== undefined;
 		if (known.length > 1 || chosen) {
 			lines.push(...cloudLines(cfg, known, conn?.source, chosen).map(l => `  ${l}`));
-			if (known.some(c => c.source !== conn?.source)) lines.push("  switch: /cloud use <name> (only before this session has threads)");
+			if (known.some(c => c.source !== conn?.source)) lines.push("  switch: /cloud use <cloud> (this session) · /cloud use <cloud> --default (new sessions)");
 		}
-		if (!conn) {
+		if (!conn || !who) {
 			ctx.ui.notify([...lines, `  ${errorText(failure)}`].join("\n"), "error");
 			return;
 		}
-		try {
-			const who = await clientFor(conn, quickTuning(this.#tuning)).whoami();
-			const providers = patternProviders(who.modelPatterns);
-			const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-			const thinking = this.#pi.getThinkingLevel();
-			lines.push(
-				`  user: ${who.user}`,
-				`  runs: ${providers.length > 0 ? providers.join(", ") : `no providers yet (${loginHint("<provider>", serverHostOf(conn.paired))})`}`,
-				model === ""
-					? `  a handoff from here runs: the service's fallback model, ${who.defaultModel || "none"}`
-					: `  a handoff from here runs: ${model}${thinking ? ` (thinking ${thinking})` : ""}, this session's model`,
-				`  fallback for requests that name no model: ${who.defaultModel || "none"} · omp ${who.ompVersion || "?"}`,
-			);
-			const updating = updateLine(who.update, who.device === null);
-			if (updating) lines.push(`  update: ${updating}`);
-			ctx.ui.notify(lines.join("\n"), "info");
-		} catch (e) {
-			ctx.ui.notify([...lines, `  ${errorText(e)}`].join("\n"), "error");
-		}
+		const providers = patternProviders(who.modelPatterns);
+		const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+		const thinking = this.#pi.getThinkingLevel();
+		lines.push(
+			`  runs: ${providers.length > 0 ? providers.join(", ") : `no providers yet (${loginHint("<provider>", serverHostOf(conn.paired), fullAccess(who))})`}`,
+			model === ""
+				? `  a handoff from here runs: the service's fallback model, ${who.defaultModel || "none"}`
+				: `  a handoff from here runs: ${model}${thinking ? ` (thinking ${thinking})` : ""}, this session's model`,
+			`  fallback for requests that name no model: ${who.defaultModel || "none"} · omp ${who.ompVersion || "?"}`,
+		);
+		ctx.ui.notify(lines.join("\n"), "info");
 	}
 
 	// -----------------------------------------------------------------------
@@ -843,17 +874,20 @@ export class Cloud implements CardActions, ToolCloud {
 			const current = await resolveConnection(cfg, this.#targetOf(ctx)).catch(() => undefined);
 			card.lines.push(`this session keeps ${current?.source ?? "its cloud"}: it already works with threads there`);
 		}
-		if (cfg.url !== undefined) {
-			const first = cfg.urlFrom === "env" ? "OMP_CLOUD_URL" : `url in ${tilde(cfg.personalFile, cfg.home)}`;
-			card.lines.push(`new sessions use ${first} first: /cloud use paired switches a session; removing url and token from ${tilde(cfg.personalFile, cfg.home)} makes the pairing the default`);
+		if (cfg.url !== undefined && !(cfg.use === "paired" && cfg.urlFrom !== "env")) {
+			const where = cfg.urlFrom === "env" ? "OMP_CLOUD_URL" : `url in ${tilde(cfg.personalFile, cfg.home)}`;
+			card.lines.push(`new sessions on this machine still use ${where}: /cloud use paired --default makes this pairing the default`);
 		}
 		this.#deliver.post(ctx, card);
 		return { lines: card.lines, using, server: serverHostOf(paired) ?? paired.server.fingerprint, device: paired.device.name };
 	}
 
-	/** `/cloud pair`: the overlay with the code (copied to the clipboard), on the server machine's owner connection. Needs the TUI. */
+	/** `/cloud pair`: the overlay with the code (copied to the clipboard), on a connection with full access (the owner token, or a paired device that has it). Needs the TUI. */
 	async #pair(ctx: CommandHost, s: Session): Promise<void> {
-		if (s.conn.paired) throw new UserError("☁ /cloud pair works with the owner token on the server machine; this machine is itself a paired device");
+		if (s.conn.paired) {
+			const { device } = await s.client.whoami();
+			if (device && !fullAccess({ device })) throw new UserError(`☁ /cloud pair needs full access; this device (${device.name}) has threads-only access`);
+		}
 		const tui = this.#tui;
 		const custom = ctx.ui.custom?.bind(ctx.ui);
 		if (ctx.mode !== "tui" || !custom || !tui) throw new UserError(PAIR_NEEDS_UI);
@@ -1420,23 +1454,25 @@ export class Cloud implements CardActions, ToolCloud {
 	}
 
 	/**
-	 * When the cloud cannot run this session's model yet and the user can fix that here (the TUI, an idle agent, an owner
-	 * connection), asks to log the cloud in to the model's provider and does so. Every other case, and a refusal, change nothing:
-	 * the launch then fails with the usual "cannot run" error.
+	 * When the cloud cannot run this session's model yet and the user can fix that here (the TUI, an idle agent, a connection
+	 * with full access), asks to log the cloud in to the model's provider and does so. Every other case, and a refusal, change
+	 * nothing: the launch then fails with the usual "cannot run" error.
 	 */
 	async #offerLogin(ctx: Host, s: Session): Promise<void> {
 		const model = sessionModelOf(ctx);
-		if (model === "" || serverHostOf(s.conn.paired) !== undefined || ctx.mode !== "tui" || !ctx.isIdle()) return;
-		if (modelServed((await s.client.whoami()).modelPatterns, model)) return;
+		if (model === "" || ctx.mode !== "tui" || !ctx.isIdle()) return;
+		const who = await s.client.whoami();
+		if (!fullAccess(who) || modelServed(who.modelPatterns, model)) return;
 		const provider = model.split("/")[0] ?? model;
-		if (await ctx.ui.confirm("Log the cloud in?", `The cloud cannot run ${provider} models yet. Log the cloud broker in to ${provider} now?`)) await this.#loginFlow(ctx, s, provider);
+		if (await ctx.ui.confirm("Log the cloud in?", `The cloud cannot run ${provider} models yet. Log the cloud broker in to ${provider} now?`)) await this.#loginFlow(ctx, s, provider, who);
 	}
 
-	/** `/cloud login <provider>`: the owner signs the cloud's broker in. The TUI shows the sign-in link as a card, the other modes as a notice. */
-	async #loginFlow(ctx: Host, s: Session, provider: string): Promise<void> {
-		// A paired device is refused before any service call: every login route is owner-token only.
-		const serverHost = serverHostOf(s.conn.paired);
-		if (serverHost !== undefined) throw new UserError(`☁ a paired device cannot log the cloud in: ${loginHint(provider, serverHost)}`);
+	/** `/cloud login <provider>`: a connection with full access signs the cloud's broker in. The TUI shows the sign-in link as a card, the other modes as a notice. `known` is a whoami the caller just fetched. */
+	async #loginFlow(ctx: Host, s: Session, provider: string, known?: Whoami): Promise<void> {
+		const who = known ?? (await s.client.whoami());
+		if (!fullAccess(who)) {
+			throw new UserError(`☁ this device has threads-only access and cannot log the cloud in: ${loginHint(provider, serverHostOf(s.conn.paired), false)}`);
+		}
 		// The TUI shows the sign-in link as a card, and a card waits for an idle agent: refuse before a login starts rather than prompt with no link on screen.
 		if (ctx.mode === "tui" && !ctx.isIdle()) {
 			throw new UserError("☁ the agent is working: run /cloud login again when it is idle, so the sign-in link can go in the transcript");
@@ -1556,6 +1592,31 @@ export class Cloud implements CardActions, ToolCloud {
 		}
 		this.#choose(ctx, source);
 		return this.clouds(ctx);
+	}
+
+	/**
+	 * `/cloud use <cloud> --default`: new sessions on this machine take `source` (`use:` in the personal file) and this session
+	 * switches as `/cloud use` does. A session that cannot switch (it works with threads) is pinned to the cloud it has, so the new
+	 * default does not move it; the default is written all the same. A cloud this machine does not have fails before anything is written.
+	 */
+	async #useAsDefault(ctx: CommandHost, source: ConnectionSource): Promise<void> {
+		if (source === "env") {
+			ctx.ui.notify("☁ env cannot be the default: OMP_CLOUD_URL already decides for every process that has it", "warning");
+			return;
+		}
+		const { cfg } = await this.#config(ctx);
+		const current = await resolveConnection(cfg, this.#targetOf(ctx)).catch(() => undefined);
+		let view: CloudsView | undefined;
+		try {
+			view = await this.#switchCloud(ctx, source);
+		} catch (e) {
+			if (!(e instanceof CloudError) || e.code !== "conflict") throw e;
+			if (current) this.#choose(ctx, current.source);
+		}
+		await setDefaultCloud(cfg, source);
+		const url = (view?.known ?? (await knownClouds(cfg))).find(c => c.source === source)?.url ?? "";
+		const session = view ? "uses it now" : `keeps ${current?.source ?? "its cloud"}: it already works with threads there`;
+		ctx.ui.notify(`☁ new sessions on this machine use ${source} (${url}); this session ${session}`, "info");
 	}
 
 	/**

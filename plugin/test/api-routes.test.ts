@@ -40,7 +40,7 @@ describe("whoami: every field, and one without the version fields", () => {
 		const { client } = service(() =>
 			Response.json({
 				...OLD_WHOAMI,
-				service: { version: "0.4.0", api: 2 },
+				service: { version: "0.4.0", api: 2, name: "" },
 				capabilities: ["threads.paging", "inspect"],
 				limits: { maxMessageBytes: 32768, maxAnswerBytes: 4000, maxUploadBytes: 9999, listMax: 200, maxTurns: 200 },
 				spend: { todayUSD: 1.25, dayCapUSD: 20 },
@@ -48,7 +48,7 @@ describe("whoami: every field, and one without the version fields", () => {
 			}),
 		);
 		const who = await client.whoami();
-		expect(who.service).toEqual({ version: "0.4.0", api: 2 });
+		expect(who.service).toEqual({ version: "0.4.0", api: 2, name: "" });
 		expect(who.capabilities).toEqual(["threads.paging", "inspect"]);
 		expect(who.limits).toEqual({ maxMessageBytes: 32768, maxAnswerBytes: 4000, maxUploadBytes: 9999, listMax: 200, maxTurns: 200 });
 		expect(who.spend).toEqual({ todayUSD: 1.25, dayCapUSD: 20 });
@@ -58,7 +58,7 @@ describe("whoami: every field, and one without the version fields", () => {
 	test("a whoami without the version fields is api 1 with no capabilities, the default limits, no spend, no models", async () => {
 		const { client } = service(() => Response.json(OLD_WHOAMI));
 		const who = await client.whoami();
-		expect(who.service).toEqual({ version: "", api: 1 });
+		expect(who.service).toEqual({ version: "", api: 1, name: "" });
 		expect(who.capabilities).toEqual([]);
 		expect(who.limits).toEqual({ maxMessageBytes: 32768, maxAnswerBytes: 4000, maxUploadBytes: 5000, listMax: 50, maxTurns: 200 });
 		expect(who.spend).toBeNull();
@@ -69,14 +69,14 @@ describe("whoami: every field, and one without the version fields", () => {
 
 describe("requireCapability", () => {
 	test("a served capability passes, and is answered from the last whoami afterwards", async () => {
-		const { client, seen } = service(() => Response.json({ ...OLD_WHOAMI, service: { version: "0.4.0", api: 2 }, capabilities: ["inspect"] }));
+		const { client, seen } = service(() => Response.json({ ...OLD_WHOAMI, service: { version: "0.4.0", api: 2, name: "" }, capabilities: ["inspect"] }));
 		await client.requireCapability("inspect");
 		await client.requireCapability("inspect");
 		expect(seen).toHaveLength(1);
 	});
 
 	test("a missing capability is version_skew naming it, the service version and what to do", async () => {
-		const { client } = service(() => Response.json({ ...OLD_WHOAMI, service: { version: "0.4.0", api: 2 }, capabilities: ["inspect"] }));
+		const { client } = service(() => Response.json({ ...OLD_WHOAMI, service: { version: "0.4.0", api: 2, name: "" }, capabilities: ["inspect"] }));
 		const err = await failed(client.requireCapability("events.json"));
 		expect(err).toMatchObject({ code: "version_skew", retriable: false, outcomeKnown: true, hint: "update the omp-cloud service (`omp-cloud update` for an installed service; `git pull`, then restart it, for a checkout)" });
 		expect(err.message).toContain("events.json");
@@ -93,7 +93,7 @@ describe("requireCapability", () => {
 
 	test("a service that was updated since the last whoami is asked again before refusing", async () => {
 		let capabilities: string[] = [];
-		const { client, seen } = service(() => Response.json({ ...OLD_WHOAMI, service: { version: "0.4.0", api: 2 }, capabilities }));
+		const { client, seen } = service(() => Response.json({ ...OLD_WHOAMI, service: { version: "0.4.0", api: 2, name: "" }, capabilities }));
 		await client.whoami();
 		capabilities = ["threads.scratch"];
 		await client.requireCapability("threads.scratch");
@@ -286,3 +286,45 @@ function scratchRequest(): ScratchHandoffRequest {
 		ompVersion: "",
 	};
 }
+
+describe("device access", () => {
+	/** A service with `capabilities` that records every request with its body. */
+	function accessService(capabilities: string[]) {
+		const sent: { method: string; path: string; body: string }[] = [];
+		const fetchFn: FetchFn = async (url, init) => {
+			const path = new URL(url).pathname;
+			sent.push({ method: init?.method ?? "GET", path, body: typeof init?.body === "string" ? init.body : "" });
+			if (path === "/api/v1/whoami") return Response.json({ ...OLD_WHOAMI, capabilities });
+			if (init?.method === "PATCH") return Response.json({ device: { id: "d1", name: "laptop", platform: "linux", access: "full", current: false } });
+			return new Response(null, { status: 204 });
+		};
+		return { client: new CloudClient("http://cloud.test", "tok", fetchFn, { backoffMs: [] }), sent };
+	}
+
+	test("an approval names the access when the service has devices.access, and sends no body when it has not", async () => {
+		const withAccess = accessService(["devices.access"]);
+		await withAccess.client.approvePairing("offer1", "threads");
+		expect(withAccess.sent.at(-1)).toEqual({ method: "POST", path: "/api/v1/pairing/offers/offer1/approve", body: JSON.stringify({ access: "threads" }) });
+
+		const old = accessService([]);
+		await old.client.approvePairing("offer1", "full");
+		expect(old.sent.at(-1)).toEqual({ method: "POST", path: "/api/v1/pairing/offers/offer1/approve", body: "" });
+	});
+
+	test("setDeviceAccess patches the device and reads it back; a service without devices.access is version_skew and gets no PATCH", async () => {
+		const withAccess = accessService(["devices.access"]);
+		const changed = await withAccess.client.setDeviceAccess("d1", "full");
+		expect(changed).toMatchObject({ id: "d1", name: "laptop", access: "full" });
+		expect(withAccess.sent.at(-1)).toEqual({ method: "PATCH", path: "/api/v1/devices/d1", body: JSON.stringify({ access: "full" }) });
+
+		const old = accessService([]);
+		const err = await failed(old.client.setDeviceAccess("d1", "full"));
+		expect(err).toMatchObject({ code: "version_skew", message: "this omp-cloud service has no device access levels; update it" });
+		expect(old.sent.map(s => s.method)).toEqual(["GET"]);
+	});
+
+	test("a device listed without access is threads-only", async () => {
+		const { client } = service(() => Response.json({ devices: [{ id: "d1", name: "laptop" }, { id: "d2", name: "phone", access: "full" }] }));
+		expect((await client.devices()).map(d => d.access)).toEqual(["threads", "full"]);
+	});
+});

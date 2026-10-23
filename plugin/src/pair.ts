@@ -9,11 +9,11 @@ import type { Component, NativeNode, Theme } from "@oh-my-pi/pi-tui";
 import type { TuiModule } from "./cards";
 import { countdown } from "./connect";
 import { clip } from "./format";
-import type { OfferState, OfferStatus, PairingOffer } from "./types";
+import type { DeviceAccess, OfferState, OfferStatus, PairingOffer } from "./types";
 
 export interface PairApi {
 	pairingOffer(id: string): Promise<OfferState>;
-	approvePairing(id: string): Promise<void>;
+	approvePairing(id: string, access: DeviceAccess): Promise<void>;
 	declinePairing(id: string): Promise<void>;
 	cancelPairing(id: string): Promise<void>;
 }
@@ -129,12 +129,12 @@ export class PairComponent implements Component {
 		this.#d.done(outcome);
 	}
 
-	/** Approves or declines the device that waits; the poll then shows the result. */
-	async #decide(approve: boolean): Promise<void> {
+	/** Approves the device that waits with `full` or `threads` access, or declines it; the poll then shows the result. */
+	async #decide(choice: DeviceAccess | "decline"): Promise<void> {
 		if (this.#busy || this.#offer.status !== "pending") return;
 		this.#busy = true;
 		try {
-			await (approve ? this.#d.api.approvePairing(this.#offer.id) : this.#d.api.declinePairing(this.#offer.id));
+			await (choice === "decline" ? this.#d.api.declinePairing(this.#offer.id) : this.#d.api.approvePairing(this.#offer.id, choice));
 			this.#error = "";
 		} catch (e) {
 			this.#error = e instanceof Error ? e.message : String(e);
@@ -149,9 +149,11 @@ export class PairComponent implements Component {
 		if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) {
 			this.#finish(this.#offer.status === "paired" ? { kind: "paired", name: this.#offer.device?.name ?? "" } : { kind: "closed", status: this.#offer.status });
 		} else if (matchesKey(data, "y")) {
-			void this.#decide(true);
+			void this.#decide("full");
+		} else if (matchesKey(data, "t")) {
+			void this.#decide("threads");
 		} else if (matchesKey(data, "n")) {
-			void this.#decide(false);
+			void this.#decide("decline");
 		}
 	}
 
@@ -160,7 +162,11 @@ export class PairComponent implements Component {
 		const o = this.#offer;
 		if (o.status === "pending" && o.request) {
 			const r = o.request;
-			return { status: `${clip(r.name, 64)} · ${clip(r.platform, 32)} · ${clip(r.address, 64)} wants to pair`, keys: "y approve · n decline · esc cancel", tone: "warning" };
+			return {
+				status: `${clip(r.name, 64)} · ${clip(r.platform, 32)} · ${clip(r.address, 64)} wants to pair`,
+				keys: "y approve with full access · t approve with threads-only access · n decline · esc cancel",
+				tone: "warning",
+			};
 		}
 		if (o.status === "paired") return { status: `paired ${clip(o.device?.name ?? "", 64)}`, keys: "esc close", tone: "success" };
 		const bad = o.status === "declined" || o.status === "burned" || o.status === "expired" || o.status === "cancelled";

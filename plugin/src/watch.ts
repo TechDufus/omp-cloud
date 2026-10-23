@@ -35,27 +35,32 @@ export function helpLines(): string[] {
 		preview: "/cloud preview <id> <port>",
 		resume: "/cloud resume <id>",
 		delete: "/cloud delete <id>",
-		login: "/cloud login <provider>",
+		login: "/cloud login [<provider>]",
 		status: "/cloud status",
-		use: "/cloud use [env | personal | paired]",
+		use: "/cloud use [cloud] [--default]",
 		update: "/cloud update",
 		dashboard: "/cloud dashboard",
 		connect: "/cloud connect [<code|host>] [--name n]",
 		pair: "/cloud pair",
-		devices: "/cloud devices [revoke <name>]",
+		devices: "/cloud devices [revoke|access]",
 		disconnect: "/cloud disconnect [--force]",
 		help: "/cloud help",
 	};
 	return ["☁ omp-cloud — /cloud with no arguments opens the hub; <id> is a thread's id, its last 6 characters or a word its name starts with", ...VERBS.map(v => `${(usage[v] ?? v).padEnd(28)} ${verbHelp(v)}`)];
 }
 
-/** Footer status text: `☁ 2 working · 1 waiting · 3 unread · update ready`; each part only when there is something; `☁ 3 unread` when nothing runs. `update` is the owner's: a newer omp-cloud is downloaded and waits for a click. */
-export function statusText(working: number, waiting: number, unread = 0, update = false): string | undefined {
+/**
+ * Footer status text: `☁ 2 working · 1 waiting · 3 unread · update ready · home`; each part only when there is something, and the cloud's
+ * name (`cloud`) last whenever it is known, so an idle footer is `☁ home`. `update` is for a connection with full access: a newer
+ * omp-cloud is downloaded and waits for a click.
+ */
+export function statusText(working: number, waiting: number, unread = 0, update = false, cloud?: string): string | undefined {
 	const parts: string[] = [];
 	if (working > 0 || waiting > 0) parts.push(`${working} working`);
 	if (waiting > 0) parts.push(`${waiting} waiting`);
 	if (unread > 0) parts.push(`${unread} unread`);
 	if (update) parts.push("update ready");
+	if (cloud !== undefined && cloud !== "") parts.push(cloud);
 	return parts.length === 0 ? undefined : `☁ ${parts.join(" · ")}`;
 }
 
@@ -365,12 +370,20 @@ export class Watcher {
 	readonly #unread: (() => number) | undefined;
 	/** Whether an update of the service is ready for the owner to install, shown in the footer status. */
 	readonly #update: (() => boolean) | undefined;
+	/** What the cloud is called, shown last in the footer status; undefined while it is unknown. */
+	readonly #cloud: (() => string | undefined) | undefined;
 	/** What the widget slot currently holds: a TUI structure key or the joined lines; undefined when it is empty. */
 	#shown: string | undefined;
 	/** The TUI the mounted widget was built for. */
 	#ui: TUI | undefined;
 
-	constructor(host: Host, api: WatchApi, sink?: WatchSink, followOptions: FollowOptions = {}, opts: { tui?: () => TuiModule | undefined; now?: () => number; jobs?: CloudJobs; agents?: CloudAgents; unread?: () => number; update?: () => boolean } = {}) {
+	constructor(
+		host: Host,
+		api: WatchApi,
+		sink?: WatchSink,
+		followOptions: FollowOptions = {},
+		opts: { tui?: () => TuiModule | undefined; now?: () => number; jobs?: CloudJobs; agents?: CloudAgents; unread?: () => number; update?: () => boolean; cloud?: () => string | undefined } = {},
+	) {
 		this.#host = host;
 		this.#api = api;
 		this.#sink = sink;
@@ -382,6 +395,7 @@ export class Watcher {
 		this.#agents = opts.agents;
 		this.#unread = opts.unread;
 		this.#update = opts.update;
+		this.#cloud = opts.cloud;
 		this.waits = new Waits({ clock: this.#clock, followed: id => this.followed(id), fetch: (id, signal) => this.#api.thread(id, { signal }) });
 	}
 
@@ -575,7 +589,7 @@ export class Watcher {
 		const waiting = active.filter(w => w.detail.phase === "waiting").length;
 		// A turn that is a job of the host shows in omp's own job surfaces; the footer still says what waits for the user.
 		const working = active.filter(w => w.detail.phase !== "waiting" && !this.#jobs?.has(w.id)).length;
-		this.#host.ui.setStatus(WIDGET_KEY, statusText(working, waiting, this.#unread?.() ?? 0, this.#update?.() ?? false));
+		this.#host.ui.setStatus(WIDGET_KEY, statusText(working, waiting, this.#unread?.() ?? 0, this.#update?.() ?? false, this.#cloud?.()));
 	}
 
 	/** One notification and one question card per question. */

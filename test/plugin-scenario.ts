@@ -1128,7 +1128,7 @@ async function run(): Promise<void> {
 		const version = text(obj(JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8")), "package.json").version);
 		const info = await callCloud(requireTool(), { op: "info" });
 		expectResult("info", info, `cloud info: ok omp-cloud ${version}`);
-		for (const expected of [`omp-cloud ${version} (api ${API_VERSION})`, "you are owner", "capabilities: threads.paging", "threads.irc", "fake/fake-model", "message 32768 bytes", "(served)"]) {
+		for (const expected of [`omp-cloud ${version} (api ${API_VERSION})`, "you: the owner", "capabilities: threads.paging", "threads.irc", "fake/fake-model", "message 32768 bytes", "(served)"]) {
 			expectContains("info text", info.text, expected);
 		}
 		if (info.text.includes("☁")) throw new Error(`the tool text carries a ☁: ${info.text.slice(0, 200)}`);

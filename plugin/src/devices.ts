@@ -1,4 +1,4 @@
-/** `/cloud devices`, `/cloud devices revoke` and `/cloud disconnect`. */
+/** `/cloud devices`, `/cloud devices revoke`, `/cloud devices access` and `/cloud disconnect`. */
 
 import { rm } from "node:fs/promises";
 import { CloudClient, type ClientTuning } from "./api";
@@ -7,9 +7,10 @@ import { noticeCard, type NoticeCard } from "./cards";
 import type { PairedConnection } from "./connection";
 import { formatAge, plural } from "./format";
 import { pinnedFetch } from "./transport";
-import { UserError, type Device, type HostUi } from "./types";
+import { UserError, type Device, type DeviceAccess, type HostUi } from "./types";
 
 type DevicesApi = Pick<CloudClient, "devices" | "revokeDevice">;
+type AccessApi = Pick<CloudClient, "devices" | "setDeviceAccess">;
 
 function errorText(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);
@@ -26,7 +27,7 @@ export function devicesCard(devices: readonly Device[], now: number): NoticeCard
 				? "never seen"
 				: `seen ${seenAge === "" || seenAge === "now" ? "just now" : `${seenAge} ago`}${d.lastSeenAddress ? ` from ${d.lastSeenAddress}` : ""}`;
 		const paired = pairedAge === "" || pairedAge === "now" ? "paired just now" : `paired ${pairedAge} ago`;
-		return `${d.name}${d.current ? " (this device)" : ""} · ${d.platform} · ${d.id.slice(0, 8)} · ${paired} from ${d.pairedFrom} · ${seen}`;
+		return `${d.name}${d.current ? " (this device)" : ""} · ${d.access === "full" ? "full access" : "threads only"} · ${d.platform} · ${d.id.slice(0, 8)} · ${paired} from ${d.pairedFrom} · ${seen}`;
 	});
 	if (lines.length === 0) lines.push("no devices are paired; /cloud pair on the server machine adds one");
 	return noticeCard("", `Paired devices (${devices.length})`, lines);
@@ -54,6 +55,20 @@ export async function runRevoke(api: DevicesApi, ui: Pick<HostUi, "notify" | "co
 		lines.push(`  ${plural(revoked.runningThreads.length, "thread")} it started still run: ${revoked.runningThreads.join(", ")} (/cloud stop <id> ends one)`);
 	}
 	ui.notify(lines.join("\n"), "info");
+}
+
+/**
+ * Sets the access level of the device `target` names. Only demoting the device this connection runs on asks first:
+ * that connection loses the right to change anything else at once. `thisDeviceId` is the paired device's id (undefined
+ * for the owner token); the device the service marks `current` counts as well.
+ */
+export async function runAccess(api: AccessApi, ui: Pick<HostUi, "notify" | "confirm">, target: string, access: DeviceAccess, thisDeviceId?: string): Promise<void> {
+	const device = resolveDevice(target, await api.devices());
+	const isThis = device.current || device.id === thisDeviceId;
+	if (isThis && access === "threads" && !(await ui.confirm("Change access", "This device loses full access now"))) return;
+	const changed = await api.setDeviceAccess(device.id, access);
+	const name = changed.name || device.name;
+	ui.notify(`☁ ${name} now has ${access === "full" ? "full access" : "threads-only access"}`, "info");
 }
 
 export interface DisconnectDeps {

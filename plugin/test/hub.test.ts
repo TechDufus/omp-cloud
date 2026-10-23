@@ -105,15 +105,20 @@ describe("HubComponent", () => {
 		expect(hub.render(130).join("\n")).toContain("no providers (/cloud login <provider>)");
 	});
 
-	test("on a paired device a cloud with no provider points at the server, not at /cloud login", async () => {
-		const { hub } = await make(threads, { whoami: async () => whoami({ modelPatterns: [] }) }, undefined, undefined, undefined, "10.0.20.24");
+	test("on a threads-only device a cloud with no provider points at the server, not at /cloud login; a device with full access names /cloud login", async () => {
+		const threadsOnly = whoami({ modelPatterns: [], device: { id: "d1", name: "laptop", access: "threads" } });
+		const { hub } = await make(threads, { whoami: async () => threadsOnly }, undefined, undefined, undefined, "10.0.20.24");
 		const text = hub.render(300).join("\n");
 		expect(text).toContain("no providers (log the server in: run omp-cloud login <provider> on 10.0.20.24");
 		expect(text).not.toContain("/cloud login");
+
+		const full = whoami({ modelPatterns: [], device: { id: "d1", name: "laptop", access: "full" } });
+		const { hub: owner } = await make(threads, { whoami: async () => full }, undefined, undefined, undefined, "10.0.20.24");
+		expect(owner.render(300).join("\n")).toContain("no providers (/cloud login <provider>)");
 	});
 
 	describe("an update of the service", () => {
-		const ready = (over: Parameters<typeof whoami>[0] = {}) => whoami({ user: "dev", update: { state: "ready", available: "0.5.1" }, ...over });
+		const ready = (over: Parameters<typeof whoami>[0] = {}) => whoami({ user: "dev", update: { state: "ready", available: "0.5.1", mode: "notify" }, ...over });
 
 		test("the owner sees `update <v> ready (u: restart to update)` in the header and the key in the hints; u closes the hub with the update action", async () => {
 			const { hub, results } = await make(threads, { whoami: async () => ready() });
@@ -131,7 +136,7 @@ describe("HubComponent", () => {
 		});
 
 		test("a device sees nothing and u does nothing: only the owner installs", async () => {
-			const { hub, results } = await make(threads, { whoami: async () => ready({ device: { id: "d1", name: "laptop" } }) });
+			const { hub, results } = await make(threads, { whoami: async () => ready({ device: { id: "d1", name: "laptop", access: "threads" } }) });
 			const text = hub.render(130).join("\n");
 			expect(text).not.toContain("update 0.5.1");
 			expect(text).not.toContain("u update");
@@ -139,8 +144,15 @@ describe("HubComponent", () => {
 			expect(results).toEqual([]);
 		});
 
+		test("a device with full access is the owner here: it sees the update and u installs it", async () => {
+			const { hub, results } = await make(threads, { whoami: async () => ready({ device: { id: "d1", name: "laptop", access: "full" } }) });
+			expect(hub.render(130)[0]).toBe("☁ omp-cloud · dev · update 0.5.1 ready (u: restart to update)");
+			hub.handleInput("u");
+			expect(results).toEqual([{ action: "update", thread: "", label: "" }]);
+		});
+
 		test("an update that is only downloading, or a service that reports none, shows nothing and u does nothing", async () => {
-			for (const update of [{ state: "downloading" as const, available: "0.5.1" }, { state: "idle" as const, available: null }, null]) {
+			for (const update of [{ state: "downloading" as const, available: "0.5.1", mode: "notify" as const }, { state: "idle" as const, available: null, mode: "notify" as const }, null]) {
 				const { hub, results } = await make(threads, { whoami: async () => whoami({ user: "dev", update }) });
 				expect(hub.render(130)[0]).toBe("☁ omp-cloud · dev");
 				hub.handleInput("u");
@@ -523,11 +535,11 @@ describe("HubComponent as native nodes", () => {
 	});
 
 	test("an owner with an update ready gets the Update button and badge; a device does not", async () => {
-		const ready = whoami({ user: "dev", update: { state: "ready", available: "0.5.1" } });
+		const ready = whoami({ user: "dev", update: { state: "ready", available: "0.5.1", mode: "notify" } });
 		const { hub } = await make(threads, { whoami: async () => ready });
 		expect(buttons(hub.describe(cx))).toContain("update");
 		expect(JSON.stringify(hub.describe(cx))).toContain("update 0.5.1 ready");
-		const { hub: device } = await make(threads, { whoami: async () => whoami({ user: "dev", update: { state: "ready", available: "0.5.1" }, device: { id: "d1", name: "laptop" } }) });
+		const { hub: device } = await make(threads, { whoami: async () => whoami({ user: "dev", update: { state: "ready", available: "0.5.1", mode: "notify" }, device: { id: "d1", name: "laptop", access: "threads" } }) });
 		expect(buttons(device.describe(cx))).not.toContain("update");
 	});
 
@@ -564,7 +576,7 @@ describe("HubComponent as native nodes", () => {
 	});
 
 	test("Update runs only for an owner with one ready; an unknown act and a button with no thread do nothing", async () => {
-		const ready = whoami({ user: "dev", update: { state: "ready", available: "0.5.1" } });
+		const ready = whoami({ user: "dev", update: { state: "ready", available: "0.5.1", mode: "notify" } });
 		const { hub, results } = await make(threads, { whoami: async () => ready });
 		hub.handleNativeEvent(action("update"));
 		expect(results).toEqual([{ action: "update", thread: "", label: "" }]);

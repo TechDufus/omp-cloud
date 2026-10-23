@@ -12,6 +12,7 @@ omp-cloud keeps its own files; omp's config is never read or written. `<config h
 |---|---|---|
 | `url` | string | The service address; `OMP_CLOUD_URL` wins. Must be `https`, or `http` on loopback: a token never crosses a network in the clear. It is the default cloud of new sessions (`/cloud use personal` picks it, `/cloud use env` picks `OMP_CLOUD_URL`) |
 | `token` | string | The owner token: a literal, an environment variable name or a `!command` (run with `/bin/sh -c`); `OMP_CLOUD_TOKEN` wins. `/cloud use personal` needs one next to the `url` |
+| `use` | `personal` or `paired` | The cloud new sessions on this machine take (unless `OMP_CLOUD_URL` is set): the `url` and `token` of this file, or the pairing. Yours only; [`/cloud use <cloud> --default`](#which-cloud-new-sessions-use) writes it |
 | `excludeExtensions` | list of strings | Extension names that stay on this machine |
 | `secretFiles` | list of strings | Repository files (relative paths) whose contents go to the cloud agent |
 | `secretEnv` | list of strings | Names of environment variables whose values go to the cloud agent. A value every agent on a repository needs belongs in the service's [Secrets](secrets-and-mcp.md#secrets) instead |
@@ -19,11 +20,26 @@ omp-cloud keeps its own files; omp's config is never read or written. `<config h
 | `deliver` | `tray` or `transcript` | Where a followed thread's finished turns and questions of your own threads go: the inbox and a terminal notification (`tray`, the default), or transcript cards. Yours only |
 | `setup` | mapping | `{run, cacheFiles?}`: a script the cloud runs once per repository environment and caches by the contents of `cacheFiles` (default: the common lockfiles). **A repository's `.omp-cloud.yml` only**: in your personal file it is ignored with a warning. See [Environments](environments.md#per-repository-environments) |
 
-A repository's file never supplies `url`, `token` or `deliver`, and your personal file never supplies `setup`: they are ignored and `/cloud status` says so. The repository's three lists add to yours, and its `policy` keys replace yours key by key. `/cloud status` shows where `url`, `token` and `deliver` came from, the repository file when one was read and the warnings. When the machine knows more than one cloud (`OMP_CLOUD_URL`, the `url` of this file, a pairing) or the session picked one, it also shows `cloud:` and `other clouds:` lines.
+A repository's file never supplies `url`, `token`, `use` or `deliver`, and your personal file never supplies `setup`: they are ignored and `/cloud status` says so. The repository's three lists add to yours, and its `policy` keys replace yours key by key. `/cloud status` shows where `url`, `token` and `deliver` came from, `use` when it is set, the repository file when one was read and the warnings. When the machine knows more than one cloud (`OMP_CLOUD_URL`, the `url` of this file, a pairing) or the session picked one, it also shows `cloud:` and `other clouds:` lines.
 
 With no `url` from the environment or your file, the machine uses its paired connection (`connection.json` beside `config.yml`) and ignores a `token`; see [Pairing](pairing.md). That is only the default for new sessions: a session picks among `env` (`OMP_CLOUD_URL`), `personal` (this file's `url` and `token`) and `paired` with `/cloud use`, and the choice is kept in the session.
 
 A handoff also ships your omp's agent directory (`~/.omp/agent`) and the session's `--config` overlays. Settings that must stay on this machine (credentials, `!command` values, host paths, loopback endpoints) are removed from that copy with a launch warning, and MCP servers are planned separately; see [Secrets and MCP servers](secrets-and-mcp.md#settings-that-stay-on-your-machine).
+
+### Which cloud new sessions use
+
+A session without a pick of its own takes the first of these that exists:
+
+1. `OMP_CLOUD_URL` (with `OMP_CLOUD_TOKEN`);
+2. `use:` of your `config.yml` (`personal` or `paired`);
+3. the `url` of your `config.yml`;
+4. the pairing of `/cloud connect`.
+
+`use:` is yours only: in a repository's `.omp-cloud.yml` it is ignored with a warning, as is any value but `personal` or `paired`. `/cloud use <cloud> --default` writes it for you (`/cloud use paired --default`): it replaces the top-level `use:` line or appends one, keeps every other line of the file as it is (a symlinked `config.yml` stays a link and its target is rewritten), creates the file with a header comment when it is missing and writes it through a temp file, mode `0600`. It then switches the session as `/cloud use` does, and says `new sessions on this machine use paired (<url>); this session uses it now`, or, when the session already works with threads on another cloud, `this session keeps <cloud>: it already works with threads there` (the default is written all the same). `env` cannot be the default (`OMP_CLOUD_URL already decides for every process that has it`): nothing is written. A `use:` that names a cloud this machine does not have fails commands with `use: <source> in <file> names a cloud this machine does not have`; `/cloud connect` pairs one and `/cloud use <cloud> --default` picks another. `/cloud status` shows the row `use: <source> (<file>)` and the `cloud:` line says `the default (use: <source> in <file>)`.
+
+### When the service refuses the token
+
+A `401` says which credential was refused: for a paired connection `the server refused this device's token: it was revoked, or the server was set up again; /cloud connect --replace pairs this machine again`; for the token of `OMP_CLOUD_TOKEN`, `the service refused the token in OMP_CLOUD_TOKEN (this omp's environment): correct it or unset it`; for the token of your `config.yml`, `the service refused the token in <file>: it must be the server's owner token (setup writes token: "!cat ~/.config/omp-cloud/service.token")`.
 
 ## Service config
 

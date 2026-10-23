@@ -17,7 +17,7 @@ import * as ops from "./tool-ops";
 import { describeCall, describeResult } from "./tool-view";
 import type { FollowState, PullResult } from "./verbs";
 import type { WaitOptions, WaitResult } from "./wait";
-import type { Host, IrcReceiptKind, ServiceInfo, ServiceLimits, Spend, ThreadDetail, ThreadOrigin, ThreadPhase, TurnPart, Whoami } from "./types";
+import type { DeviceAccess, Host, IrcReceiptKind, ServiceInfo, ServiceLimits, Spend, ThreadDetail, ThreadOrigin, ThreadPhase, TurnPart, Whoami } from "./types";
 
 export const TOOL_NAME = "cloud";
 /** The name used when `cloud` is already taken by another tool. */
@@ -120,7 +120,7 @@ export interface ToolParams {
 /** The client calls the tool makes. */
 export type ToolClient = Pick<
 	CloudClient,
-	"whoami" | "settings" | "requireCapability" | "listThreadsPage" | "thread" | "turnText" | "eventsPage" | "diff" | "tree" | "file" | "sendMessage" | "answer" | "stop" | "deleteThread"
+	"whoami" | "settings" | "capacity" | "requireCapability" | "listThreadsPage" | "thread" | "turnText" | "eventsPage" | "diff" | "tree" | "file" | "sendMessage" | "answer" | "stop" | "deleteThread"
 >;
 
 export interface ToolSession {
@@ -277,7 +277,7 @@ export type OpDetails =
 	| {
 			op: "info";
 			service: ServiceInfo;
-			caller: { kind: "owner" | "device"; name: string };
+			caller: { kind: "owner" | "device"; name: string; access: DeviceAccess };
 			clouds: KnownCloud[];
 			active: ConnectionSource | null;
 			chosen: boolean;

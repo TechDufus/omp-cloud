@@ -167,9 +167,10 @@ describe("writes: which ones are retried", () => {
 	});
 
 	test("a pairing approval is a plain POST: not retried", async () => {
-		const { client, calls } = scripted([unavailable()]);
-		await failed(client.approvePairing("offer1"));
-		expect(calls).toHaveLength(1);
+		const { client, calls } = scripted([Response.json(whoami({ capabilities: ["devices.access"] })), unavailable()]);
+		await failed(client.approvePairing("offer1", "full"));
+		// one whoami for the capability, then the POST once
+		expect(calls.map(c => c.method)).toEqual(["GET", "POST"]);
 	});
 
 	test("a create with an Idempotency-Key is retried, re-sending the whole upload with the same key; the replay is reported", async () => {

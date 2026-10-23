@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { readConnectionFile, type PairedConnection } from "./connection";
@@ -68,6 +69,8 @@ export interface CloudConfig {
 	connectionFile: string;
 	/** The repository's environment setup from `.omp-cloud.yml`: a script the cloud runs once per environment and caches. Repository file only. */
 	setup: SetupConfig | undefined;
+	/** `use:` of the personal file: the cloud new sessions take unless `OMP_CLOUD_URL` is set. */
+	use: DefaultCloud | undefined;
 }
 
 /** The `setup` key of a repository file: `run` is a shell script, `cacheFiles` the repository files whose contents key the cached result. */
@@ -83,6 +86,9 @@ const SETUP_CACHE_FILES_MAX = 32;
 /** Where a connection comes from: the environment, the personal file, or the pairing of this machine. */
 export type ConnectionSource = Origin | "paired";
 
+/** The clouds `use:` can make the default: `env` is decided by the environment, never by a file. */
+export type DefaultCloud = "personal" | "paired";
+
 export interface Connection {
 	url: string;
 	token: string;
@@ -91,6 +97,8 @@ export interface Connection {
 	paired: PairedConnection | undefined;
 	/** For a paired connection: where an ignored `token` was set (`env` or the personal file); undefined when none was. */
 	ignoredToken: Origin | undefined;
+	/** What a 401 from this connection's service means, for the person who has to fix it. */
+	unauthorizedHint: string;
 }
 
 /** The settings one file holds, before the files are layered. */
@@ -102,6 +110,7 @@ interface FileSettings {
 	secretEnv: string[];
 	policy: Record<string, unknown>;
 	deliver: DeliverMode | undefined;
+	use: DefaultCloud | undefined;
 	/** Which of `url` and `token` the file set, whatever their type. */
 	set: IgnoredKey[];
 	setup: SetupConfig | undefined;
@@ -109,7 +118,9 @@ interface FileSettings {
 }
 
 const LIST_KEYS = ["excludeExtensions", "secretFiles", "secretEnv"] as const;
-const KEYS: readonly string[] = ["url", "token", "policy", "deliver", "setup", ...LIST_KEYS];
+const KEYS: readonly string[] = ["url", "token", "use", "policy", "deliver", "setup", ...LIST_KEYS];
+
+const PAIRED_UNAUTHORIZED = "the server refused this device's token: it was revoked, or the server was set up again; /cloud connect --replace pairs this machine again";
 
 /** `setup` as a {@link SetupConfig}, or the reason it does not fit. */
 function parseSetup(value: unknown): SetupConfig | string {
@@ -173,7 +184,7 @@ async function readMapping(path: string): Promise<Record<string, unknown> | unde
 function fileSettings(path: string, doc: Record<string, unknown>, repository: boolean): FileSettings {
 	const warnings: string[] = [];
 	const warn = (key: string, what: string): void => void warnings.push(`${path}: ${key} ${what}`);
-	const out: FileSettings = { url: undefined, token: undefined, excludeExtensions: [], secretFiles: [], secretEnv: [], policy: {}, deliver: undefined, set: [], setup: undefined, warnings };
+	const out: FileSettings = { url: undefined, token: undefined, excludeExtensions: [], secretFiles: [], secretEnv: [], policy: {}, deliver: undefined, use: undefined, set: [], setup: undefined, warnings };
 	for (const [key, value] of Object.entries(doc)) {
 		if (!KEYS.includes(key)) {
 			warn(key, "is not a known key, ignored");
@@ -182,6 +193,10 @@ function fileSettings(path: string, doc: Record<string, unknown>, repository: bo
 			if (repository) continue;
 			if (typeof value === "string") out[key] = text(value);
 			else warn(key, "is not a string, ignored");
+		} else if (key === "use") {
+			if (repository) warn(key, "is a personal setting, ignored");
+			else if (value === "personal" || value === "paired") out.use = value;
+			else warn(key, "is not personal or paired, ignored");
 		} else if (key === "deliver") {
 			if (repository) warn(key, "is a personal setting, ignored");
 			else if (value === "tray" || value === "transcript") out.deliver = value;
@@ -245,6 +260,7 @@ export async function readConfig(input: ConfigInput): Promise<CloudConfig> {
 		secretEnv: union(personal.secretEnv, repo.secretEnv),
 		policy: { ...personal.policy, ...repo.policy },
 		setup: repo.setup,
+		use: personal.use,
 		deliver: personal.deliver ?? "tray",
 		deliverFrom: personal.deliver === undefined ? undefined : "personal",
 		personalFile,
@@ -286,6 +302,7 @@ export function statusLines(cfg: CloudConfig, connection?: Connection): string[]
 	} else {
 		lines.push(row("url", cfg.url, cfg.urlFrom, cfg.url ?? ""), row("token", cfg.token, cfg.tokenFrom, "set"));
 	}
+	if (cfg.use !== undefined) lines.push(`  use: ${cfg.use} (${tilde(cfg.personalFile, cfg.home)})`);
 	lines.push(`  deliver: ${cfg.deliver} (${cfg.deliverFrom === undefined ? "default" : originLabel(cfg, cfg.deliverFrom)})`);
 	if (cfg.repoFile !== undefined) lines.push(`  repository file: ${cfg.repoFile}`);
 	for (const w of cfg.warnings) lines.push(`  warning: ${w}`);
@@ -326,7 +343,7 @@ async function pairedConnection(cfg: CloudConfig, ignoredToken: Origin | undefin
 	const paired = await readConnectionFile(cfg.connectionFile);
 	const address = paired?.server.addresses[0];
 	if (!paired || address === undefined) return undefined;
-	return { url: `https://${address}`, token: paired.token, source: "paired", paired, ignoredToken };
+	return { url: `https://${address}`, token: paired.token, source: "paired", paired, ignoredToken, unauthorizedHint: PAIRED_UNAUTHORIZED };
 }
 
 /** A connection from a configured `url` and `token` (through omp's `resolveConfigValue`: `!command`, environment variable name or literal), whose token `tokenFrom` says where it was set. */
@@ -338,7 +355,11 @@ async function configuredConnection(cfg: CloudConfig, url: string, token: string
 		const from = tokenFrom === undefined ? "" : ` (${originLabel(cfg, tokenFrom)})`;
 		throw new UserError(`☁ token${from} resolved to nothing; if it is a !command, run it by hand to see why it prints no token`);
 	}
-	return { url, token: resolved, source, paired: undefined, ignoredToken: undefined };
+	const unauthorizedHint =
+		tokenFrom === "env"
+			? "the service refused the token in OMP_CLOUD_TOKEN (this omp's environment): correct it or unset it"
+			: `the service refused the token in ${tilde(cfg.personalFile, cfg.home)}: it must be the server's owner token (setup writes token: "!cat ~/.config/omp-cloud/service.token")`;
+	return { url, token: resolved, source, paired: undefined, ignoredToken: undefined, unauthorizedHint };
 }
 
 /**
@@ -351,9 +372,14 @@ async function configuredConnection(cfg: CloudConfig, url: string, token: string
  * personal file's own `url` and `token`, `paired` the pairing. A source this machine no longer has is an error.
  */
 export async function resolveConnection(cfg: CloudConfig, choice?: ConnectionSource): Promise<Connection> {
+	const file = tilde(cfg.personalFile, cfg.home);
+	const fromUse = choice === undefined && cfg.use !== undefined && cfg.urlFrom !== "env";
+	const picked = fromUse ? cfg.use : choice;
 	const gone = (source: ConnectionSource): UserError =>
-		new UserError(`☁ omp-cloud is not configured for this session: it uses ${source}, which this machine no longer has (/cloud use picks another, /cloud connect pairs a server)`);
-	if (choice === undefined) {
+		fromUse
+			? new UserError(`☁ use: ${source} in ${file} names a cloud this machine does not have (/cloud connect pairs one; /cloud use <cloud> --default picks another)`)
+			: new UserError(`☁ omp-cloud is not configured for this session: it uses ${source}, which this machine no longer has (/cloud use picks another, /cloud connect pairs a server)`);
+	if (picked === undefined) {
 		if (cfg.url === undefined) {
 			const paired = await pairedConnection(cfg, cfg.tokenFrom);
 			if (!paired) throw new UserError(notConfigured(cfg));
@@ -362,19 +388,19 @@ export async function resolveConnection(cfg: CloudConfig, choice?: ConnectionSou
 		if (!cfg.token || cfg.urlFrom === undefined) throw new UserError(notConfigured(cfg));
 		return configuredConnection(cfg, cfg.url, cfg.token, cfg.urlFrom, cfg.tokenFrom);
 	}
-	if (choice === "paired") {
+	if (picked === "paired") {
 		const paired = await pairedConnection(cfg, cfg.url === undefined ? cfg.tokenFrom : undefined);
-		if (!paired) throw gone(choice);
+		if (!paired) throw gone(picked);
 		return paired;
 	}
-	if (choice === "personal") {
-		if (cfg.personalUrl === undefined) throw gone(choice);
+	if (picked === "personal") {
+		if (cfg.personalUrl === undefined) throw gone(picked);
 		if (!cfg.personalToken) {
-			throw new UserError(`☁ url in ${tilde(cfg.personalFile, cfg.home)} has no token: set token there (for example token: "!cat ~/.config/omp-cloud/service.token")`);
+			throw new UserError(`☁ url in ${file} has no token: set token there (for example token: "!cat ~/.config/omp-cloud/service.token")`);
 		}
 		return configuredConnection(cfg, cfg.personalUrl, cfg.personalToken, "personal", "personal");
 	}
-	if (cfg.urlFrom !== "env" || cfg.url === undefined) throw gone(choice);
+	if (cfg.urlFrom !== "env" || cfg.url === undefined) throw gone(picked);
 	if (!cfg.token) throw new UserError(notConfigured(cfg));
 	return configuredConnection(cfg, cfg.url, cfg.token, "env", cfg.tokenFrom);
 }
@@ -420,11 +446,51 @@ export function cloudLines(cfg: CloudConfig, clouds: readonly KnownCloud[], acti
 		? "this session's choice"
 		: active === "env"
 			? "the default (OMP_CLOUD_URL is set)"
-			: active === "personal"
-				? `the default (url in ${tilde(cfg.personalFile, cfg.home)})`
-				: "the default (the paired server; no url configured)";
+			: cfg.use !== undefined && active === cfg.use
+				? `the default (use: ${cfg.use} in ${tilde(cfg.personalFile, cfg.home)})`
+				: active === "personal"
+					? `the default (url in ${tilde(cfg.personalFile, cfg.home)})`
+					: "the default (the paired server; no url configured)";
 	const lines = [active === undefined || !current ? "cloud: none usable yet" : `cloud: ${active} · ${current.url} · ${why}`];
 	const others = clouds.filter(c => c.source !== active).map(c => `${c.source}${c.url === "" ? "" : ` ${c.url}`} (${c.where})`);
 	if (others.length > 0) lines.push(`other clouds: ${others.join("; ")}`);
 	return lines;
+}
+
+/**
+ * Writes `use: <source>` into the personal file, the cloud new sessions on this machine take. A symlinked file stays a link (its
+ * target is rewritten); a top-level `use:` line is replaced or one is appended, every other line untouched; a missing file is
+ * created with a header. The write goes through a temp file beside the real file, renamed over it, mode 0600. Never through omp's config writers.
+ */
+export async function setDefaultCloud(cfg: CloudConfig, source: DefaultCloud): Promise<void> {
+	let target = cfg.personalFile;
+	let existing: string | undefined;
+	try {
+		target = await realpath(cfg.personalFile);
+		existing = await readFile(target, "utf8");
+	} catch (e) {
+		if (!(e instanceof Error && "code" in e && e.code === "ENOENT")) throw e;
+	}
+	const line = `use: ${source}`;
+	let body: string;
+	if (existing === undefined) body = `# omp-cloud settings for this machine (see docs/configuration.md)\n${line}\n`;
+	else if (/^use:.*$/m.test(existing)) body = existing.replace(/^use:.*$/m, line);
+	else body = `${existing}${existing === "" || existing.endsWith("\n") ? "" : "\n"}${line}\n`;
+
+	const dir = dirname(target);
+	await mkdir(dir, { recursive: true });
+	const temp = join(dir, `.config.${randomBytes(6).toString("hex")}.tmp`);
+	try {
+		const handle = await open(temp, "wx", 0o600);
+		try {
+			await handle.writeFile(body);
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+		await rename(temp, target);
+	} catch (e) {
+		await rm(temp, { force: true });
+		throw e;
+	}
 }

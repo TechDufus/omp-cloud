@@ -339,6 +339,7 @@ export async function runConnect(input: ConnectInput, deps: ConnectDeps): Promis
 		try {
 			const who = await new CloudClient(`https://${firstIp}`, connection.token, pinnedFetch(wire), SINGLE_ATTEMPT).whoami();
 			if (who.device?.id !== device.id) lines.push("warning: the service does not name this device in whoami");
+			if (who.device) lines.push(who.device.access === "full" ? "access: full access" : "access: threads only — a connection with full access can change that");
 		} catch (e) {
 			lines.push(`warning: connected, but the first request failed: ${errorText(e)}`);
 		}

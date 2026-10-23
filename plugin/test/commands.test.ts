@@ -93,24 +93,25 @@ describe("command parsing", () => {
 });
 
 describe("/cloud login", () => {
-	test("takes exactly one provider", () => {
+	test("takes one provider, or none to list what the cloud is logged in to", () => {
 		expect(parseCommand("login openai-codex")).toEqual({ kind: "login", provider: "openai-codex" });
 		expect(parseCommand("LOGIN   anthropic  ")).toEqual({ kind: "login", provider: "anthropic" });
+		expect(parseCommand("login")).toEqual({ kind: "login", provider: "" });
+		expect(parseCommand("login   ")).toEqual({ kind: "login", provider: "" });
 	});
 
-	test("a missing or extra argument is the usage error", () => {
+	test("an extra argument is the usage error", () => {
 		const usage = { kind: "error" as const, message: USAGE_LOGIN };
 		expect(USAGE_LOGIN).toBe("☁ usage: /cloud login <provider>");
-		expect(parseCommand("login")).toEqual(usage);
-		expect(parseCommand("login   ")).toEqual(usage);
 		expect(parseCommand("login openai-codex now")).toEqual(usage);
+		expect(parseCommand("login a b")).toEqual(usage);
 	});
 
 	test("resolution passes login through without consulting thread ids", async () => {
 		expect(await run("login openai-codex", [])).toEqual({ kind: "login", provider: "openai-codex" });
 		// a provider that is also a thread id prefix is still a provider
 		expect(await run("login aaaaaa")).toEqual({ kind: "login", provider: "aaaaaa" });
-		expect(await run("login")).toEqual({ kind: "error", message: USAGE_LOGIN });
+		expect(await run("login")).toEqual({ kind: "login", provider: "" });
 	});
 
 	test("is completed as a verb but takes no thread id", () => {
@@ -138,12 +139,16 @@ describe("/cloud use", () => {
 		expect(await run("use paired", [])).toEqual({ kind: "use", cloud: "paired" });
 		expect(await run("USE Personal", [])).toEqual({ kind: "use", cloud: "personal" });
 		expect(await run("use env", [])).toEqual({ kind: "use", cloud: "env" });
+		expect(await run("use paired --default", [])).toEqual({ kind: "use", cloud: "paired", makeDefault: true });
+		expect(await run("use --default Personal", [])).toEqual({ kind: "use", cloud: "personal", makeDefault: true });
 	});
 
 	test("any other word is the usage error, so a task that begins with use needs /cloud new", async () => {
 		const usage = { kind: "error" as const, message: USAGE_USE };
 		expect(await run("use foo", [])).toEqual(usage);
 		expect(await run("use paired now", [])).toEqual(usage);
+		expect(await run("use --default", [])).toEqual(usage);
+		expect(await run("use paired --default --default", [])).toEqual(usage);
 		expect(await run("new use the new API", [])).toEqual({ kind: "launch", task: "use the new API" });
 	});
 
@@ -151,7 +156,8 @@ describe("/cloud use", () => {
 		expect(completions("us", THREADS)?.map(c => c.value)).toEqual(["use"]);
 		expect(completions("use ", THREADS)?.map(c => c.value)).toEqual(["use env", "use personal", "use paired"]);
 		expect(completions("use pa", THREADS)?.map(c => c.value)).toEqual(["use paired"]);
-		expect(completions("use paired ", THREADS)).toBeNull();
+		expect(completions("use paired ", THREADS)?.map(c => c.value)).toEqual(["use paired --default"]);
+		expect(completions("use paired --default ", THREADS)).toBeNull();
 	});
 });
 
