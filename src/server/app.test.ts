@@ -335,6 +335,7 @@ describe("whoami", () => {
 				"threads.subagent",
 				"devices.access",
 				"logins.list",
+				"capacity",
 			],
 			limits: { maxMessageBytes: MAX_TEXT_BYTES, maxAnswerBytes: MAX_QUESTION_TEXT_BYTES, maxUploadBytes: MAX_SOURCE_BYTES, listMax: 200, maxTurns: MAX_TURNS },
 			spend: { todayUSD: 0, dayCapUSD: 0 },

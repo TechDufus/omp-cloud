@@ -185,6 +185,11 @@ expect_status 200 "health without a token"
 expect_jq 'has("vmon") and (.vmon == null or (.vmon | type == "string"))' "health"
 ok "health -> a vmon key (the installed vibemon tag, or null)"
 
+request GET /api/v1/capacity
+expect_status 200 "capacity"
+expect_jq '.available == false and .problem == "this server has no vibemon admin token yet" and .fix == "omp-cloud setup" and .machines.total == 0 and .members == []' "capacity"
+ok "capacity -> unavailable: this server has no vibemon admin token yet"
+
 # --- create -----------------------------------------------------------------
 create_args=(
 	-F "request=@$fx/request.json;type=application/json"
@@ -465,6 +470,11 @@ request GET /api/v1/devices
 expect_status 200 "devices as the owner"
 expect_jq '(.devices | length) == 1 and .devices[0].current == false and .devices[0].platform == "linux"' "devices as the owner"
 ok "devices: the device sees itself (current), the owner sees all"
+
+device GET /api/v1/capacity
+expect_status 200 "capacity as a threads-only device"
+expect_jq '.available == false and (.vms.size.vcpus | type) == "number"' "capacity as a threads-only device"
+ok "capacity is open to a threads-only device"
 
 device POST /api/v1/pairing/offers "${json[@]}" -d '{}'
 expect_status 403 "device token on POST /pairing/offers"

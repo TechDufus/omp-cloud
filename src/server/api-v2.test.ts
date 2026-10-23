@@ -149,6 +149,7 @@ describe("whoami (1.1)", () => {
 			"threads.subagent",
 			"devices.access",
 			"logins.list",
+			"capacity",
 		]);
 		expect(body.limits).toEqual({ maxMessageBytes: 32768, maxAnswerBytes: 4000, maxUploadBytes: MAX_SOURCE_BYTES, listMax: 200, maxTurns: 200 });
 		expect(body.models).toEqual([{ id: "anthropic/claude-a" }, { id: "fake/fake-model" }]);

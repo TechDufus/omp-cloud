@@ -1,6 +1,7 @@
 import type { DashboardSessions } from "../dashboard/session";
 import type { Store } from "../store";
 import type { SandboxMetricsSample, SandboxSummary } from "../vmon";
+import type { Capacity } from "../vmon/capacity";
 import type { ApiServer } from "./api-server";
 import type { Caller } from "./auth";
 import { relayDashboardStatic } from "./dashboard-static";
@@ -13,6 +14,8 @@ export const DASHBOARD_LINKS_PATH = "/api/v1/dashboard/links";
 const EVENTS_PATH = "/api/v1/events";
 const USAGE_PATH = "/api/v1/usage";
 const VMS_PATH = "/api/v1/vms";
+/** `GET` answers the cluster's capacity; open to every caller. */
+export const CAPACITY_PATH = "/api/v1/capacity";
 
 /** The window `GET /api/v1/usage` sums when it gets no `since`. */
 const DEFAULT_USAGE_DAYS = 30;
@@ -37,6 +40,8 @@ export interface DashboardRoutesOptions {
 	vmon?: VmInspector;
 	/** Where vmon's own dashboard lives; `""` when unknown. */
 	vmonDashboard?: string;
+	/** Reads the cluster's capacity for `GET /api/v1/capacity`. Absent: that route answers 404. */
+	capacity?: () => Promise<Capacity>;
 	/** Test seam for the stream's keepalive interval. */
 	events?: EventStreamOptions;
 }
@@ -86,6 +91,11 @@ export class DashboardRoutes {
 			}
 			case VMS_PATH:
 				return Response.json(await this.#vms(principal));
+			case CAPACITY_PATH: {
+				const { capacity } = this.options;
+				if (capacity === undefined) throw new ApiError(404, "not found");
+				return Response.json(await capacity());
+			}
 			default:
 				return null;
 		}

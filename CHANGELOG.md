@@ -19,6 +19,7 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 - **The update mode is visible to every caller.** `whoami.update` now carries `mode`, the `update.mode` setting, next to `state` and `available`.
 - **A list of the cloud's logins.** `GET /api/v1/logins` returns every provider login the cloud broker holds, its disabled ones with the reason, and the MCP servers the service is logged in to, each with the account, when it was made and, for Anthropic, the date to renew by. Every caller may read it; accounts show only with full access. The capability is `logins.list`.
 - **Health carries the server's vibemon version.** `GET /api/v1/health` answers `vmon`, the vibemon tag installed on the server (`null` when unknown). The service reads it in the background, so a health check never waits for it.
+- **The cluster's capacity.** `GET /api/v1/capacity` answers every caller with the vCPU and memory of the vibemon cluster, what is allocated, the machines, the VMs of the omp-cloud team against its limit, and the last hour per minute; when vibemon cannot be read it says why and what to run (`available: false`). The capability is `capacity`.
 
 ### Changed
 

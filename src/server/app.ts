@@ -23,6 +23,7 @@ import {
 	type Thread,
 } from "../store/types";
 import { API_VERSION, SERVICE_VERSION } from "../version";
+import type { Capacity } from "../vmon/capacity";
 import type { ApiServer } from "./api-server";
 import { actorOf, authenticate, type Caller } from "./auth";
 import { readJsonObject } from "./body";
@@ -72,6 +73,8 @@ export interface AppOptions {
 	vmon?: VmInspector;
 	/** The address of vmon's own dashboard, which `GET /api/v1/vms` links to. */
 	vmonDashboard?: string;
+	/** Reads the cluster's capacity for `GET /api/v1/capacity`. Absent: that route answers 404. */
+	capacity?: () => Promise<Capacity>;
 	/** Set when the config has a `remote` section: the TLS listener's sources, fingerprint and advertised addresses. */
 	remote?: RemoteSettings;
 	/** The question timeout (`runner.questionTimeoutSeconds`): gives each unanswered question its `expiresAt`. Absent: no question has one. */
@@ -142,6 +145,7 @@ const CAPABILITIES: readonly string[] = [
 	"threads.subagent",
 	"devices.access",
 	"logins.list",
+	"capacity",
 ];
 
 /** A message body: its text plus JSON framing. */
@@ -286,6 +290,7 @@ export function createApp(options: AppOptions): App {
 		dashboard: options.dashboard,
 		vmon: options.vmon,
 		vmonDashboard: options.vmonDashboard,
+		capacity: options.capacity,
 	});
 	const aborts = new DeviceAborts();
 	// The vibemon tag the health answer carries is read in the background: a health check never waits for it.

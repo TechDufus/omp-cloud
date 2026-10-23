@@ -25,9 +25,11 @@ import { MAX_CREATE_BODY_BYTES } from "./server/limits";
 import { ServiceSecrets } from "./secrets/store";
 import { Settings } from "./settings";
 import { join } from "node:path";
+import { userInfo } from "node:os";
 import { Store } from "./store";
 import { Vmon } from "./vmon";
 import { installedVmonVersion } from "./vmon/pin";
+import { readCapacity } from "./vmon/capacity";
 import { MIGRATIONS } from "./store/schema";
 import { createUpdateService, openUpdateContext } from "./update/real";
 import type { UpdateService } from "./update/service";
@@ -213,6 +215,7 @@ export async function serve(args: readonly string[]): Promise<void> {
 					: { origin: dashboardUrl, upstream: dashboardUpstream(config.dashboard), sessions: dashboardSessions },
 			vmon,
 			vmonDashboard: `${config.vmon.url}/dashboard/`,
+			capacity: () => readCapacity(config, userInfo().username),
 			preview: started === undefined ? undefined : { vmonUrl: config.vmon.url, vmFor: threadId => started.vmFor(threadId) },
 			remote: remote?.settings,
 			update,
