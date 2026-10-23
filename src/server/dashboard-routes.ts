@@ -9,7 +9,7 @@ import { ApiError } from "./errors";
 import { type EventStreamOptions, globalEventStream } from "./events";
 import { DASHBOARD_STATIC_PATH } from "./paths";
 
-/** The route that mints sign-in links: reachable on the API listeners with the owner token only, never through the dashboard listener. */
+/** The route that mints sign-in links: reachable on the API listeners with full access (the owner token or a full-access device), never through the dashboard listener. */
 export const DASHBOARD_LINKS_PATH = "/api/v1/dashboard/links";
 const EVENTS_PATH = "/api/v1/events";
 const USAGE_PATH = "/api/v1/usage";

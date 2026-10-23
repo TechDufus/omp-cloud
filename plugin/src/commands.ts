@@ -293,7 +293,7 @@ const VERB_HELP: Record<Verb, string> = {
 	login: "log the cloud broker in to a provider (second login, never a copy of yours); alone, lists what the cloud is logged in to",
 	status: "show the connection and what the cloud can run",
 	use: "pick the cloud this session uses; `--default` makes it the default of new sessions on this machine",
-	update: "check the cloud service for a newer omp-cloud; when one is ready, restart the service to update (the owner confirms)",
+	update: "check the cloud service for a newer omp-cloud; when one is ready, restart the service to update (a connection with full access confirms)",
 	dashboard: "open the dashboard (prints a one-time sign-in link)",
 	connect: "pair this machine with a cloud service: a pairing code (from /cloud pair on the server machine), or an ssh target (user@host) where omp-cloud is installed",
 	pair: "let another machine connect: shows a code (sent to your clipboard), you approve the device and the access it gets (needs full access)",

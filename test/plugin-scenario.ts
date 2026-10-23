@@ -13,7 +13,7 @@
  *     remote is a git server the service holds a credential for, so the handoff is a delta from the remote's main; the
  *     session's omp-cloud files (`policy` in the personal file and in the work clone's `.omp-cloud.yml`, dotted keys included) reach the thread as one merged policy
  *  2  the shipped setup holds the allowed files and none of the denied ones; the conversation reached the cloud
- *  3  the first turn finishes with a result; the person-started thread reports it to the tray (footer `☁ 1 unread`, no turn card), `/cloud show` posts the card and clears the count; the later steps run with `deliver: transcript`
+ *  3  the first turn finishes with a result; the person-started thread reports it to the tray (footer `☁ 1 unread · <cloud>`, no turn card), `/cloud show` posts the card and clears the count; the later steps run with `deliver: transcript`
  *  4  `/cloud send` an ask: the question card lands in the local session, `/cloud answer` answers it, the reply and the turn card arrive
  *  4b the running cloud turn is a task job of the local omp (named after the thread): the fake local model's `wait` blocks on it and returns the turn's result, so the model hears of the turn once; the turn card is the pointer
  *  5  `/cloud pull` creates `omp-cloud/<thread>` with the cloud's file
@@ -48,7 +48,7 @@ import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { Sandbox } from "e2b";
@@ -885,13 +885,14 @@ async function run(): Promise<void> {
 		expectEqual("result files/insertions/deletions", `${result.filesChanged}/${result.insertions}/${result.deletions}`, "1/1/0");
 		expectContains("reply", text(latestOf(done)?.reply), "DONE=");
 
-		// The default delivery is the tray: the footer status says one unread, and no turn card was posted.
-		await waitUntil("the footer status to say one unread", 60_000, async () => (statuses.at(-1) === "☁ 1 unread" ? true : undefined));
+		// The default delivery is the tray: the footer status says one unread, and no turn card was posted. The cloud's name, the host
+		// name while `service.name` is empty, ends every footer status.
+		await waitUntil("the footer status to say one unread", 60_000, async () => (statuses.at(-1) === `☁ 1 unread · ${hostname()}` ? true : undefined));
 		expectEqual("turn cards in the transcript", (await cards(client)).filter(c => c.kind === "turn").length, 0);
 		// Reading it posts the card and clears the count.
 		await cloud(client, `show ${thread}`);
 		await waitCard(client, "the show card", 30_000, c => c.kind === "notice" && c.thread === thread);
-		await waitUntil("the footer status to clear", 30_000, async () => (statuses.at(-1) === "" ? true : undefined));
+		await waitUntil("the footer status to show only the cloud", 30_000, async () => (statuses.at(-1) === `☁ ${hostname()}` ? true : undefined));
 		// The steps that follow read their results from transcript cards.
 		await writeFile(
 			join(xdgConfig, "omp-cloud", "config.yml"),
@@ -1136,7 +1137,7 @@ async function run(): Promise<void> {
 		for (const capability of ["threads.idempotency", "threads.scratch", "inspect", "messages.interrupt"]) {
 			if (!capabilities.includes(capability)) throw new Error(`info.details.capabilities lacks ${capability}: ${JSON.stringify(capabilities)}`);
 		}
-		expectEqual("info caller", JSON.stringify(info.details.caller), JSON.stringify({ kind: "owner", name: "owner" }));
+		expectEqual("info caller", JSON.stringify(info.details.caller), JSON.stringify({ kind: "owner", name: "owner", access: "full" }));
 		const models = Array.isArray(info.details.models) ? info.details.models : [];
 		if (!models.includes("fake/fake-model")) throw new Error(`info.details.models lacks fake/fake-model: ${JSON.stringify(models)}`);
 	});
