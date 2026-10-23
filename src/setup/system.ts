@@ -16,7 +16,7 @@ import { detectPackageManager, installPackages, PACKAGE_NAMES, packageSet } from
 import type { StepResult } from "./steps";
 import { Reporter } from "./steps";
 import { installSystemUnits, NET_UNIT, readText, removeSystemUnits, SERVICE_IP, SERVICE_LINK, VMON_UNIT, writeIfChanged } from "./system-units";
-import { clusterSecretOf, DEFAULT_MAX_SANDBOXES, DEFAULT_TEAM, ensureTeam, RESERVED_TEAM, TEAM_PATTERN } from "./vmon-team";
+import { DEFAULT_MAX_SANDBOXES, DEFAULT_TEAM, ensureTeam, envValueOf, RESERVED_TEAM, TEAM_PATTERN } from "./vmon-team";
 
 export const SUDOERS_FILE = "/etc/sudoers.d/omp-cloud";
 export const SETUP_RECORD = "/etc/omp-cloud/setup.json";
@@ -28,6 +28,8 @@ const HELPER_TIMEOUT_MS = 5 * 60_000;
 /** What `--uninstall --purge` removes besides the units, the helper and the rule. */
 const PURGE_PATHS = ["/opt/vmon", "/opt/vmon.prev", "/etc/vmon", "/var/lib/vmon"];
 const USER_PATTERN = /^[a-z_][a-z0-9_-]*$/;
+/** What a secret in the report may look like: non-empty, at most 256 characters, no whitespace. */
+const SECRET_PATTERN = /^\S{1,256}$/;
 
 export interface SystemArgs {
 	/** The user the sudoers rule and linger are for. Required to set up; an uninstall may take it from the setup record. */
@@ -116,6 +118,10 @@ export interface SystemReport {
 	team: { slug: string; created: boolean };
 	/** Present only when a key was minted now (the team was created, or `--mint-key`). */
 	key?: string;
+	/** The vibemon admin token of `/etc/vmon/env`, for the user part to write as a 0600 file; absent when the file holds none. Never in a step's text. */
+	adminToken?: string;
+	/** The vibemon cluster secret, only in cluster mode, for the same reason. */
+	clusterSecret?: string;
 	netPool: string;
 	/** Whether linger is on for the user after this run. */
 	linger: boolean;
@@ -136,14 +142,17 @@ export function parseSystemReport(lastStdoutLine: string): SystemReport {
 		throw new Error(`the root part's last output line is not JSON: ${lastStdoutLine.slice(0, 200)}`);
 	}
 	if (!isRecord(value)) throw new Error("the root part's report is not an object");
-	const { ok, steps, team, key, netPool, linger } = value;
+	const { ok, steps, team, key, adminToken, clusterSecret, netPool, linger } = value;
 	if (typeof ok !== "boolean") throw new Error("the root part's report has no boolean ok");
 	if (!Array.isArray(steps) || !steps.every(isStepResult)) throw new Error("the root part's report has malformed steps");
 	if (!isRecord(team) || typeof team.slug !== "string" || typeof team.created !== "boolean") throw new Error("the root part's report has a malformed team");
 	if (key !== undefined && typeof key !== "string") throw new Error("the root part's report has a malformed key");
+	for (const [name, secret] of [["adminToken", adminToken], ["clusterSecret", clusterSecret]] as const) {
+		if (secret !== undefined && (typeof secret !== "string" || !SECRET_PATTERN.test(secret))) throw new Error(`the root part's report has a malformed ${name}`);
+	}
 	if (typeof netPool !== "string") throw new Error("the root part's report has no netPool");
 	if (typeof linger !== "boolean") throw new Error("the root part's report has no boolean linger");
-	return { ok, steps, team: { slug: team.slug, created: team.created }, ...(key === undefined ? {} : { key }), netPool, linger };
+	return { ok, steps, team: { slug: team.slug, created: team.created }, ...(key === undefined ? {} : { key }), ...(typeof adminToken === "string" ? { adminToken } : {}), ...(typeof clusterSecret === "string" ? { clusterSecret } : {}), netPool, linger };
 }
 
 /** Everything the root part touches outside its own code, so tests can run it on a temp directory with fake commands. */
@@ -195,12 +204,23 @@ function realDeps(): SystemDeps {
 interface RunState {
 	team: { slug: string; created: boolean };
 	key?: string;
+	adminToken?: string;
+	clusterSecret?: string;
 	netPool: string;
 	linger: boolean;
 }
 
 function emit(deps: SystemDeps, state: RunState): void {
-	const report: SystemReport = { ok: !deps.reporter.failed, steps: deps.reporter.steps, team: state.team, ...(state.key === undefined ? {} : { key: state.key }), netPool: state.netPool, linger: state.linger };
+	const report: SystemReport = {
+		ok: !deps.reporter.failed,
+		steps: deps.reporter.steps,
+		team: state.team,
+		...(state.key === undefined ? {} : { key: state.key }),
+		...(state.adminToken === undefined ? {} : { adminToken: state.adminToken }),
+		...(state.clusterSecret === undefined ? {} : { clusterSecret: state.clusterSecret }),
+		netPool: state.netPool,
+		linger: state.linger,
+	};
 	deps.stdout(`${JSON.stringify(report)}\n`);
 }
 
@@ -258,8 +278,10 @@ async function setUp(args: SystemArgs, deps: SystemDeps, state: RunState): Promi
 		() => healthStep(deps),
 		async () => {
 			const envText = await readText(join(deps.root, VMON_ENV_FILE));
-			const secret = envText === null ? null : clusterSecretOf(envText);
+			const secret = envText === null ? null : envValueOf(envText, "VMON_CLUSTER_SECRET");
 			if (secret === null) return { id: "system.team", status: "failed", detail: `${VMON_ENV_FILE} holds no VMON_CLUSTER_SECRET`, fix: `sudo rm ${VMON_ENV_FILE} only on a host with no vmon data, else restore the file` } satisfies StepResult;
+			const adminToken = envValueOf(envText ?? "", "VMON_ADMIN_TOKEN");
+			if (adminToken !== null && SECRET_PATTERN.test(adminToken)) state.adminToken = adminToken;
 			const outcome = await ensureTeam({ runner: deps.runner, secret, slug: args.team, maxSandboxes: args.maxSandboxes, mintKey: args.mintKey || args.migrateTeam, sleep: deps.sleep });
 			state.team = outcome.team;
 			if (outcome.key !== undefined) state.key = outcome.key;

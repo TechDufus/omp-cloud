@@ -7,7 +7,7 @@ import type { HostOmp } from "../omp-version";
 import { healthBase } from "../update/real";
 import { Units } from "../update/system";
 import { VMON_PIN } from "../vmon/pin";
-import { DEFAULT_TEAM, ensureDirs, ensureGatewayClients, ensureServiceConfig, readVmonKey, recordedTeam, writeFileAtomic, writeVmonKey } from "./config";
+import { DEFAULT_TEAM, ensureAdminToken, ensureDirs, ensureGatewayClients, ensureServiceConfig, readVmonKey, recordedTeam, writeFileAtomic, writeVmonKey } from "./config";
 import { findOmp, realContext, type SetupContext } from "./context";
 import { collectDoctor, doctorDeps, formatDoctor } from "./doctor";
 import { checkVmonKey, waitGateway, waitService, waitTemplate } from "./health";
@@ -300,6 +300,7 @@ export async function runSetup(args: SetupArgs, ctx: SetupContext): Promise<numb
 	}
 	reporter.collect(root.report.steps);
 	if (!(await ensureKey(ctx, request, root.report, plan))) return finish(ctx, args);
+	reporter.report(await ensureAdminToken(paths, root.report.adminToken));
 	if (plan.migrate) reporter.note("the team changed: paused threads come back as cold restores and the VM template rebuilds");
 
 	reporter.report(await ensureTls(paths.tlsDir, ctx.hostname));

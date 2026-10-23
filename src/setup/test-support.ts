@@ -21,6 +21,9 @@ export interface RecordedCall {
 	options: CommandOptions | undefined;
 }
 
+/** The vibemon admin token the fake root part reports. */
+export const ADMIN_TOKEN = "admin-token-from-etc-vmon-env";
+
 /** What the root part prints, as the report line SetupSystem's `parseSystemReport` accepts. */
 export function rootReport(over: Partial<SystemReport> = {}): SystemReport {
 	return {
@@ -28,6 +31,7 @@ export function rootReport(over: Partial<SystemReport> = {}): SystemReport {
 		steps: [{ id: "system.vmon", status: "ok", detail: "vibemon is at the pin" }],
 		team: { slug: "omp-cloud", created: true },
 		key: "e2b_freshly_minted_key",
+		adminToken: ADMIN_TOKEN,
 		netPool: "172.20.0.0/16",
 		linger: true,
 		...over,
@@ -180,6 +184,7 @@ export async function rig(dir: string, options: RigOptions = {}): Promise<TestRi
 		},
 		systemChecks: async () => [{ id: "system.check.vmon", status: "ok", detail: "vmon is healthy" }],
 		templateProbe: async () => ({ name: async () => "omp-agent:18.12.3-abc", exists: async () => true }),
+		clusterProbe: async () => ({ localId: "server", nodes: [], history: [] }),
 	};
 	const ctx: SetupContext = {
 		run: host.run,

@@ -9,6 +9,7 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 ### Upgrade notes
 
 - **Devices have access levels (schema migration 17, Service API 6).** A paired device is now the owner on its machine, with `full` access (everything the owner token can do) or `threads` access (threads and reads). On upgrade, devices paired over ssh become `full` and devices paired with a code stay `threads`; an approval that names no access, which is what the current plugin sends, grants `threads`. Change one with `PATCH /api/v1/devices/{id}`. The service must restart to migrate the database before `omp-cloud ssh-pair` works again.
+- **Rerun `omp-cloud setup` once.** It hands the service vibemon's admin token (`~/.config/omp-cloud/vmon-admin.token`, 0600, and `vmon.adminTokenFile` in `service.json`) so it can read the cluster's capacity; until then capacity shows as unavailable (`this server has no vibemon admin token yet`). Anything that runs as you can read that file and act as vibemon's admin.
 
 ### Added
 
@@ -23,6 +24,10 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 - **A refusal names the fix.** A device with threads-only access that calls a route needing full access gets `403` `this device has threads-only access; a connection with full access can change that (Devices in the dashboard, or /cloud devices access <device> full)` instead of `only the owner token can do this`.
 - **Devices paired over ssh have full access.** `omp-cloud ssh-pair` creates a `full` device, because a login on the service's account is already ownership.
+
+### Fixed
+
+- **The limits text said the whole team had 8 vCPUs, 8192 MB and 20480 MB.** Those are vibemon's per-VM ceilings, not team totals. Setup's step text and `docs/install.md` now say so.
 
 ## 0.7.0 (2026-10-22)
 

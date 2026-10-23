@@ -5,7 +5,7 @@ import type { Recipe } from "./recipe";
 const DEFAULT_BUILD_URL = "https://build.stencil.so";
 
 /** The VM size every template is built with (the sandbox reports it back from the template). Part of the recipe: a different size is a different template. */
-const BUILD_SIZE = { cpuCount: 2, memoryMB: 4096 };
+export const BUILD_SIZE = { cpuCount: 2, memoryMB: 4096 };
 
 /**
  * The recipe of the template of omp `version`: Debian trixie, the tools the runner needs, the owner's `recipe.packages`,

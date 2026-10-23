@@ -1,5 +1,7 @@
 /** `omp-cloud doctor`: every check of the host and the stack as one table, a fix beside each failure. */
 import { type Config, loadConfig } from "../config";
+import { adminProblem } from "../vmon/capacity";
+import { type ClusterView, VmonAdminUnavailable } from "../vmon/admin";
 import { isRecord } from "../guards";
 import { healthBase } from "../update/real";
 import { type SetupContext, findOmp, realContext } from "./context";
@@ -20,6 +22,7 @@ export interface DoctorDeps {
 	readKey: () => Promise<string | null>;
 	ompVersion: () => Promise<string | null>;
 	templateProbe: (config: Config, key: string, ompVersion: string) => Promise<TemplateProbe>;
+	clusterProbe: (config: Config) => Promise<ClusterView>;
 	/** This binary's version: the service that answers must be running it. */
 	version: string;
 }
@@ -105,6 +108,18 @@ async function templateChecks(deps: DoctorDeps, config: Config): Promise<StepRes
 	return [{ id, status: "skipped", detail: `the VM template ${name} is not built yet; the service builds it in the background (nested KVM builds are slow): journalctl --user -u omp-cloud -f` }];
 }
 
+/** Whether the service can read vibemon's cluster view: capacity in the dashboard, `/cloud status` and the `cloud` tool needs it. */
+async function vmonAdminChecks(deps: DoctorDeps, config: Config): Promise<StepResult[]> {
+	const id = "doctor.vmon-admin";
+	try {
+		const cluster = await deps.clusterProbe(config);
+		return [{ id, status: "ok", detail: `the service reads vibemon's cluster view (${cluster.nodes.length} machines)` }];
+	} catch (error) {
+		const { problem, fix } = adminProblem(error);
+		return [{ id, status: error instanceof VmonAdminUnavailable ? "skipped" : "failed", detail: problem, fix }];
+	}
+}
+
 /**
  * Runs the checks in order (preflight, system, user units, the service with its broker and gateway, the VM template,
  * the plugin) and concatenates their steps. A failed preflight does not stop the rest, and a check that throws becomes
@@ -121,6 +136,7 @@ export async function collectDoctor(deps: DoctorDeps): Promise<StepResult[]> {
 	} else {
 		steps.push(...(await guarded("doctor.service", () => serviceChecks(deps, config))));
 		steps.push(...(await guarded("doctor.template", () => templateChecks(deps, config))));
+		steps.push(...(await guarded("doctor.vmon-admin", () => vmonAdminChecks(deps, config))));
 	}
 	steps.push(...(await guarded("doctor.plugin", deps.pluginChecks)));
 	return steps;
@@ -165,6 +181,7 @@ export async function doctorDeps(ctx: SetupContext): Promise<DoctorDeps> {
 		readKey: () => readVmonKey(ctx.paths),
 		ompVersion: async () => omp?.version ?? null,
 		templateProbe: ctx.parts.templateProbe,
+		clusterProbe: ctx.parts.clusterProbe,
 		version: ctx.version,
 	};
 }

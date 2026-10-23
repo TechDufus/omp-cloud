@@ -87,6 +87,36 @@ describe("parseConfig", () => {
 		expect(config.vmon.team).toBe("omp-cloud");
 	});
 
+	test("vmon.adminTokenFile is an optional absolute path", () => {
+		expect(parseConfig(validRaw()).vmon).not.toHaveProperty("adminTokenFile");
+		expect(parseConfig(rawWith(raw => { raw.vmon.adminTokenFile = "/etc/omp-cloud/vmon-admin.token"; })).vmon.adminTokenFile).toBe("/etc/omp-cloud/vmon-admin.token");
+		expect(() => parseConfig(rawWith(raw => { raw.vmon.adminTokenFile = "vmon-admin.token"; }))).toThrow("vmon.adminTokenFile must be an absolute path");
+	});
+
+	test("vmon.clusterAddress and vmon.clusterSecretFile are optional and go together", () => {
+		const cluster = parseConfig(
+			rawWith(raw => {
+				raw.vmon.clusterAddress = "192.168.1.20";
+				raw.vmon.clusterSecretFile = "/etc/omp-cloud/vmon-cluster.secret";
+			}),
+		).vmon;
+		expect(cluster.clusterAddress).toBe("192.168.1.20");
+		expect(cluster.clusterSecretFile).toBe("/etc/omp-cloud/vmon-cluster.secret");
+		expect(() => parseConfig(rawWith(raw => { raw.vmon.clusterAddress = "192.168.1.20"; }))).toThrow("vmon.clusterAddress and vmon.clusterSecretFile go together");
+		expect(() => parseConfig(rawWith(raw => { raw.vmon.clusterSecretFile = "/etc/omp-cloud/vmon-cluster.secret"; }))).toThrow("vmon.clusterAddress and vmon.clusterSecretFile go together");
+	});
+
+	test.each(["omp-server.lan", "::1", "192.168.1", "192.168.1.20:7946", "", 4])("vmon.clusterAddress %p is not an IPv4 address", address => {
+		expect(() =>
+			parseConfig(
+				rawWith(raw => {
+					raw.vmon.clusterAddress = address;
+					raw.vmon.clusterSecretFile = "/etc/omp-cloud/vmon-cluster.secret";
+				}),
+			),
+		).toThrow("vmon.clusterAddress must be an IPv4 address");
+	});
+
 	test.each(["", "Acme", "-lead", "has space", "a".repeat(64), 5, null])("vmon.team %p is rejected and named", team => {
 		expect(() =>
 			parseConfig(

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { CommandResult } from "../update/system";
 import type { FakeRunner } from "./system-fakes";
 import { fakeRunner } from "./system-fakes";
-import { clusterSecretOf, ensureTeam, limitArgs, parseApiKey, parseCreateTeam, parseListTeams } from "./vmon-team";
+import { ensureTeam, envValueOf, limitArgs, parseApiKey, parseCreateTeam, parseListTeams } from "./vmon-team";
 
 const SECRET = "c0ffee".repeat(10);
 const KEY = `e2b_${"ab12".repeat(10)}`;
@@ -33,11 +33,13 @@ describe("parsers", () => {
 		expect(parseApiKey("oops")).toBeNull();
 	});
 
-	test("the cluster secret comes from the env file", () => {
-		expect(clusterSecretOf(`VMON_ADMIN_TOKEN=x\nVMON_CLUSTER_SECRET=${SECRET}\n`)).toBe(SECRET);
-		expect(clusterSecretOf(`export VMON_CLUSTER_SECRET="${SECRET}"`)).toBe(SECRET);
-		expect(clusterSecretOf("VMON_ADMIN_TOKEN=x\n")).toBeNull();
-		expect(clusterSecretOf("VMON_CLUSTER_SECRET=\n")).toBeNull();
+	test("a variable's value comes from the env file", () => {
+		expect(envValueOf(`VMON_ADMIN_TOKEN=x\nVMON_CLUSTER_SECRET=${SECRET}\n`, "VMON_CLUSTER_SECRET")).toBe(SECRET);
+		expect(envValueOf(`export VMON_CLUSTER_SECRET="${SECRET}"`, "VMON_CLUSTER_SECRET")).toBe(SECRET);
+		expect(envValueOf("VMON_ADMIN_TOKEN=x\n", "VMON_CLUSTER_SECRET")).toBeNull();
+		expect(envValueOf("VMON_CLUSTER_SECRET=\n", "VMON_CLUSTER_SECRET")).toBeNull();
+		expect(envValueOf(`VMON_CLUSTER_SECRET=${SECRET}\nVMON_ADMIN_TOKEN='tok'\n`, "VMON_ADMIN_TOKEN")).toBe("tok");
+		expect(envValueOf("XVMON_ADMIN_TOKEN=nope\n", "VMON_ADMIN_TOKEN")).toBeNull();
 	});
 
 	test("limits carry every flag", () => {

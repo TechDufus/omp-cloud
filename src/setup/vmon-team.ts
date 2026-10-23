@@ -80,10 +80,11 @@ export function limitArgs(maxSandboxes: number): string[] {
 	];
 }
 
-/** The value of `VMON_CLUSTER_SECRET` in the text of `/etc/vmon/env`; null when it has none. */
-export function clusterSecretOf(envFile: string): string | null {
+/** The value of variable `name` in the text of `/etc/vmon/env`; null when it has none. */
+export function envValueOf(envFile: string, name: string): string | null {
+	const pattern = new RegExp(`^\\s*(?:export\\s+)?${name}=(.*)$`);
 	for (const line of envFile.split("\n")) {
-		const match = /^\s*(?:export\s+)?VMON_CLUSTER_SECRET=(.*)$/.exec(line);
+		const match = pattern.exec(line);
 		const value = match?.[1]?.trim().replace(/^(["'])(.*)\1$/, "$2");
 		if (value !== undefined && value !== "") return value;
 	}
@@ -173,6 +174,6 @@ export async function ensureTeam(options: EnsureTeamOptions): Promise<TeamOutcom
 		steps.push(failure("system.team.limits", `vmon admin set-limits ${slug} failed`, limits, logs));
 		return outcome;
 	}
-	steps.push({ id: "system.team.limits", status: "ok", detail: `limits of ${slug}: ${maxSandboxes} running sandboxes, 8 vCPUs, 8192 MiB, 20480 MiB disk, 24 h` });
+	steps.push({ id: "system.team.limits", status: "ok", detail: `limits of ${slug}: ${maxSandboxes} running sandboxes, 4 builds at once, and per VM at most 8 vCPUs, 8192 MiB of memory and 20480 MiB of disk; 24 h per run` });
 	return outcome;
 }

@@ -7,7 +7,7 @@ import { VMON_PIN } from "../vmon/pin";
 import { defaultServiceConfig } from "./config";
 import { parseSetupArgs, runSetup, type SetupArgs, setupMain } from "./index";
 import { packagesFor } from "./packages";
-import { rootReport, rig, type RigOptions, type TestRig, TEST_USER } from "./test-support";
+import { ADMIN_TOKEN, rootReport, rig, type RigOptions, type TestRig, TEST_USER } from "./test-support";
 
 let dir: string;
 beforeEach(async () => {
@@ -206,7 +206,7 @@ describe("a fresh install", () => {
 			listen: "127.0.0.1:8080",
 			apiTokenSha256: digest,
 			dataDir: join(dir, ".local/share/omp-cloud/service"),
-			vmon: { url: "http://127.0.0.1:3000", keyFile: join(dir, ".config/omp-cloud/vmon.key"), template: "omp-agent", team: "omp-cloud" },
+			vmon: { url: "http://127.0.0.1:3000", keyFile: join(dir, ".config/omp-cloud/vmon.key"), adminTokenFile: join(dir, ".config/omp-cloud/vmon-admin.token"), template: "omp-agent", team: "omp-cloud" },
 			gateway: { url: "http://10.254.254.1:4000", clientsFile: join(dir, ".local/share/omp-cloud/auth-home/clients.json") },
 			broker: { url: "http://127.0.0.1:8765", tokenFile: join(dir, ".local/share/omp-cloud/auth-home/.omp/auth-broker.token") },
 			dashboard: { listen: "127.0.0.1:8081" },
@@ -222,10 +222,29 @@ describe("a fresh install", () => {
 		expect(await mode(paths.serviceToken)).toBe(0o600);
 		expect(await text(paths.vmonKey)).toBe("e2b_freshly_minted_key");
 		expect(await mode(paths.vmonKey)).toBe(0o600);
+		expect(await text(paths.vmonAdminToken)).toBe(ADMIN_TOKEN);
+		expect(await mode(paths.vmonAdminToken)).toBe(0o600);
+		expect(testRig.ctx.reporter.steps.find((step) => step.id === "config.admin")).toMatchObject({ status: "changed", detail: `the vibemon admin token is in ${paths.vmonAdminToken}; the service reads the cluster's capacity with it` });
+		expect(testRig.out.join("")).not.toContain(ADMIN_TOKEN);
+		expect(testRig.err.join("")).not.toContain(ADMIN_TOKEN);
 		expect(await mode(paths.tlsDir)).toBe(0o700);
 		expect(await mode(join(paths.tlsDir, "key.pem"))).toBe(0o600);
 		expect(testRig.out.join("")).not.toContain(token);
 		expect(testRig.err.join("")).not.toContain(token);
+	});
+
+	test("a root part without the vibemon admin token skips the step and writes no file; a rerun with it changes, then keeps", async () => {
+		const bare = await run({ host: { root: [rootReport({ adminToken: undefined })] } }, "--yes");
+		expect(bare.code).toBe(0);
+		expect(bare.rig.ctx.reporter.steps.find((step) => step.id === "config.admin")).toMatchObject({ status: "skipped", detail: "/etc/vmon/env holds no VMON_ADMIN_TOKEN: capacity stays hidden" });
+		expect(await Bun.file(bare.rig.ctx.paths.vmonAdminToken).exists()).toBe(false);
+		const again = await rig(dir, { host: { root: [rootReport({ key: undefined, team: { slug: "omp-cloud", created: false } })] } });
+		expect(await runSetup(args("--yes"), again.ctx)).toBe(0);
+		expect(again.ctx.reporter.steps.find((step) => step.id === "config.admin")).toMatchObject({ status: "changed" });
+		const third = await rig(dir, { host: { root: [rootReport({ key: undefined, team: { slug: "omp-cloud", created: false } })] } });
+		expect(await runSetup(args("--yes"), third.ctx)).toBe(0);
+		expect(third.ctx.reporter.steps.find((step) => step.id === "config.admin")).toMatchObject({ status: "ok" });
+		expect(await text(third.ctx.paths.vmonAdminToken)).toBe(ADMIN_TOKEN);
 	});
 
 	test("installs itself as the managed binary and runs the units from it", async () => {

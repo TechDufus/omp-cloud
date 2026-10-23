@@ -80,8 +80,12 @@ export interface Config {
 	apiTokenSha256: string;
 	/** Absolute. */
 	dataDir: string;
-	/** `team` is the vibemon team's slug (setup, doctor and uninstall read it; absent on a host set up before it existed). */
-	vmon: { url: string; keyFile: string; template: string; team?: string };
+	/**
+	 * `team` is the vibemon team's slug (setup, doctor and uninstall read it; absent on a host set up before it existed).
+	 * `adminTokenFile` holds vibemon's admin token, which the service reads the cluster's capacity with. `clusterAddress` (the
+	 * server's LAN address that takes other vibemon machines) and `clusterSecretFile` (vibemon's cluster secret) go together.
+	 */
+	vmon: { url: string; keyFile: string; template: string; team?: string; adminTokenFile?: string; clusterAddress?: string; clusterSecretFile?: string };
 	gateway: { url: string; clientsFile: string };
 	/** The omp auth broker that `/cloud login` signs in to. */
 	broker: { url: string; tokenFile: string };
@@ -365,7 +369,7 @@ export function parseConfig(raw: unknown): Config {
 
 	const dataDir = pathField(top.dataDir, "dataDir");
 
-	const vmonRec = section(top.vmon, "vmon", ["url", "keyFile", "template"], ["team"]);
+	const vmonRec = section(top.vmon, "vmon", ["url", "keyFile", "template"], ["team", "adminTokenFile", "clusterAddress", "clusterSecretFile"]);
 	const template = vmonRec.template;
 	if (typeof template !== "string" || template === "" || /\s/.test(template)) {
 		throw new Error("vmon.template must be a non-empty string without whitespace");
@@ -374,11 +378,20 @@ export function parseConfig(raw: unknown): Config {
 	if (team !== undefined && (typeof team !== "string" || !TEAM_SLUG.test(team))) {
 		throw new Error("vmon.team must be a team slug: lowercase letters, digits and hyphens, at most 63 characters");
 	}
+	const clusterAddress = vmonRec.clusterAddress;
+	if (clusterAddress !== undefined && (typeof clusterAddress !== "string" || isIP(clusterAddress) !== 4)) {
+		throw new Error("vmon.clusterAddress must be an IPv4 address");
+	}
+	if ((clusterAddress === undefined) !== (vmonRec.clusterSecretFile === undefined)) {
+		throw new Error("vmon.clusterAddress and vmon.clusterSecretFile go together");
+	}
 	const vmon = {
 		url: urlField(vmonRec.url, "vmon.url"),
 		keyFile: pathField(vmonRec.keyFile, "vmon.keyFile"),
 		template,
 		...(team === undefined ? {} : { team }),
+		...(vmonRec.adminTokenFile === undefined ? {} : { adminTokenFile: pathField(vmonRec.adminTokenFile, "vmon.adminTokenFile") }),
+		...(clusterAddress === undefined ? {} : { clusterAddress, clusterSecretFile: pathField(vmonRec.clusterSecretFile, "vmon.clusterSecretFile") }),
 	};
 
 	const gatewayRec = section(top.gateway, "gateway", ["url", "clientsFile"]);

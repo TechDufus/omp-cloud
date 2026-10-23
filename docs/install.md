@@ -72,7 +72,7 @@ Setup configures only the machine it runs on. It checks first (read-only), print
    - make sure the vibemon team `omp-cloud` exists with its limits;
    - enable linger for your user (`loginctl enable-linger`), so your services start at boot without a login. Setup records that it did, so uninstall undoes only what setup enabled.
 3. **As your user** (a missing omp is installed first, before the root part):
-   - write `~/.config/omp-cloud/` (`service.json`, the owner token `service.token`, the team key `vmon.key`, a TLS identity for [paired devices](pairing.md)): an existing token and TLS identity are kept, the team key is replaced only when vibemon no longer knows it, and an existing `service.json` is brought up to date in place;
+   - write `~/.config/omp-cloud/` (`service.json`, the owner token `service.token`, the team key `vmon.key`, the vibemon admin token `vmon-admin.token` (0600; the service reads the cluster's capacity with it), a TLS identity for [paired devices](pairing.md)): an existing token and TLS identity are kept, the team key is replaced only when vibemon no longer knows it, and an existing `service.json` is brought up to date in place;
    - install the binary into `~/.local/share/omp-cloud/app` and link `~/.local/bin/omp-cloud`;
    - install the user units `omp-auth-broker`, `omp-auth-gateway`, `omp-cloud` and a daily `omp-cloud-backup` timer (always persistent; see [Backups and persistence](operations.md));
    - install the omp plugin from the copy bundled in the binary (a plugin already linked is left alone) and write `~/.config/omp-cloud/config.yml` when absent, so `/cloud` finds the service. omp loads a plugin at start, so setup ends this step with `restart running omp sessions (/restart) to load it`: restart (`/restart`) every omp session that was running, including the one you ran setup from if that is omp, before the first `/cloud` command;
@@ -103,7 +103,7 @@ Pass flags after `--` through the installer, for example `curl … | sh -s -- --
 
 The installer reads two environment variables: `OMP_CLOUD_VERSION` (a release such as `0.5.1`; default the latest) and `OMP_CLOUD_DOWNLOAD_URL` (the releases base URL, default `https://github.com/TechDufus/omp-cloud/releases`). It stages the download under `$TMPDIR` when set, else `$XDG_CACHE_HOME` or `~/.cache`, not `/tmp`, which is often `noexec`; if the smoke test says permission denied, set `TMPDIR` to a directory that allows executables.
 
-The team's limits are set on every setup run: `--max-sandboxes` concurrent sandboxes (default 32), 4 concurrent builds, and for the whole team 8 vCPUs, 8192 MB of memory and 20480 MB of disk. Each run of a sandbox lasts at most 24 hours (the cap restarts when a paused sandbox resumes). vibemon cannot delete or rename teams, so a team left behind stays.
+The team's limits are set on every setup run: `--max-sandboxes` concurrent sandboxes (default 32), 4 concurrent builds, and, for each VM (not for the team as a whole), at most 8 vCPUs, 8192 MB of memory and 20480 MB of disk. Each run of a sandbox lasts at most 24 hours (the cap restarts when a paused sandbox resumes). vibemon cannot delete or rename teams, so a team left behind stays.
 
 ## Login
 

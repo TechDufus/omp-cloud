@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseConfig } from "../config";
-import { defaultServiceConfig, ensureDirs, ensureGatewayClients, ensureServiceConfig, migrateServiceConfig, readVmonKey, recordedTeam, type SetupPaths, setupPaths, writeVmonKey } from "./config";
+import { defaultServiceConfig, ensureAdminToken, ensureDirs, ensureGatewayClients, ensureServiceConfig, migrateServiceConfig, readVmonKey, recordedTeam, type SetupPaths, setupPaths, writeVmonKey } from "./config";
 
 let dir: string;
 let paths: SetupPaths;
@@ -70,6 +70,15 @@ describe("migrateServiceConfig", () => {
 		expect(config.dashboard).toEqual(custom.dashboard);
 		expect(config.remote).toEqual(custom.remote);
 		expect(config.mcp).toEqual(custom.mcp);
+	});
+
+	test("adds vmon.adminTokenFile to a document that predates it, and says so", () => {
+		const { adminTokenFile: _admin, ...vmon } = (defaultServiceConfig(paths, "d".repeat(64), "omp-cloud").vmon as Record<string, unknown>);
+		const older = { ...defaultServiceConfig(paths, "d".repeat(64), "omp-cloud"), vmon };
+		const { config, notes } = migrateServiceConfig(older, paths);
+		expect(config.vmon).toEqual({ ...vmon, adminTokenFile: paths.vmonAdminToken });
+		expect(notes).toEqual(["vmon.adminTokenFile added"]);
+		expect(() => parseConfig(config)).not.toThrow();
 	});
 });
 
@@ -209,5 +218,26 @@ describe("ensureGatewayClients", () => {
 		await writeFile(paths.clientsFile, "{ broken");
 		await expect(ensureGatewayClients(paths, false)).rejects.toThrow("not a valid clients file");
 		expect(await readFile(paths.clientsFile, "utf8")).toBe("{ broken");
+	});
+});
+
+describe("ensureAdminToken", () => {
+	test("writes the token 0600, keeps an unchanged file, replaces a changed token, and never shows it", async () => {
+		await ensureDirs(paths);
+		const written = await ensureAdminToken(paths, "tok-1");
+		expect(written).toEqual({ id: "config.admin", status: "changed", detail: `the vibemon admin token is in ${paths.vmonAdminToken}; the service reads the cluster's capacity with it` });
+		expect(await readFile(paths.vmonAdminToken, "utf8")).toBe("tok-1");
+		expect(await mode(paths.vmonAdminToken)).toBe(0o600);
+		expect((await ensureAdminToken(paths, "tok-1")).status).toBe("ok");
+		expect((await ensureAdminToken(paths, "tok-2")).status).toBe("changed");
+		expect(await readFile(paths.vmonAdminToken, "utf8")).toBe("tok-2");
+		expect(JSON.stringify(await ensureAdminToken(paths, "tok-2"))).not.toContain("tok-2");
+	});
+
+	test("without a token the step is skipped and nothing is written", async () => {
+		await ensureDirs(paths);
+		const step = await ensureAdminToken(paths, undefined);
+		expect(step).toEqual({ id: "config.admin", status: "skipped", detail: "/etc/vmon/env holds no VMON_ADMIN_TOKEN: capacity stays hidden" });
+		expect(await Bun.file(paths.vmonAdminToken).exists()).toBe(false);
 	});
 });

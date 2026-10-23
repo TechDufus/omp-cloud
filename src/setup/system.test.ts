@@ -610,9 +610,32 @@ describe("the report", () => {
 		expect(h.stdout[0]?.endsWith("\n")).toBe(true);
 		const report = h.report();
 		expect(JSON.parse(h.stdout[0] ?? "")).toEqual(report);
-		expect(report).toEqual({ ok: true, steps: h.deps.reporter.steps, team: { slug: "omp-cloud", created: true }, key: KEY, netPool: "172.20.0.0/16", linger: true });
+		expect(report).toEqual({ ok: true, steps: h.deps.reporter.steps, team: { slug: "omp-cloud", created: true }, key: KEY, adminToken: h.secrets[1], netPool: "172.20.0.0/16", linger: true });
 		expect(h.human.join("")).toContain("✓ system.vmon");
 		expect(h.human.join("")).not.toContain('"ok"');
+	});
+
+	test("carries the vibemon admin token of /etc/vmon/env, and no step or human line shows it", async () => {
+		const h = host();
+		await runSystem(ARGS, h.deps);
+		const token = h.secrets[1] ?? "";
+		expect(token).not.toBe("");
+		expect(h.report().adminToken).toBe(token);
+		expect(h.report()).not.toHaveProperty("clusterSecret");
+		expect(JSON.stringify(h.deps.reporter.steps)).not.toContain(token);
+		expect(h.human.join("")).not.toContain(token);
+		expect(h.runner.calls.map((call) => call.argv.join(" ")).join("\n")).not.toContain(token);
+	});
+
+	test("an existing env file's admin token is reported; a file without one reports none", async () => {
+		await putFile(root, "/etc/vmon/env", "VMON_CLUSTER_SECRET=mine\nexport VMON_ADMIN_TOKEN='kept-token'\n", 0o600);
+		const kept = host({ teams: "" });
+		await runSystem(ARGS, kept.deps);
+		expect(kept.report().adminToken).toBe("kept-token");
+		await putFile(root, "/etc/vmon/env", "VMON_CLUSTER_SECRET=mine\n", 0o600);
+		const none = host({ teams: "" });
+		await runSystem(ARGS, none.deps);
+		expect(none.report()).not.toHaveProperty("adminToken");
 	});
 
 	test("a rerun on a finished host reports · for everything and no key", async () => {
@@ -632,6 +655,8 @@ describe("the report", () => {
 
 	test("parseSystemReport accepts a failure report and rejects anything malformed", () => {
 		const good: SystemReport = { ok: false, steps: [{ id: "a", status: "failed", detail: "x", fix: "y" }], team: { slug: "t", created: false }, netPool: "", linger: false };
+		const secrets: SystemReport = { ...good, adminToken: "a".repeat(256), clusterSecret: "s3cret" };
+		expect(parseSystemReport(JSON.stringify(secrets))).toEqual(secrets);
 		expect(parseSystemReport(JSON.stringify(good))).toEqual(good);
 		const bad: unknown[] = [
 			{ ...good, ok: "yes" },
@@ -641,6 +666,11 @@ describe("the report", () => {
 			{ ...good, key: 5 },
 			{ ...good, netPool: undefined },
 			{ ...good, linger: "on" },
+			{ ...good, adminToken: "" },
+			{ ...good, adminToken: "has space" },
+			{ ...good, adminToken: "a".repeat(257) },
+			{ ...good, adminToken: 5 },
+			{ ...good, clusterSecret: "two\nlines" },
 			[],
 			null,
 		];

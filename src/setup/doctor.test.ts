@@ -4,6 +4,7 @@ import { collectDoctor, type DoctorDeps, formatDoctor } from "./doctor";
 import type { HealthDeps, TemplateProbe } from "./health";
 import type { PreflightResult } from "./preflight";
 import type { StepResult } from "./steps";
+import { VmonAdminRefused, VmonAdminUnavailable } from "../vmon/admin";
 
 const VERSION = "0.5.0";
 
@@ -79,6 +80,7 @@ function fakeDeps(overrides: Partial<DoctorDeps> = {}, calls: string[] = []): Do
 		readKey: async () => "key-1",
 		ompVersion: async () => "18.12.3",
 		templateProbe: async () => probe(true),
+		clusterProbe: async () => ({ localId: "server", history: [], nodes: [{ id: "server", hostname: "omp-server", addrs: [], alive: true, status: "ready", version: "0.4.0", server: true, cpus: 8, vcpusUsed: 0, memoryMB: 8192, memoryUsedMB: 0, diskFreeMB: 1, sandboxes: 0 }] }),
 		version: VERSION,
 		...overrides,
 	};
@@ -105,6 +107,7 @@ describe("collectDoctor", () => {
 			"doctor.broker",
 			"doctor.gateway",
 			"doctor.template",
+			"doctor.vmon-admin",
 			"plugin.installed",
 		]);
 		expect(steps.every((step) => step.status === "ok")).toBe(true);
@@ -154,7 +157,7 @@ describe("collectDoctor", () => {
 			}),
 		);
 		expect(steps[0]).toEqual({ id: "doctor.preflight", status: "failed", detail: "statfs failed" });
-		expect(steps).toHaveLength(8);
+		expect(steps).toHaveLength(9);
 	});
 });
 
@@ -270,6 +273,55 @@ describe("the template", () => {
 			}),
 		);
 		expect(byId(steps, "doctor.template")).toEqual({ id: "doctor.template", status: "failed", detail: "e2b missing" });
+	});
+});
+
+describe("doctor.vmon-admin", () => {
+	test("an answering cluster view is ok, with the machine count", async () => {
+		const step = byId(await collectDoctor(fakeDeps()), "doctor.vmon-admin");
+		expect(step).toEqual({ id: "doctor.vmon-admin", status: "ok", detail: "the service reads vibemon's cluster view (1 machines)" });
+	});
+
+	test("no admin token is skipped, with setup as the fix", async () => {
+		const step = byId(
+			await collectDoctor(
+				fakeDeps({
+					clusterProbe: async () => {
+						throw new VmonAdminUnavailable("cannot read the vibemon admin token file /config/vmon-admin.token");
+					},
+				}),
+			),
+			"doctor.vmon-admin",
+		);
+		expect(step).toEqual({ id: "doctor.vmon-admin", status: "skipped", detail: "this server has no vibemon admin token yet", fix: "omp-cloud setup" });
+	});
+
+	test("a refused token is failed and names the file", async () => {
+		const step = byId(
+			await collectDoctor(
+				fakeDeps({
+					clusterProbe: async () => {
+						throw new VmonAdminRefused("/config/vmon-admin.token");
+					},
+				}),
+			),
+			"doctor.vmon-admin",
+		);
+		expect(step).toEqual({ id: "doctor.vmon-admin", status: "failed", detail: "vibemon refused the admin token in /config/vmon-admin.token", fix: "omp-cloud setup" });
+	});
+
+	test("any other error is failed with the vmon unit's status as the fix", async () => {
+		const step = byId(
+			await collectDoctor(
+				fakeDeps({
+					clusterProbe: async () => {
+						throw new Error("connect ECONNREFUSED");
+					},
+				}),
+			),
+			"doctor.vmon-admin",
+		);
+		expect(step).toEqual({ id: "doctor.vmon-admin", status: "failed", detail: "vibemon did not answer: connect ECONNREFUSED", fix: "systemctl status vmon" });
 	});
 });
 

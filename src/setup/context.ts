@@ -14,6 +14,7 @@ import { type SelfCommand, selfCommand } from "./root";
 import type { Reporter, StepResult } from "./steps";
 import { systemChecks } from "./system";
 import type { Config } from "../config";
+import { type ClusterView, VmonAdmin, VmonAdminUnavailable } from "../vmon/admin";
 
 /** The functions of the plugin, login and root slices, so a test can answer for them. */
 export interface SetupParts {
@@ -23,6 +24,8 @@ export interface SetupParts {
 	loginStep(options: LoginStepOptions): Promise<StepResult[]>;
 	systemChecks(run: CommandRunner): Promise<StepResult[]>;
 	templateProbe(config: Config, key: string, ompVersion: string): Promise<TemplateProbe>;
+	/** The cluster as vibemon's admin API reports it, read with `vmon.adminTokenFile`; throws `VmonAdminUnavailable` when the service has no token. */
+	clusterProbe(config: Config): Promise<ClusterView>;
 }
 
 export interface SetupContext {
@@ -58,6 +61,12 @@ async function askYesNo(question: string): Promise<boolean> {
 	}
 }
 
+async function clusterProbe(config: Config): Promise<ClusterView> {
+	const tokenFile = config.vmon.adminTokenFile;
+	if (tokenFile === undefined) throw new VmonAdminUnavailable("service.json has no vmon.adminTokenFile");
+	return (await VmonAdmin.open({ url: config.vmon.url, tokenFile })).cluster();
+}
+
 /** The real context for this process; `reporter` is the caller's (it knows whether stdout is the `--json` report). */
 export function realContext(reporter: Reporter): SetupContext {
 	return {
@@ -76,7 +85,7 @@ export function realContext(reporter: Reporter): SetupContext {
 		confirm: askYesNo,
 		hostOmp,
 		stdout: (text) => void process.stdout.write(text),
-		parts: { ensurePlugin, removePlugin, pluginChecks, loginStep, systemChecks, templateProbe: realTemplateProbe },
+		parts: { ensurePlugin, removePlugin, pluginChecks, loginStep, systemChecks, templateProbe: realTemplateProbe, clusterProbe },
 	};
 }
 
