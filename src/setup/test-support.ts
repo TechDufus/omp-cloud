@@ -10,16 +10,22 @@ import type { HealthDeps } from "./health";
 import type { PluginOptions } from "./plugin";
 import type { SelfCommand } from "./root";
 import { Reporter, type StepResult } from "./steps";
-import type { SystemReport } from "./system";
+import { NODE_ENV_FILE, type SystemReport } from "./system";
 
 export const TEST_VERSION = "0.5.1";
 export const TEST_USER = "tester";
 export const OMP = { path: "/opt/omp/bin/omp", version: MIN_OMP_VERSION };
 
+/** A valid `node.env`: the server a node follows. */
+export const NODE_ENV_TEXT = "SERVER_URL=https://192.168.1.20:8443\nSERVER_PIN=sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n";
+
 export interface RecordedCall {
 	argv: string[];
 	options: CommandOptions | undefined;
 }
+
+/** The vibemon admin token the fake root part reports. */
+export const ADMIN_TOKEN = "admin-token-from-etc-vmon-env";
 
 /** What the root part prints, as the report line SetupSystem's `parseSystemReport` accepts. */
 export function rootReport(over: Partial<SystemReport> = {}): SystemReport {
@@ -28,6 +34,7 @@ export function rootReport(over: Partial<SystemReport> = {}): SystemReport {
 		steps: [{ id: "system.vmon", status: "ok", detail: "vibemon is at the pin" }],
 		team: { slug: "omp-cloud", created: true },
 		key: "e2b_freshly_minted_key",
+		adminToken: ADMIN_TOKEN,
 		netPool: "172.20.0.0/16",
 		linger: true,
 		...over,
@@ -41,6 +48,8 @@ export interface HostScript {
 	sudoCached: boolean;
 	/** Exit code of `systemd-analyze` and the like is always 0; this is the one command that can fail on demand. */
 	failing: string[];
+	/** Answers that win over everything below (ssh, ip, curl, systemctl…): the first defined result is used; undefined falls through. */
+	respond?: (argv: readonly string[]) => Partial<CommandResult> | undefined;
 }
 
 export interface FakeHost {
@@ -60,6 +69,8 @@ export function fakeHost(script: Partial<HostScript> = {}): FakeHost {
 		calls.push({ argv: [...argv], options });
 		const line = argv.join(" ");
 		const result: CommandResult = { code: 0, stdout: "", stderr: "" };
+		const scripted = full.respond?.(argv);
+		if (scripted !== undefined) return { ...result, ...scripted };
 		if (full.failing.some((prefix) => line.startsWith(prefix))) return { ...result, code: 1, stderr: "failed on purpose" };
 		if (line === "sudo -n true") return { ...result, code: full.sudoCached ? 0 : 1 };
 		if (argv[0] === "sudo" && argv.includes("setup") && argv.includes("system")) {
@@ -138,6 +149,9 @@ export interface RigOptions {
 	missingTools?: string[];
 	omp?: typeof OMP | null;
 	pluginSteps?: StepResult[];
+	/** This machine is a vibemon node: `/etc/omp-cloud/node.env` exists and holds `nodeEnv`. */
+	node?: boolean;
+	nodeEnv?: string;
 }
 
 /** A context whose home is `dir`: every file setup writes lands there, every command is `host`'s. */
@@ -180,6 +194,7 @@ export async function rig(dir: string, options: RigOptions = {}): Promise<TestRi
 		},
 		systemChecks: async () => [{ id: "system.check.vmon", status: "ok", detail: "vmon is healthy" }],
 		templateProbe: async () => ({ name: async () => "omp-agent:18.12.3-abc", exists: async () => true }),
+		clusterProbe: async () => ({ localId: "server", nodes: [], history: [] }),
 	};
 	const ctx: SetupContext = {
 		run: host.run,
@@ -197,8 +212,8 @@ export async function rig(dir: string, options: RigOptions = {}): Promise<TestRi
 			arch: "x64",
 			uid: options.uid ?? 1000,
 			which: (name) => (missing.has(name) ? null : `/usr/bin/${name}`),
-			exists: async () => true,
-			readText: async (path) => (path === "/proc/1/comm" ? "systemd\n" : "MemTotal: 16777216 kB\n"),
+			exists: async (path) => path !== NODE_ENV_FILE || options.node === true,
+			readText: async (path) => (path === "/proc/1/comm" ? "systemd\n" : path === NODE_ENV_FILE ? (options.nodeEnv ?? NODE_ENV_TEXT) : "MemTotal: 16777216 kB\n"),
 			freeBytes: async () => 200 * 1024 ** 3,
 			portInUse: async () => false,
 			httpsStatus: async () => 200,

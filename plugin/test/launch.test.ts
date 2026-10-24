@@ -305,7 +305,9 @@ describe("model refusal", () => {
 
 	test("on a paired device the refusal sends the owner to the server, with its host and the provider, and never to /cloud login", async () => {
 		const s = await setup();
-		const built = input(s, { model: { provider: "openai-codex", id: "gpt-5" } }, realClient());
+		const real = realClient();
+		const device = { id: "d1", name: "laptop", access: "threads" } as const;
+		const built = input(s, { model: { provider: "openai-codex", id: "gpt-5" } }, { createThread: (...a) => real.createThread(...a), whoami: async o => ({ ...(await real.whoami(o)), device }) });
 
 		const err = await launchHandoff({ ...built.input, serverHost: "10.0.20.24" }).catch((e: unknown) => e);
 
@@ -1272,7 +1274,7 @@ describe("launchBatch", () => {
 			expect(done.outcomes[0]).toMatchObject({ ok: false, error: { code: "not_configured", message: "this cloud has no model login yet", hint: "ask the user to run /cloud login openai" } });
 			expect(c.sent).toEqual([]);
 
-			const device = await batch(s, batchClient({ who: { ...who, modelPatterns: [], models: [] } }), [{ task: "a" }], { ...session, origin: "tool", withSession: false, serverHost: "10.0.20.24" });
+			const device = await batch(s, batchClient({ who: { ...who, modelPatterns: [], models: [], device: { id: "d1", name: "laptop", access: "threads" } } }), [{ task: "a" }], { ...session, origin: "tool", withSession: false, serverHost: "10.0.20.24" });
 			expect(device.outcomes[0]).toMatchObject({ ok: false, error: { code: "not_configured", hint: "ask the user to run omp-cloud login openai on 10.0.20.24 (over ssh: ssh -t <user>@10.0.20.24 '~/.local/bin/omp-cloud login openai')" } });
 		});
 

@@ -10,6 +10,7 @@ import { Settings } from "../settings";
 import { Store } from "../store";
 import type { NewThread, TurnResult } from "../store/types";
 import type { SandboxMetricsSample, SandboxSummary } from "../vmon";
+import { type Capacity, capacityReport } from "../vmon/capacity";
 import { type App, createApp } from "./app";
 import { OWNER, tokenSha256 } from "./auth";
 import type { VmInspector } from "./dashboard-routes";
@@ -95,7 +96,7 @@ afterEach(async () => {
 	await rm(dir, { recursive: true, force: true });
 });
 
-async function appWith(extra: { dashboard?: boolean; vmon?: boolean } = {}): Promise<App> {
+async function appWith(extra: { dashboard?: boolean; vmon?: boolean; capacity?: () => Promise<Capacity> } = {}): Promise<App> {
 	const gateway = { served: ["anthropic"], providers: () => ["anthropic"], refresh: async (): Promise<void> => undefined };
 	return createApp({
 		store,
@@ -109,6 +110,7 @@ async function appWith(extra: { dashboard?: boolean; vmon?: boolean } = {}): Pro
 		dashboard: extra.dashboard === false ? undefined : { origin: ORIGIN, upstream: ORIGIN, sessions: new DashboardSessions() },
 		vmon: extra.vmon === true ? vmon : undefined,
 		vmonDashboard: VMON_DASHBOARD,
+		capacity: extra.capacity,
 	});
 }
 
@@ -320,5 +322,39 @@ describe("GET /api/v1/events", () => {
 		expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
 		ctrl.abort();
 		await reader.cancel();
+	});
+});
+
+describe("GET /api/v1/capacity", () => {
+	const THREADS_TOKEN = "ompd_threads-device-token-for-the-capacity-tests-0123";
+	const node = { id: "n1", hostname: "omp-server", addrs: ["192.168.1.20"], alive: true, status: "ready", version: "0.4.0", server: true, cpus: 16, vcpusUsed: 4, memoryMB: 65536, memoryUsedMB: 8192, diskFreeMB: 100_000, sandboxes: 2 };
+	const capacity = capacityReport({
+		cluster: { localId: "n1", nodes: [node], history: [] },
+		team: { slug: "omp-cloud", running: 2, paused: 1, maxConcurrentSandboxes: 32 },
+		clusterAddress: undefined,
+		user: "owner",
+	});
+	const read = async (): Promise<Capacity> => capacity;
+
+	test("answers every caller with the capacity, a threads-only device included", async () => {
+		store.addDevice({ id: "dev1", owner: OWNER, name: "laptop", platform: "linux", tokenSha256: tokenSha256(THREADS_TOKEN), pairedFrom: "code", access: "threads" });
+		const app = await appWith({ capacity: read });
+		for (const token of [TOKEN, THREADS_TOKEN]) {
+			const res = await call(app, "GET", "/api/v1/capacity", token);
+			expect(res.status).toBe(200);
+			const body = await bodyOf(res);
+			expect(body).toEqual(JSON.parse(JSON.stringify(capacity)));
+			expect(body.available).toBe(true);
+			expect(body.vcpus).toEqual({ total: 16, allocated: 4 });
+		}
+	});
+
+	test("is not found without a capacity reader, and needs a token", async () => {
+		const app = await appWith();
+		const res = await call(app, "GET", "/api/v1/capacity");
+		expect(res.status).toBe(404);
+		expect(await bodyOf(res)).toEqual({ error: "not found" });
+		expect((await call(await appWith({ capacity: read }), "GET", "/api/v1/capacity", null)).status).toBe(401);
+		expect((await call(await appWith({ capacity: read }), "POST", "/api/v1/capacity")).status).toBe(404);
 	});
 });

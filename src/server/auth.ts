@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { DEVICE_TOKEN_PREFIX, sha256Hex } from "../pairing/secrets";
 import type { Store } from "../store";
-import { deviceActor } from "../store/types";
+import { type DeviceAccess, deviceActor } from "../store/types";
 
 /** The principal of the one API token (v1 has one user, the owner). */
 export const OWNER = "owner";
@@ -9,10 +9,15 @@ export const OWNER = "owner";
 /** Who is calling: the owner's token, or a paired device that acts for the owner. `principal` owns threads either way. */
 export type Caller =
 	| { kind: "owner"; principal: "owner"; device: null }
-	| { kind: "device"; principal: "owner"; device: { id: string; name: string } };
+	| { kind: "device"; principal: "owner"; device: { id: string; name: string; access: DeviceAccess } };
 
 /** The owner token's caller: also what a dashboard session is. */
 export const OWNER_CALLER: Caller = { kind: "owner", principal: OWNER, device: null };
+
+/** Whether `caller` may do everything the owner token can: the owner token itself, or a device with full access. */
+export function hasFullAccess(caller: Caller): boolean {
+	return caller.device === null || caller.device.access === "full";
+}
 
 /** What a turn, a stop or an answer records of the caller: `owner`, or `device:<id>`. */
 export function actorOf(caller: Caller): string {
@@ -60,7 +65,9 @@ export function authenticate(req: Request, options: AuthOptions): Caller | null 
 	if (token === null) return null;
 	if (token.startsWith(DEVICE_TOKEN_PREFIX)) {
 		const device = options.store.deviceByTokenSha256(sha256Hex(token));
-		return device === null ? null : { kind: "device", principal: OWNER, device: { id: device.id, name: device.name } };
+		return device === null
+			? null
+			: { kind: "device", principal: OWNER, device: { id: device.id, name: device.name, access: device.access } };
 	}
 	if (options.deviceOnly) return null;
 	return tokenMatches(token, options.apiTokenSha256) ? OWNER_CALLER : null;

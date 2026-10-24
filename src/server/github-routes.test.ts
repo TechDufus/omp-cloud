@@ -13,12 +13,12 @@ import { Settings } from "../settings";
 import { Store } from "../store";
 import { type App, createApp } from "./app";
 import { OWNER_CALLER, tokenSha256, type Caller } from "./auth";
-import { OWNER_ONLY_MESSAGE } from "./scopes";
+import { FULL_ACCESS_MESSAGE } from "./scopes";
 
 const TOKEN = "s3cret-token";
 const ORIGIN = "http://omp.test";
 const MODELS = { default: "fake/fake-model", direct: ["fake"], gateway: { providers: () => ["anthropic"], refresh: async (): Promise<void> => undefined } };
-const DEVICE: Caller = { kind: "device", principal: "owner", device: { id: "dev1", name: "laptop" } };
+const DEVICE: Caller = { kind: "device", principal: "owner", device: { id: "dev1", name: "laptop", access: "threads" } };
 
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const CONVERSION = {
@@ -106,7 +106,7 @@ describe("owner only", () => {
 	])("a paired device gets 403 on %s %s", async (method, path) => {
 		const res = await send(method, path, {}, DEVICE);
 		expect(res.status).toBe(403);
-		expect(await bodyOf(res)).toEqual({ error: OWNER_ONLY_MESSAGE });
+		expect(await bodyOf(res)).toEqual({ error: FULL_ACCESS_MESSAGE });
 	});
 
 	test("no token is 401", async () => {

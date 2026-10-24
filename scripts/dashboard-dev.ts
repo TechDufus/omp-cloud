@@ -20,12 +20,24 @@
  * nothing is scripted.
  *
  * Nothing here touches the real service, its config, its data or vmon.
+ *
+ * The fake vmon also answers vibemon's admin API (`GET /admin/cluster` and `/admin/teams`, `X-Admin-Token: dev-admin`): a
+ * three-machine cluster (the server, a laptop, and a second laptop that has gone quiet and runs an older vibemon), so the
+ * VMs page's Capacity card has data; the fake broker lists a few provider logins for the Logins page. The store carries
+ * `service.name: home`.
+ *
+ * `--as=owner|full|threads` (or `OMP_CLOUD_DASHBOARD_DEV_AS`; default `owner`) picks who the dashboard is. `owner` is the
+ * owner's own session. `full` and `threads` seed a paired device with that access and start the plugin's
+ * `DashboardForwarder` in front of the service, as `/cloud dashboard` does on a paired machine; the printed sign-in link is
+ * the forwarder's, and the pages behave as they do for such a device (locked pages, read-only settings, an update pill with
+ * no button). With `--update` the forwarder relays through the update front, which then forwards to the API listener.
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { UpdateMode, UpdateStatus } from "../src/dashboard/client/api";
 import { isRecord } from "../src/guards";
+import { DashboardForwarder } from "../plugin/src/forwarder";
 import { newDeviceToken, randomBase64Url, sha256Hex } from "../src/pairing/secrets";
 import { tokenSha256 } from "../src/server/auth";
 import { Store } from "../src/store";
@@ -40,6 +52,9 @@ const READY_TIMEOUT_MS = 90_000;
 const REPO_ROOT = resolve(import.meta.dir, "..");
 /** `--showcase` (or OMP_CLOUD_DASHBOARD_DEV_SHOWCASE=1) swaps in the README screenshots' data set, `scripts/showcase/profile.ts`, and runs the service through `scripts/showcase/service.ts` so the capture script can stage live events. */
 const SHOWCASE = process.argv.includes("--showcase") || process.env.OMP_CLOUD_DASHBOARD_DEV_SHOWCASE === "1";
+/** What the dashboard signs in as: the owner (the default), or a paired device with full or threads-only access, through the plugin's forwarder. */
+const AS_CHOICES = ["owner", "full", "threads"] as const;
+type DevAs = (typeof AS_CHOICES)[number];
 const AUTHOR = SHOWCASE_AUTHOR;
 const SEED_HOME = SHOWCASE_HOME;
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
@@ -608,35 +623,44 @@ interface SeedSummary {
 	threads: number;
 	devices: number;
 	sandboxes: FakeSandbox[];
+	/** The paired device the dashboard signs in as (`--as=full|threads`); its token stays in this process. */
+	deviceToken: string | null;
 }
 
 // ---- seeding
 
-function seed(dataDir: string): SeedSummary {
+function seed(dataDir: string, signedInAs: DevAs): SeedSummary {
 	// The store reads this clock: every row is stamped with the instant the story says it happened.
 	const clock = { ms: NOW };
 	const store = Store.open({ dataDir, now: () => new Date(clock.ms) });
 	try {
-		const devices = seedDevices(store, clock);
+		const { paired: devices, ownToken } = seedDevices(store, clock, signedInAs);
 		seedSettings(store, clock, devices[0]?.id ?? "");
+		store.putMcpCredential(MCP_URL, "{}", new Date(NOW - 5 * 24 * HOUR).toISOString());
 		const sandboxes: FakeSandbox[] = [];
 		for (const spec of THREADS) {
 			const sandbox = seedThread(store, clock, spec, devices[0]?.id ?? "", devices[1]?.id ?? "");
 			if (sandbox !== null) sandboxes.push(sandbox);
 		}
 		clock.ms = NOW;
-		return { threads: THREADS.length, devices: devices.length, sandboxes };
+		return { threads: THREADS.length, devices: devices.length, sandboxes, deviceToken: ownToken };
 	} finally {
 		store.close();
 	}
 }
 
-/** Pairs two devices through the store's own offer flow, leaves one request waiting for approval and one offer open. */
-function seedDevices(store: Store, clock: { ms: number }): { id: string; name: string }[] {
+/**
+ * Pairs the devices through the store's own offer flow, leaves one request waiting for approval and one offer open. For
+ * `--as=full|threads` the last device is the dashboard's own, with that access, and its token comes back (the harness gives it
+ * to the forwarder; it is never printed).
+ */
+function seedDevices(store: Store, clock: { ms: number }, signedInAs: DevAs): { paired: { id: string; name: string }[]; ownToken: string | null } {
 	const paired: { id: string; name: string }[] = [];
+	let ownToken: string | null = null;
 	const people = [
-		{ name: "macbook-pro", platform: "darwin", address: "192.168.1.42", agoH: 216, seenAgoMin: 12 },
-		{ name: "work-laptop", platform: "linux", address: "10.20.4.18", agoH: 70, seenAgoMin: 190 },
+		{ name: "macbook-pro", platform: "darwin", address: "192.168.1.42", agoH: 216, seenAgoMin: 12, access: "full" as const, own: false },
+		{ name: "work-laptop", platform: "linux", address: "10.20.4.18", agoH: 70, seenAgoMin: 190, access: "threads" as const, own: false },
+		...(signedInAs === "owner" ? [] : [{ name: "dev-laptop", platform: "linux", address: "127.0.0.1", agoH: 2, seenAgoMin: 1, access: signedInAs, own: true }]),
 	];
 	for (const person of people) {
 		clock.ms = NOW - person.agoH * HOUR;
@@ -655,11 +679,13 @@ function seedDevices(store: Store, clock: { ms: number }): { id: string; name: s
 			address: person.address,
 		});
 		clock.ms += 40_000;
-		if (store.decideOffer(offerId, "approve") !== "done") throw new Error("seed: the pairing offer was not approved");
+		if (store.decideOffer(offerId, "approve", person.access) !== "done") throw new Error("seed: the pairing offer was not approved");
 		clock.ms += 2000;
-		const claimed = store.claimOffer(requestId, sha256Hex(requestSecret), { id: randomBase64Url(9), tokenSha256: sha256Hex(newDeviceToken()) });
+		const token = newDeviceToken();
+		const claimed = store.claimOffer(requestId, sha256Hex(requestSecret), { id: randomBase64Url(9), tokenSha256: sha256Hex(token) });
 		if (claimed.kind !== "created") throw new Error("seed: the pairing request did not create a device");
 		paired.push(claimed.device);
+		if (person.own) ownToken = token;
 		clock.ms = NOW - person.seenAgoMin * MIN;
 		store.touchDevice(claimed.device.id, person.address, 0);
 	}
@@ -679,8 +705,11 @@ function seedDevices(store: Store, clock: { ms: number }): { id: string; name: s
 	});
 	clock.ms = NOW - MIN;
 	store.createOffer({ id: randomBase64Url(9), owner: OWNER, secretSha256: sha256Hex(randomBase64Url(16)), ttlMs: 30 * MIN, maxOpen: 3 });
-	return paired;
+	return { paired, ownToken };
 }
+
+/** The MCP server the cloud is signed in to, for the Logins page. */
+const MCP_URL = "https://mcp.example.com/mcp";
 
 /** Settings changed over the last five days by the owner and a device, with a reset and an import. */
 function seedSettings(store: Store, clock: { ms: number }, deviceId: string): void {
@@ -692,6 +721,7 @@ function seedSettings(store: Store, clock: { ms: number }, deviceId: string): vo
 			action,
 		);
 	};
+	change(130, OWNER, "set", [{ key: "service.name", value: "home" }]);
 	change(120, OWNER, "set", [{ key: "git.push", value: "ask" }, { key: "git.branch", value: "omp-cloud/{thread}" }]);
 	change(96, OWNER, "set", [{ key: "git.protected", value: ["main", "master", "release/*", "prod/*"] }]);
 	change(70, deviceActor(deviceId), "set", [{ key: "policy.spend.turnUSD", value: 5 }]);
@@ -889,7 +919,88 @@ function resultOf(threadId: string, model: string, turn: TurnSpec, metrics: Turn
 
 // ---- fake vmon and gateway
 
-/** The slice of vmon's e2b-compatible API that `Vmon.list` and `Vmon.metrics` call: the sandbox list and per-sandbox metrics. */
+/** The admin token the fake vibemon wants and `vmon.adminTokenFile` holds. */
+const ADMIN_TOKEN = "dev-admin";
+/** The broker token the fake broker wants and `broker.tokenFile` holds. */
+const BROKER_TOKEN = "dev-broker";
+const SAMPLE_MS = 5000;
+const SAMPLES = 720;
+
+/**
+ * The bodies of vibemon's admin API the Capacity card reads: `GET /admin/cluster` (the server and a laptop, ready, plus a
+ * second laptop that went quiet and runs an older vibemon: 24 vCPUs and 96 GiB alive, 3 machines, 2 ready) with an hour of
+ * 5 s samples, and `GET /admin/teams` (the `omp-cloud` team, limit 32, running what the seed left running).
+ */
+function adminAnswer(pathname: string, sandboxes: FakeSandbox[]): unknown {
+	const running = sandboxes.filter(sandbox => sandbox.state === "running");
+	const paused = sandboxes.filter(sandbox => sandbox.state === "paused");
+	if (pathname === "/admin/teams") {
+		return [{ teamID: "team-omp-cloud", slug: "omp-cloud", limits: { maxConcurrentSandboxes: 32 }, sandboxes: { running: running.length, paused: paused.length } }];
+	}
+	// The running VMs alternate between the two ready machines, the server first.
+	const share = (offset: number) => {
+		const own = running.filter((_, index) => index % 2 === offset);
+		return {
+			vcpusUsed: own.reduce((total, sandbox) => total + sandbox.cpuCount, 0),
+			memoryUsedMB: own.reduce((total, sandbox) => total + sandbox.memoryMB, 0),
+			sandboxes: own.length,
+		};
+	};
+	const server = share(0);
+	const laptop = share(1);
+	const now = Date.now();
+	const history = Array.from({ length: SAMPLES }, (_, index) => {
+		// An hour of load that swells and settles, ending exactly at what is allocated now.
+		const level = index === SAMPLES - 1 ? 1 : 0.6 + 0.4 * Math.sin(index / 55);
+		return {
+			ts: now - (SAMPLES - 1 - index) * SAMPLE_MS,
+			nodes: 2,
+			sandboxes: Math.round((server.sandboxes + laptop.sandboxes) * level),
+			builds: 0,
+			vcpus: 24,
+			vcpusUsed: Math.round((server.vcpusUsed + laptop.vcpusUsed) * level),
+			memoryMB: 65536 + 32768,
+			memoryUsedMB: Math.round((server.memoryUsedMB + laptop.memoryUsedMB) * level),
+			starts: 0,
+		};
+	});
+	return {
+		clusterID: "dev-cluster",
+		localID: "m-server",
+		members: [
+			{
+				id: "m-server",
+				hostname: "omp-server",
+				addrs: ["192.168.1.20"],
+				state: "alive",
+				roles: { node: true, driver: true },
+				version: "0.4.0",
+				node: { status: "ready", cpus: 16, memoryMB: 65536, diskFreeMB: 412_160, ...server },
+			},
+			{
+				id: "m-laptop-1",
+				hostname: "laptop-1",
+				addrs: ["192.168.1.31"],
+				state: "alive",
+				roles: { node: true, driver: false },
+				version: "0.4.0",
+				node: { status: "ready", cpus: 8, memoryMB: 32768, diskFreeMB: 180_224, ...laptop },
+			},
+			{
+				id: "m-laptop-2",
+				hostname: "laptop-2",
+				addrs: ["192.168.1.32"],
+				state: "suspect",
+				roles: { node: true, driver: false },
+				version: "0.3.2",
+				node: { status: "ready", cpus: 8, memoryMB: 32768, diskFreeMB: 90_112, vcpusUsed: 0, memoryUsedMB: 0, sandboxes: 0 },
+			},
+		],
+		history,
+	};
+}
+
+/** The slice of vmon's e2b-compatible API that `Vmon.list` and `Vmon.metrics` call (the sandbox list and per-sandbox metrics), and the admin API's cluster and team reads. */
 function startFakeVmon(sandboxes: FakeSandbox[]): Bun.Server<undefined> {
 	const notFound = (): Response => Response.json({ code: 404, message: "not found" }, { status: 404 });
 	return Bun.serve({
@@ -897,6 +1008,10 @@ function startFakeVmon(sandboxes: FakeSandbox[]): Bun.Server<undefined> {
 		port: 0,
 		fetch(req) {
 			const { pathname } = new URL(req.url);
+			if (pathname === "/admin/cluster" || pathname === "/admin/teams") {
+				if (req.headers.get("x-admin-token") !== ADMIN_TOKEN) return Response.json({ error: "unauthorized" }, { status: 401 });
+				return Response.json(adminAnswer(pathname, sandboxes));
+			}
 			if (req.method !== "GET") return notFound();
 			if (pathname === "/v2/sandboxes") {
 				return Response.json(
@@ -933,6 +1048,34 @@ function startFakeVmon(sandboxes: FakeSandbox[]): Bun.Server<undefined> {
 					diskTotal: 20 * 1024 ** 3,
 				},
 			]);
+		},
+	});
+}
+
+/** The omp auth broker's two reads the Logins list makes: its credentials (Anthropic's two logins are 26 and 33 days old, so one is due to renew and one overdue) and the disabled ones. */
+function startFakeBroker(): Bun.Server<undefined> {
+	const authorizedAgo = (days: number): number => NOW - days * 24 * HOUR;
+	return Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch(req) {
+			if (req.headers.get("authorization") !== `Bearer ${BROKER_TOKEN}`) return Response.json({ error: "unauthorized" }, { status: 401 });
+			const { pathname } = new URL(req.url);
+			if (pathname === "/v1/snapshot") {
+				return Response.json({
+					credentials: [
+						{ provider: "anthropic", credential: { type: "oauth", email: "ada@example.com", authorizedAt: authorizedAgo(26) } },
+						{ provider: "anthropic", credential: { type: "oauth", email: "ada@work.example", authorizedAt: authorizedAgo(33) } },
+						{ provider: "openai-codex", credential: { type: "oauth", email: "ada@example.com", accountId: "acct_6f1a", authorizedAt: authorizedAgo(3) } },
+						{ provider: "github-copilot", credential: { type: "oauth", authorizedAt: authorizedAgo(12) } },
+						{ provider: "openrouter", credential: { type: "api_key" } },
+					],
+				});
+			}
+			if (pathname === "/v1/credentials/disabled") {
+				return Response.json({ disabled: [{ provider: "google-gemini-cli", email: "ada@gmail.example", cause: "the refresh token was revoked" }] });
+			}
+			return Response.json({ error: "not found" }, { status: 404 });
 		},
 	});
 }
@@ -1197,6 +1340,16 @@ function scriptedUpdate(): UpdateScript | null {
 	return script;
 }
 
+/** Who the dashboard signs in as: `--as=owner|full|threads` or `OMP_CLOUD_DASHBOARD_DEV_AS`, the owner by default. */
+function devAs(): DevAs {
+	const flag = process.argv.find(arg => arg.startsWith("--as="));
+	const requested = flag === undefined ? process.env.OMP_CLOUD_DASHBOARD_DEV_AS : flag.slice("--as=".length);
+	if (requested === undefined || requested === "") return "owner";
+	const chosen = AS_CHOICES.find(candidate => candidate === requested);
+	if (chosen === undefined) throw new Error(`--as: unknown identity "${requested}"; use one of ${AS_CHOICES.join(", ")}`);
+	return chosen;
+}
+
 async function main(): Promise<void> {
 	const root = mkdtempSync(join(tmpdir(), "omp-cloud-dashboard-dev-"));
 	const cleanups: (() => void | Promise<void>)[] = [() => rmSync(root, { recursive: true, force: true })];
@@ -1220,24 +1373,34 @@ async function main(): Promise<void> {
 	try {
 		const dataDir = join(root, "data");
 		console.log("dashboard-dev: seeding the store");
-		const summary = seed(dataDir);
+		const signedInAs = devAs();
+		const summary = seed(dataDir, signedInAs);
 
 		const vmon = startFakeVmon(summary.sandboxes);
 		cleanups.push(() => vmon.stop(true));
 		const gateway = startFakeGateway();
 		cleanups.push(() => gateway.stop(true));
+		const broker = startFakeBroker();
+		cleanups.push(() => broker.stop(true));
 
 		const token = randomBase64Url(32);
 		const tokenFile = join(root, "owner.token");
 		writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
 		const vmonKeyFile = join(root, "vmon.key");
 		writeFileSync(vmonKeyFile, "dashboard-dev-key\n", { mode: 0o600 });
+		const adminTokenFile = join(root, "vmon-admin.token");
+		writeFileSync(adminTokenFile, `${ADMIN_TOKEN}\n`, { mode: 0o600 });
+		const clusterSecretFile = join(root, "vmon-cluster.secret");
+		writeFileSync(clusterSecretFile, "dashboard-dev-cluster-secret\n", { mode: 0o600 });
+		const brokerTokenFile = join(root, "broker.token");
+		writeFileSync(brokerTokenFile, `${BROKER_TOKEN}\n`, { mode: 0o600 });
 
 		const apiPort = freePort();
 		const dashboardPort = freePort();
 		const apiUrl = `http://127.0.0.1:${apiPort}`;
 		const update = scriptedUpdate();
-		const front = update === null ? null : startFront(dashboardPort, update);
+		// A paired device talks to the API listener with its bearer token, so the front forwards there instead of to the dashboard listener.
+		const front = update === null ? null : startFront(signedInAs === "owner" ? dashboardPort : apiPort, update);
 		if (front !== null) cleanups.push(() => front.stop(true));
 		const configFile = join(root, "service.json");
 		writeFileSync(
@@ -1246,9 +1409,17 @@ async function main(): Promise<void> {
 				listen: `127.0.0.1:${apiPort}`,
 				apiTokenSha256: tokenSha256(token),
 				dataDir,
-				vmon: { url: `http://127.0.0.1:${portOf(vmon)}`, keyFile: vmonKeyFile, template: "omp-agent" },
+				vmon: {
+					url: `http://127.0.0.1:${portOf(vmon)}`,
+					keyFile: vmonKeyFile,
+					template: "omp-agent",
+					team: "omp-cloud",
+					adminTokenFile,
+					clusterAddress: "192.168.1.20",
+					clusterSecretFile,
+				},
 				gateway: { url: `http://127.0.0.1:${portOf(gateway)}`, clientsFile: join(root, "clients.json") },
-				broker: { url: "http://127.0.0.1:9", tokenFile: join(root, "broker.token") },
+				broker: { url: `http://127.0.0.1:${portOf(broker)}`, tokenFile: brokerTokenFile },
 				models: { default: DEFAULT_MODEL },
 				runner: { enabled: false },
 				dashboard: { listen: `127.0.0.1:${dashboardPort}` },
@@ -1292,8 +1463,26 @@ async function main(): Promise<void> {
 		await Promise.race([ready, startTimeout]);
 		clearTimeout(startTimer);
 
-		/** The sign-in link, on the front listener's address when the update is scripted. */
+		// `--as=full|threads`: the plugin's forwarder in front of the service, as on a paired machine; it signs in upstream with the seeded device's token.
+		const forwarder =
+			summary.deviceToken === null
+				? null
+				: DashboardForwarder.start({
+						upstream: (input, init) => fetch(input, init),
+						base: front === null ? apiUrl : `http://127.0.0.1:${portOf(front)}`,
+						token: summary.deviceToken,
+					});
+		if (forwarder !== null) cleanups.push(() => forwarder.stop());
+
+		/**
+		 * The sign-in link: the forwarder's code for a paired device (`--as=full|threads`), else the owner's, on the front
+		 * listener's address when the update is scripted.
+		 */
 		const signInLink = async (): Promise<{ url: string; expiresAt: string }> => {
+			if (forwarder !== null) {
+				const { code, expiresAt } = forwarder.mintCode();
+				return { url: `${forwarder.origin}/#${code}`, expiresAt };
+			}
 			const minted = await mintLink(apiUrl, token);
 			if (front === null) return minted;
 			const url = new URL(minted.url);
@@ -1305,13 +1494,18 @@ async function main(): Promise<void> {
 			update === null || front === null
 				? ""
 				: `  update:      scripted, starting as "${update.state}": type ${UPDATE_STATES.join(" | ")} to switch, fail to make the next apply fail and roll back;
-               or POST ${new URL("/__dev/update?state=ready", link.url).href}
+               or POST http://127.0.0.1:${portOf(front)}/__dev/update?state=ready
 `;
+		const asNote =
+			forwarder === null
+				? "the owner (a dashboard session, as on the server machine)"
+				: `a paired device with ${signedInAs === "full" ? "full" : "threads-only"} access, through the plugin's forwarder (${forwarder.origin})`;
 		console.log(`
 omp-cloud dashboard dev harness
   seeded:      ${summary.threads} threads, ${summary.devices} paired devices, ${summary.sandboxes.length} VMs (${summary.sandboxes.filter(s => s.state === "running").length} running)
   sign-in:     ${link.url}
                valid until ${link.expiresAt}, once; press Enter for a new link
+  as:          ${asNote}
 ${updateNote}  API:         ${apiUrl}
   owner token: ${tokenFile} (mode 0600)
   data:        ${root} (removed on exit)

@@ -3,16 +3,19 @@ import { CloudError, cloudAborted, cloudErrorFromStatus, mayHaveReached, toCloud
 import { isRecord } from "./guards";
 import type {
 	AnswerBody,
+	Capacity,
 	Claim,
 	CreatedThread,
 	DashboardLink,
 	Device,
+	DeviceAccess,
 	DiffStatResult,
 	DiffTextResult,
 	EventsPage,
 	FileResult,
 	HandoffRequest,
 	Login,
+	LoginList,
 	OfferState,
 	PairingOffer,
 	Question,
@@ -38,15 +41,18 @@ import type {
 import { refusePairingCode } from "./pairing";
 import {
 	parseApplied,
+	parseCapacity,
 	parseClaimed,
 	parseCreatedThread,
 	parseDashboardLink,
+	parseDeviceChanged,
 	parseDevices,
 	parseDiffStat,
 	parseEvent,
 	parseEventsPage,
 	parseFile,
 	parseLogin,
+	parseLoginList,
 	parseOfferState,
 	parsePairingOffer,
 	parseQuestion,
@@ -252,13 +258,17 @@ export class CloudClient {
 	/** The newest `whoami`: the limits for a 413 message, and the capabilities `requireCapability` checks. */
 	#whoami: Whoami | undefined;
 
-	constructor(url: string, token: string, fetchFn: FetchFn = (i, init) => fetch(i, init), tuning: ClientTuning = {}) {
+	/** What a 401 tells the user about where the refused token came from; undefined for the generic hint. */
+	readonly #unauthorizedHint: string | undefined;
+
+	constructor(url: string, token: string, fetchFn: FetchFn = (i, init) => fetch(i, init), tuning: ClientTuning = {}, unauthorizedHint?: string) {
 		this.#base = url.replace(/\/+$/, "");
 		this.#token = token;
 		this.#fetch = fetchFn;
 		this.#backoffMs = tuning.backoffMs ?? DEFAULT_BACKOFF_MS;
 		this.#random = tuning.random ?? Math.random;
 		this.#maxRetryAfterSec = tuning.maxRetryAfterSec ?? MAX_RETRY_AFTER_SEC;
+		this.#unauthorizedHint = unauthorizedHint;
 	}
 
 	/** One attempt: the response, or a CloudError. */
@@ -281,7 +291,7 @@ export class CloudClient {
 		} catch {
 			// non-JSON error body: keep the status line
 		}
-		const error = cloudErrorFromStatus(res.status, message, retryAfterSec(res.headers));
+		const error = cloudErrorFromStatus(res.status, message, retryAfterSec(res.headers), this.#unauthorizedHint);
 		if (res.status === 413 && call.limitOf !== undefined) {
 			const limits = this.#whoami?.limits;
 			const bytes = call.limitOf === "message" ? (limits?.maxMessageBytes ?? 32768) : call.limitOf === "answer" ? (limits?.maxAnswerBytes ?? 4000) : limits?.maxUploadBytes;
@@ -368,17 +378,27 @@ export class CloudClient {
 		return who;
 	}
 
-	/** `GET /update`: the owner's view of the updater (a device is refused with `forbidden`; a service without updates answers `not_found`). */
+	/** `GET /update`: what the updater is doing and why; every caller may read it (a service without updates answers `not_found`). */
 	async updateStatus(opts: CallOptions = {}): Promise<UpdateStatus> {
 		return this.#call("GET", "/api/v1/update", parseUpdateStatus, opts);
 	}
 
-	/** `POST /update/check`: asks the service to look for a newer release now. Owner only. */
+	/** `GET /capacity` (capability `capacity`): the vibemon cluster as one pool. Check the capability first: an older service answers `not_found`. */
+	async capacity(opts: CallOptions = {}): Promise<Capacity> {
+		return this.#call("GET", "/api/v1/capacity", parseCapacity, opts);
+	}
+
+	/** `GET /logins` (capability `logins.list`): what the cloud is logged in to, accounts blank without full access. Check the capability first. */
+	async logins(opts: CallOptions = {}): Promise<LoginList> {
+		return this.#call("GET", "/api/v1/logins", parseLoginList, opts);
+	}
+
+	/** `POST /update/check`: asks the service to look for a newer release now. Needs full access. */
 	async checkUpdate(opts: CallOptions = {}): Promise<void> {
 		await this.#send("POST", "/api/v1/update/check", { signal: opts.signal, mode: "retry" });
 	}
 
-	/** `POST /update/apply`: installs the staged release and restarts the service; the version being installed. Owner only; `conflict` when nothing is ready or an apply runs. Never retried: a lost answer is `ambiguous_outcome`. */
+	/** `POST /update/apply`: installs the staged release and restarts the service; the version being installed. Needs full access; `conflict` when nothing is ready or an apply runs. Never retried: a lost answer is `ambiguous_outcome`. */
 	async applyUpdate(opts: CallOptions = {}): Promise<string> {
 		return this.#call("POST", "/api/v1/update/apply", parseApplied, { signal: opts.signal });
 	}
@@ -395,6 +415,11 @@ export class CloudClient {
 		if (fresh.capabilities.includes(capability)) return;
 		const service = fresh.service.version === "" ? `a service of unknown version (api ${fresh.service.api})` : `service ${fresh.service.version} (api ${fresh.service.api})`;
 		throw new CloudError({ code: "version_skew", message: `the cloud is ${service} and does not support ${capability}`, retriable: false, outcomeKnown: true, hint: UPGRADE_HINT });
+	}
+
+	/** Whether the service serves `capability`, from the last `whoami` (fetched when there is none yet). */
+	async #serves(capability: string, opts: CallOptions): Promise<boolean> {
+		return (this.#whoami ?? (await this.whoami(opts))).capabilities.includes(capability);
 	}
 
 	/** The newest threads, one page of the service's default size. */
@@ -627,7 +652,7 @@ export class CloudClient {
 		return this.#call("POST", "/api/v1/dashboard/links", parseDashboardLink, opts);
 	}
 
-	/** Owner only: opens a pairing offer. The code it carries exists nowhere else; show it on the overlay and nowhere that persists. */
+	/** Needs full access: opens a pairing offer. The code it carries exists nowhere else; show it on the overlay and nowhere that persists. */
 	async createPairingOffer(opts: CallOptions = {}): Promise<PairingOffer> {
 		return this.#call("POST", "/api/v1/pairing/offers", parsePairingOffer, { ...opts, json: {} });
 	}
@@ -636,9 +661,13 @@ export class CloudClient {
 		return this.#call("GET", `/api/v1/pairing/offers/${encodeURIComponent(id)}`, parseOfferState, opts);
 	}
 
-	/** Approves the device that redeemed the offer; a `conflict` CloudError (409) when nothing waits for approval. */
-	async approvePairing(id: string, opts: CallOptions = {}): Promise<void> {
-		await this.#send("POST", `/api/v1/pairing/offers/${encodeURIComponent(id)}/approve`, opts);
+	/**
+	 * Approves the device that redeemed the offer, giving it `access`; a `conflict` CloudError (409) when nothing waits for approval.
+	 * A service without `devices.access` takes no body and gives every device threads-only access.
+	 */
+	async approvePairing(id: string, access: DeviceAccess, opts: CallOptions = {}): Promise<void> {
+		const json = (await this.#serves("devices.access", opts)) ? { access } : undefined;
+		await this.#send("POST", `/api/v1/pairing/offers/${encodeURIComponent(id)}/approve`, { ...opts, json });
 	}
 
 	async declinePairing(id: string, opts: CallOptions = {}): Promise<void> {
@@ -662,6 +691,14 @@ export class CloudClient {
 	/** Revokes a device (the owner any, a device only itself); its token stops working and its open streams end. */
 	async revokeDevice(id: string, opts: CallOptions = {}): Promise<Revoked> {
 		return this.#call("DELETE", `/api/v1/devices/${encodeURIComponent(id)}`, parseRevoked, opts);
+	}
+
+	/** `PATCH /devices/{id}` (`devices.access`; needs full access): sets the device's access level, effective from its next request. */
+	async setDeviceAccess(id: string, access: DeviceAccess, opts: CallOptions = {}): Promise<Device> {
+		if (!(await this.#serves("devices.access", opts))) {
+			throw new CloudError({ code: "version_skew", message: "this omp-cloud service has no device access levels; update it", retriable: false, outcomeKnown: true, hint: UPGRADE_HINT });
+		}
+		return this.#call("PATCH", `/api/v1/devices/${encodeURIComponent(id)}`, parseDeviceChanged, { ...opts, json: { access } });
 	}
 
 	/** Public call: redeems an offer's code for a request to wait on. No token is sent. */

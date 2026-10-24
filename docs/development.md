@@ -30,7 +30,7 @@ mise run typecheck         # tsc --noEmit, service, dashboard client and website
 mise run smoke             # curl the API of a fresh service, no VM
 mise run scenario          # API end to end on local vmon, fake model
 mise run plugin:scenario   # real local omp + plugin installed from the release bundle through a marketplace → fresh service on local vmon
-mise run parity:capture    # native-parity harness on a real omp, fake model, throwaway service on local vmon (~5 min); `-- --assert`, `--only native|ansi`, `--no-cloud`
+mise run parity:capture    # native-parity harness on a real omp, fake model, throwaway service on local vmon (~14 min: two passes of ~7); `-- --assert`, `--only native|ansi`, `--no-cloud`
 mise run update:scenario   # the updater against real compiled releases and a throwaway user unit (no VM, no model; minutes)
 mise run install:scenario  # the installer on a clean Debian 13 VM (nested KVM; tens of minutes); `-- --no-nested` for a host whose nested KVM kills the VM
 mise run cleanhost -- list # clean Debian 13 VMs on the local vmon (team omp-cloud-test): create, exec, put, get, destroy, list, template, nested
@@ -38,9 +38,12 @@ mise run release:build     # dist/: the two executables, sha256 sidecars, releas
 mise run infra:up          # omp-cloud setup --checkout: this checkout as the service host (one sudo prompt); infra:down is uninstall --checkout
 mise run serve             # service in the foreground (stop the omp-cloud unit first)
 mise run dashboard:dev     # the dashboard on seeded data (temp service, runner off); prints a sign-in link
+mise run dashboard:dev -- --as=full     # sign in as a paired device with full access (`--as=threads`: threads-only; default `owner`)
 mise run site:build        # the website into site/dist/; fails on a broken internal link or anchor, a doc missing from site/nav.ts or a README section the landing reads
 mise run site:dev          # the website at http://127.0.0.1:4321, rebuilt on change; `-- --base /omp-cloud/` serves it under a subpath
 ```
+
+`dashboard:dev` signs in as the owner by default. `--as=full` or `--as=threads` (or `OMP_CLOUD_DASHBOARD_DEV_AS`) instead seeds a paired device with that access and starts the plugin's `DashboardForwarder` in front of the service, as `/cloud dashboard` does on a paired machine; the printed sign-in link is the forwarder's, and the dashboard then behaves as it does for such a device (the header badge, locked pages, read-only Settings, an update pill without a button). With `--update=<state>` the forwarder relays through the update front. The fake vmon also answers vibemon's admin API (`GET /admin/cluster` and `/admin/teams` with `X-Admin-Token: dev-admin`: a server and a laptop that are ready and a second laptop that went quiet on an older vibemon, so 24 vCPUs, 96 GiB, `2 of 3 ready` and `vibemon versions differ`), and a fake broker lists provider logins, so the VMs page's Capacity card and the Logins page's Logged in table have data. `service.json` there names `vmon.clusterAddress` `192.168.1.20`, so the Add a machine footer shows a join command. Pairing from the Devices page needs the remote listener, which the harness does not run.
 
 `update:scenario` sets `update.ompUnits` to `[]` in its throwaway database, so its apply never queries or restarts a broker or gateway unit. It refuses to start when an apply could reach live units in another way (a vibemon that is not the pin, an apply already running).
 

@@ -1,6 +1,7 @@
 import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Store } from "../store";
+import type { DeviceAccess } from "../store/types";
 import { newDeviceToken, randomBase64Url, sha256Hex } from "./secrets";
 
 /** What `pairDevice` takes; everything has a default. */
@@ -11,6 +12,8 @@ export interface PairDeviceOptions {
 	address?: string;
 	/** The device token; a fresh one by default. */
 	token?: string;
+	/** What the approval grants; `threads` by default. */
+	access?: DeviceAccess;
 }
 
 /** A device paired through the store's own offer, redeem, approve and claim steps. */
@@ -39,7 +42,7 @@ export function pairDevice(store: Store, options: PairDeviceOptions = {}): Paire
 		address: options.address ?? "10.0.0.9",
 	});
 	if (redeemed.kind !== "ok") throw new Error("pairDevice: redeem failed");
-	if (store.decideOffer(offerId, "approve") !== "done") throw new Error("pairDevice: approve failed");
+	if (store.decideOffer(offerId, "approve", options.access) !== "done") throw new Error("pairDevice: approve failed");
 	const claimed = store.claimOffer(requestId, sha256Hex(requestSecret), { id: randomBase64Url(9), tokenSha256: sha256Hex(token) });
 	if (claimed.kind !== "created") throw new Error("pairDevice: claim failed");
 	return { id: claimed.device.id, name: claimed.device.name, token };

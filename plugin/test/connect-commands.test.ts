@@ -55,6 +55,16 @@ describe("parseCommand: pair, devices, disconnect", () => {
 		for (const bad of ["devices revoke", "devices remove x", "devices x"]) expect(parseCommand(bad)).toEqual({ kind: "error", message: USAGE_DEVICES });
 	});
 
+	test("devices access takes a name (quoted when it holds spaces) or an id prefix, then full or threads", () => {
+		const access = (target: string, value: "full" | "threads"): Parsed => ({ kind: "devices", revoke: undefined, access: { target, value } });
+		expect(parseCommand("devices access phone threads")).toEqual(access("phone", "threads"));
+		expect(parseCommand('devices access "My Phone" full')).toEqual(access("My Phone", "full"));
+		expect(parseCommand("devices access My Phone full")).toEqual(access("My Phone", "full"));
+		expect(parseCommand("devices access devzzz threads")).toEqual(access("devzzz", "threads"));
+		expect(parseCommand("DEVICES ACCESS phone full")).toEqual(access("phone", "full"));
+		for (const bad of ["devices access", "devices access phone", "devices access phone admin", "devices access full"]) expect(parseCommand(bad)).toEqual({ kind: "error", message: USAGE_DEVICES });
+	});
+
 	test("disconnect takes only --force", () => {
 		expect(parseCommand("disconnect")).toEqual({ kind: "disconnect", force: false });
 		expect(parseCommand("disconnect --force")).toEqual({ kind: "disconnect", force: true });
@@ -93,11 +103,13 @@ describe("completion and help", () => {
 		expect(completions("connect --replace --r", [])).toBeNull();
 		expect(completions("disconnect ", [])?.map(c => c.value)).toEqual(["disconnect --force"]);
 		expect(completions("devices r", [])?.map(c => c.value)).toEqual(["devices revoke"]);
+		expect(completions("devices ", [])?.map(c => c.value)).toEqual(["devices revoke", "devices access"]);
+		expect(completions("devices a", [])?.map(c => c.value)).toEqual(["devices access"]);
 		expect(completions("devices revoke ph", [])).toBeNull();
 	});
 
 	test("help lists each with its usage", () => {
 		const help = helpLines().join("\n");
-		for (const usage of ["/cloud connect [<code|host>] [--name n]", "/cloud pair", "/cloud devices [revoke <name>]", "/cloud disconnect [--force]"]) expect(help).toContain(usage);
+		for (const usage of ["/cloud connect [<code|host>] [--name n]", "/cloud pair", "/cloud devices [revoke|access]", "/cloud disconnect [--force]"]) expect(help).toContain(usage);
 	});
 });

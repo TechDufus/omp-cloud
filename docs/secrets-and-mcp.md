@@ -17,7 +17,7 @@ A secret is an environment variable the service puts in the VM of each thread wh
 
 ### Add one
 
-On the dashboard's **Secrets** page (Access group, hotkey `k`): a table of the secrets (name, repositories, kind, when updated), a form to add or replace one, and Delete behind a confirmation. Choosing a row to replace fills the name and repositories; the value is never shown, here or anywhere, so you type it again. Or with the owner token, through [`PUT /api/v1/secrets/{name}`](api.md#secrets-and-mcp-servers):
+On the dashboard's **Secrets** page (Access group, hotkey `k`): a table of the secrets (name, repositories, kind, when updated), a form to add or replace one, and Delete behind a confirmation. Choosing a row to replace fills the name and repositories; the value is never shown, here or anywhere, so you type it again. A device with threads-only access sees `Needs full access` there instead. Or with the owner token, through [`PUT /api/v1/secrets/{name}`](api.md#secrets-and-mcp-servers):
 
 ```json
 {"value": "!op read op://Private/npm/token", "repos": ["github.com/acme/*"]}

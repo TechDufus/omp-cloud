@@ -16,6 +16,11 @@
 # started (`omp-cloud setup` does that on a first install). Sandbox VMMs keep running over a restart (KillMode=process); vmon
 # adopts them again within its 60 s grace period.
 #
+# Node role: a machine whose unit file ($unit_dir/$unit.service) runs `vmon ... --role node ...` (`omp-cloud setup node`) is
+# a node. A node-only vmon opens no health listener, so there the unit counts as healthy once `systemctl is-active` has held
+# for 10 consecutive 1 s checks within the health wait, and the rollback works the same way. The role is read from the unit
+# file, never from the caller.
+#
 # Output: progress on stderr; the last stdout line is JSON, {"ok": true, "version": "<tag>"} or {"ok": false, "error": "..."}.
 # Exit status: 0 on success, 1 on failure, 2 for a bad invocation.
 #
@@ -27,11 +32,12 @@
 #   VMON_INSTALL_HEALTH_URL  health URL (default http://127.0.0.1:3000/health)
 #   VMON_INSTALL_HEALTH_WAIT seconds to wait for health (default 60)
 #   VMON_INSTALL_SYSTEMCTL   systemctl executable (default systemctl)
+#   VMON_INSTALL_UNIT_DIR    directory holding the unit file that decides the role (default /etc/systemd/system)
 set -euo pipefail
 
 TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'
 RELEASE_BASE='https://github.com/stencil-hq/vibemon/releases/download'
-OVERRIDES=(VMON_INSTALL_ROOT VMON_INSTALL_UNIT VMON_INSTALL_BASE VMON_INSTALL_HEALTH_URL VMON_INSTALL_HEALTH_WAIT VMON_INSTALL_SYSTEMCTL)
+OVERRIDES=(VMON_INSTALL_ROOT VMON_INSTALL_UNIT VMON_INSTALL_BASE VMON_INSTALL_HEALTH_URL VMON_INSTALL_HEALTH_WAIT VMON_INSTALL_SYSTEMCTL VMON_INSTALL_UNIT_DIR)
 
 # Prints the final JSON line for `error` (one line, JSON-escaped) and stops.
 json_string() {
@@ -54,7 +60,7 @@ log() { echo "vmon-install: $*" >&2; }
 
 [ "$#" -eq 1 ] || fail "usage: vmon-install <tag> (for example v0.4.0)" 2
 tag="$1"
-[ "${#tag}" -le 32 ] && [[ "$tag" =~ $TAG_PATTERN ]] || fail "the tag must look like v0.4.0, got: $tag" 2
+if [ "${#tag}" -gt 32 ] || ! [[ "$tag" =~ $TAG_PATTERN ]]; then fail "the tag must look like v0.4.0, got: $tag" 2; fi
 version="${tag#v}"
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -69,6 +75,7 @@ if [ "$(id -u)" -eq 0 ]; then
 	health_url=http://127.0.0.1:3000/health
 	health_wait=60
 	systemctl_bin=systemctl
+	unit_dir=/etc/systemd/system
 	protocols='=https'
 else
 	[ -n "${VMON_INSTALL_ROOT:-}" ] || fail "this helper must run as root (through sudo)" 2
@@ -78,9 +85,13 @@ else
 	health_url="${VMON_INSTALL_HEALTH_URL:-http://127.0.0.1:3000/health}"
 	health_wait="${VMON_INSTALL_HEALTH_WAIT:-60}"
 	systemctl_bin="${VMON_INSTALL_SYSTEMCTL:-systemctl}"
+	unit_dir="${VMON_INSTALL_UNIT_DIR:-/etc/systemd/system}"
 	protocols='=http,https'
 fi
 case "$health_wait" in '' | *[!0-9]*) fail "VMON_INSTALL_HEALTH_WAIT must be a number of seconds" 2 ;; esac
+# A node is a machine whose vmon unit runs with `--role node` (`omp-cloud setup node`); anything else is a server.
+role=server
+if grep -qF -- ' --role node ' "$unit_dir/$unit.service" 2>/dev/null; then role=node; fi
 
 case "$(uname -m)" in
 	x86_64) arch=x86_64 ;;
@@ -101,6 +112,7 @@ exec 9>"$parent/.$name-install.lock"
 flock -n 9 || fail "another vmon install is running"
 
 work=""
+# shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap (SC2317 before shellcheck 0.11, SC2329 from 0.11)
 cleanup() { [ -z "$work" ] || rm -rf "$work"; }
 trap cleanup EXIT
 work="$(mktemp -d "$parent/.$name-install.XXXXXX")"
@@ -114,13 +126,24 @@ healthy() {
 	[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$health_url" 2>/dev/null || true)" = 204 ]
 }
 
+# A node-only vmon opens no listener, so a node is healthy when its unit stays active for 10 consecutive 1 s checks.
 wait_healthy() {
-	local waited=0
+	local waited=0 streak=0
 	while [ "$waited" -lt "$health_wait" ]; do
-		healthy && return 0
+		if [ "$role" = node ]; then
+			if unit_active; then
+				streak=$((streak + 1))
+				[ "$streak" -ge 10 ] && return 0
+			else
+				streak=0
+			fi
+		else
+			healthy && return 0
+		fi
 		sleep 1
 		waited=$((waited + 1))
 	done
+	[ "$role" = node ] && return 1
 	healthy
 }
 
@@ -193,7 +216,7 @@ src_vmon="$work/x/vmon-x86_64-unknown-linux-musl/vmon"
 src_agent="$work/x/vmon-assets-x86_64/vmon-agent-$arch"
 src_kernel="$work/x/vmon-assets-x86_64/vmon-kernel-$arch"
 for file in "$src_vmon" "$src_agent" "$src_kernel"; do
-	[ -f "$file" ] && [ ! -L "$file" ] || fail "the release lacks ${file#"$work/x/"}"
+	if [ ! -f "$file" ] || [ -L "$file" ]; then fail "the release lacks ${file#"$work/x/"}"; fi
 done
 
 new="$work/new"
@@ -232,7 +255,11 @@ failure=""
 if ! restart_unit; then
 	failure="restarting $unit failed"
 elif ! wait_healthy; then
-	failure="vmon $tag did not answer $health_url with 204 within ${health_wait} s"
+	if [ "$role" = node ]; then
+		failure="vmon $tag did not stay active for 10 s within ${health_wait} s"
+	else
+		failure="vmon $tag did not answer $health_url with 204 within ${health_wait} s"
+	fi
 fi
 if [ -z "$failure" ]; then
 	printf '{"ok": true, "version": "%s"}\n' "$tag"

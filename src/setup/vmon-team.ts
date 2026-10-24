@@ -20,7 +20,7 @@ export const TEAM_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 /** Reserved by vmon's template tooling. */
 export const RESERVED_TEAM = "system";
 
-const CLUSTER_URL = "http://127.0.0.1:7947";
+const DEFAULT_CLUSTER_URL = "http://127.0.0.1:7947";
 const ADMIN_TIMEOUT_MS = 60_000;
 /** `vmon admin` works only once a driver has started: right after the health check it may still fail for a moment. */
 const LIST_ATTEMPTS = 5;
@@ -80,10 +80,11 @@ export function limitArgs(maxSandboxes: number): string[] {
 	];
 }
 
-/** The value of `VMON_CLUSTER_SECRET` in the text of `/etc/vmon/env`; null when it has none. */
-export function clusterSecretOf(envFile: string): string | null {
+/** The value of variable `name` in the text of `/etc/vmon/env`; null when it has none. */
+export function envValueOf(envFile: string, name: string): string | null {
+	const pattern = new RegExp(`^\\s*(?:export\\s+)?${name}=(.*)$`);
 	for (const line of envFile.split("\n")) {
-		const match = /^\s*(?:export\s+)?VMON_CLUSTER_SECRET=(.*)$/.exec(line);
+		const match = pattern.exec(line);
 		const value = match?.[1]?.trim().replace(/^(["'])(.*)\1$/, "$2");
 		if (value !== undefined && value !== "") return value;
 	}
@@ -99,6 +100,8 @@ export interface EnsureTeamOptions {
 	/** Mint a key even when the team exists (`--mint-key`, `--migrate-team`). */
 	mintKey: boolean;
 	sleep: (ms: number) => Promise<void>;
+	/** vmon's cluster listener: loopback unless the server takes other vibemon machines, when vmon listens on its LAN address instead. */
+	clusterUrl?: string;
 }
 
 export interface TeamOutcome {
@@ -120,7 +123,7 @@ function failure(id: string, what: string, result: CommandResult, fix: string): 
 export async function ensureTeam(options: EnsureTeamOptions): Promise<TeamOutcome> {
 	const { runner, slug, maxSandboxes } = options;
 	const admin = (args: readonly string[]): Promise<CommandResult> =>
-		runner([VMON_BINARY, "admin", "--cluster-url", CLUSTER_URL, ...args], { env: { VMON_CLUSTER_SECRET: options.secret }, timeoutMs: ADMIN_TIMEOUT_MS });
+		runner([VMON_BINARY, "admin", "--cluster-url", options.clusterUrl ?? DEFAULT_CLUSTER_URL, ...args], { env: { VMON_CLUSTER_SECRET: options.secret }, timeoutMs: ADMIN_TIMEOUT_MS });
 	const steps: StepResult[] = [];
 	const outcome: TeamOutcome = { steps, team: { slug, created: false } };
 	const logs = "journalctl -u vmon -n 50 --no-pager";
@@ -173,6 +176,6 @@ export async function ensureTeam(options: EnsureTeamOptions): Promise<TeamOutcom
 		steps.push(failure("system.team.limits", `vmon admin set-limits ${slug} failed`, limits, logs));
 		return outcome;
 	}
-	steps.push({ id: "system.team.limits", status: "ok", detail: `limits of ${slug}: ${maxSandboxes} running sandboxes, 8 vCPUs, 8192 MiB, 20480 MiB disk, 24 h` });
+	steps.push({ id: "system.team.limits", status: "ok", detail: `limits of ${slug}: ${maxSandboxes} running sandboxes, 4 builds at once, and per VM at most 8 vCPUs, 8192 MiB of memory and 20480 MiB of disk; 24 h per run` });
 	return outcome;
 }

@@ -126,6 +126,7 @@ describe("get and list", () => {
 			["vm.packages", "string[]"],
 			["vm.setup", "string[]"],
 			["lifecycle.archiveAfterDays", "number"],
+			["service.name", "string"],
 			["update.mode", "enum"],
 			["update.feed", "string"],
 			["update.token", "string"],

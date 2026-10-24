@@ -1,7 +1,9 @@
+import type { Server } from "bun";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ANTHROPIC_OAUTH_GRANT_TTL_MS } from "@oh-my-pi/pi-ai/oauth/anthropic";
 import { LoginError, type LoginController, type LoginFlow, LoginManager, type LoginResult, type LoginView, ompLoginFlow } from "./login";
 
 const TOKEN = "broker-token-s3cret-do-not-leak";
@@ -466,5 +468,137 @@ describe("ompLoginFlow", () => {
 		expect(ompLoginFlow.has("anthropic")).toBe(true);
 		expect(ompLoginFlow.has("openai-codex")).toBe(true);
 		expect(ompLoginFlow.has("not-a-provider")).toBe(false);
+	});
+});
+
+describe("LoginManager.list", () => {
+	const never: LoginFlow = { has: () => false, run: () => Promise.reject(new Error("unused")) };
+	let snapshotBody: unknown;
+	let disabledStatus: number;
+	let disabledBody: unknown;
+	let seen: { path: string; authorization: string | null }[];
+	let listing: Server<undefined>;
+	let listDir: string;
+	let listTokenFile: string;
+
+	beforeAll(() => {
+		listDir = mkdtempSync(join(tmpdir(), "omp-cloud-login-list-"));
+		listTokenFile = join(listDir, "token");
+		writeFileSync(listTokenFile, `${TOKEN}\n`);
+		listing = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch(req) {
+				const path = new URL(req.url).pathname;
+				seen.push({ path, authorization: req.headers.get("authorization") });
+				if (path === "/v1/snapshot") return Response.json(snapshotBody);
+				if (path === "/v1/credentials/disabled") return Response.json(disabledBody, { status: disabledStatus });
+				return Response.json({ error: "not found" }, { status: 404 });
+			},
+		});
+	});
+
+	afterAll(() => {
+		void listing.stop(true);
+		rmSync(listDir, { recursive: true, force: true });
+	});
+
+	beforeEach(() => {
+		seen = [];
+		disabledStatus = 200;
+		disabledBody = { generatedAt: 1, disabled: [] };
+		snapshotBody = {
+			generation: 3,
+			credentials: [
+				{ id: 2, provider: "openai-codex", identityKey: null, credential: { type: "oauth", access: "a", refresh: "__remote__", expires: 1, email: "z@example.com", authorizedAt: Date.parse("2026-09-01T00:00:00Z") } },
+				{ id: 1, provider: "anthropic", identityKey: null, credential: { type: "oauth", access: "a", refresh: "__remote__", expires: 1, email: "owner@example.com", authorizedAt: Date.parse("2026-10-01T00:00:00Z") } },
+				{ id: 3, provider: "openrouter", identityKey: null, credential: { type: "api_key", key: "sk-secret" } },
+				{ id: 4, provider: "anthropic", identityKey: null, credential: { type: "oauth", access: "a", refresh: "__remote__", expires: 1, orgName: "Acme" } },
+			],
+		};
+	});
+
+	function lister(url = `http://127.0.0.1:${listing.port}`, file = listTokenFile): LoginManager {
+		return new LoginManager({ brokerUrl: url, brokerTokenFile: file, flow: never });
+	}
+
+	test("lists the broker's credentials by provider then account, Anthropic's with the date to renew by (30 days after the login)", async () => {
+		const { logins, brokerError } = await lister().list(true);
+		expect(brokerError).toBe("");
+		expect(logins).toEqual([
+			{ provider: "anthropic", kind: "provider", account: "Acme", loggedInAt: "", renewBy: "", disabled: false, note: "" },
+			{ provider: "anthropic", kind: "provider", account: "owner@example.com", loggedInAt: "2026-10-01T00:00:00.000Z", renewBy: "2026-10-31T00:00:00.000Z", disabled: false, note: "" },
+			{ provider: "openai-codex", kind: "provider", account: "z@example.com", loggedInAt: "2026-09-01T00:00:00.000Z", renewBy: "", disabled: false, note: "" },
+			{ provider: "openrouter", kind: "provider", account: "API key", loggedInAt: "", renewBy: "", disabled: false, note: "" },
+		]);
+		expect(ANTHROPIC_OAUTH_GRANT_TTL_MS).toBe(30 * 24 * 3600 * 1000);
+		expect(seen.map((request) => request.path).sort()).toEqual(["/v1/credentials/disabled", "/v1/snapshot"]);
+		expect(seen.every((request) => request.authorization === `Bearer ${TOKEN}`)).toBe(true);
+		expect(JSON.stringify(logins)).not.toContain("sk-secret");
+	});
+
+	test("a disabled credential is listed with its cause as the note, and the MCP servers come last", async () => {
+		disabledBody = { generatedAt: 1, disabled: [{ id: 9, provider: "anthropic", type: "oauth", email: "gone@example.com", cause: "invalid_grant: Refresh token expired" }] };
+		const { logins } = await lister().list(true, ["https://mcp.example.com/sse", "not a url"]);
+		expect(logins.map((entry) => [entry.provider, entry.account, entry.disabled])).toEqual([
+			["anthropic", "Acme", false],
+			["anthropic", "gone@example.com", true],
+			["anthropic", "owner@example.com", false],
+			["openai-codex", "z@example.com", false],
+			["openrouter", "API key", false],
+			["mcp:https://mcp.example.com/sse", "mcp.example.com", false],
+			["mcp:not a url", "not a url", false],
+		]);
+		expect(logins.find((entry) => entry.disabled)).toEqual({
+			provider: "anthropic",
+			kind: "provider",
+			account: "gone@example.com",
+			loggedInAt: "",
+			renewBy: "",
+			disabled: true,
+			note: "invalid_grant: Refresh token expired",
+		});
+		expect(logins.filter((entry) => entry.kind === "mcp")).toHaveLength(2);
+	});
+
+	test("without full access every account is blank", async () => {
+		disabledBody = { generatedAt: 1, disabled: [{ id: 9, provider: "anthropic", type: "oauth", email: "gone@example.com", cause: "x" }] };
+		const { logins } = await lister().list(false, ["https://mcp.example.com/sse"]);
+		expect(logins).toHaveLength(6);
+		expect(logins.every((entry) => entry.account === "")).toBe(true);
+		expect(logins.map((entry) => entry.provider)).toContain("mcp:https://mcp.example.com/sse");
+	});
+
+	test("a broker without the disabled endpoint (404) is not an error", async () => {
+		disabledStatus = 404;
+		const { logins, brokerError } = await lister().list(true);
+		expect(brokerError).toBe("");
+		expect(logins).toHaveLength(4);
+	});
+
+	test("a broker that is down gives brokerError and still the MCP rows; the token never appears", async () => {
+		const { logins, brokerError } = await lister("http://127.0.0.1:1").list(true, ["https://mcp.example.com/sse"]);
+		expect(brokerError).toStartWith("the cloud broker did not answer: ");
+		expect(brokerError).not.toContain(TOKEN);
+		expect(logins.map((entry) => entry.provider)).toEqual(["mcp:https://mcp.example.com/sse"]);
+	});
+
+	test("a broker error status, a missing token file and an empty one are brokerErrors too", async () => {
+		disabledStatus = 500;
+		expect((await lister().list(true)).brokerError).toBe("the cloud broker did not answer: HTTP 500 from /v1/credentials/disabled");
+		const missing = await lister(undefined, join(listDir, "absent")).list(true);
+		expect(missing.brokerError).toStartWith("the cloud broker did not answer: ");
+		expect(missing.logins).toEqual([]);
+		const empty = join(listDir, "empty");
+		writeFileSync(empty, "\n");
+		expect((await lister(undefined, empty).list(true)).brokerError).toBe("the cloud broker did not answer: the broker token file is empty");
+	});
+
+	test("unexpected shapes are skipped, not fatal", async () => {
+		snapshotBody = { credentials: [null, "x", { provider: 3, credential: {} }, { provider: "p", credential: "no" }, { provider: "ok", credential: { type: "oauth", authorizedAt: "soon" } }] };
+		disabledBody = { disabled: "nope" };
+		const { logins, brokerError } = await lister().list(true);
+		expect(brokerError).toBe("");
+		expect(logins).toEqual([{ provider: "ok", kind: "provider", account: "", loggedInAt: "", renewBy: "", disabled: false, note: "" }]);
 	});
 });

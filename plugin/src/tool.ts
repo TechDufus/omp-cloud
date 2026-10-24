@@ -17,7 +17,7 @@ import * as ops from "./tool-ops";
 import { describeCall, describeResult } from "./tool-view";
 import type { FollowState, PullResult } from "./verbs";
 import type { WaitOptions, WaitResult } from "./wait";
-import type { Host, IrcReceiptKind, ServiceInfo, ServiceLimits, Spend, ThreadDetail, ThreadOrigin, ThreadPhase, TurnPart, Whoami } from "./types";
+import type { DeviceAccess, Host, IrcReceiptKind, ServiceInfo, ServiceLimits, Spend, ThreadDetail, ThreadOrigin, ThreadPhase, TurnPart, Whoami } from "./types";
 
 export const TOOL_NAME = "cloud";
 /** The name used when `cloud` is already taken by another tool. */
@@ -120,7 +120,7 @@ export interface ToolParams {
 /** The client calls the tool makes. */
 export type ToolClient = Pick<
 	CloudClient,
-	"whoami" | "settings" | "requireCapability" | "listThreadsPage" | "thread" | "turnText" | "eventsPage" | "diff" | "tree" | "file" | "sendMessage" | "answer" | "stop" | "deleteThread"
+	"whoami" | "settings" | "capacity" | "requireCapability" | "listThreadsPage" | "thread" | "turnText" | "eventsPage" | "diff" | "tree" | "file" | "sendMessage" | "answer" | "stop" | "deleteThread"
 >;
 
 export interface ToolSession {
@@ -277,7 +277,7 @@ export type OpDetails =
 	| {
 			op: "info";
 			service: ServiceInfo;
-			caller: { kind: "owner" | "device"; name: string };
+			caller: { kind: "owner" | "device"; name: string; access: DeviceAccess };
 			clouds: KnownCloud[];
 			active: ConnectionSource | null;
 			chosen: boolean;
@@ -360,7 +360,7 @@ export const TOOL_DESCRIPTION = [
 	"- pull {thread, apply?, into?, force?}: bring the result into the local repository: fetch (default: branch omp-cloud/<thread>, working tree untouched), merge (fast-forward the current branch; clean tree only) or worktree (a new checkout). Refuses a repository the thread did not start from unless force. A scratch thread is cloned into the new directory `into`.",
 	"- delete {thread | [threads], confirm: true, force?}: remove threads for good, only when the user asks; a thread you did not start in this session also needs force.",
 	"- preview {thread, port} | {stop: true, thread?, port?}: look at a web app or dev server a cloud agent runs in its VM (the agent starts it detached and names the port in its result). It opens that port of the thread's VM on a local address, `http://localhost:<lp>/`, and returns it: open it with your browser tool to screenshot, click or read the page. A paused VM wakes on the first request; WebSockets are not forwarded. `stop: true` ends every preview, or only those of `thread` (and `port`). A preview the user started with `/cloud preview` is reused, and `/cloud preview stop` ends yours too.",
-	"- info: the clouds this machine knows and the one this session uses, the service version, models, what cloud agents may do (policy, toolchain) and what happens to their work, limits and spend. use {cloud}: this session's cloud from now on (refused once it has threads). connect {target}: pair a cloud the user named, then this session uses it.",
+	"- info: the clouds this machine knows and the one this session uses, the service (its name, version, and who you are with which access), models, the cluster's capacity, the update mode, what cloud agents may do (policy, toolchain) and what happens to their work, limits and spend. use {cloud}: this session's cloud from now on (refused once it has threads). connect {target}: pair a cloud the user named, then this session uses it.",
 	"",
 	"`thread` is the 12-character id, an id suffix of 4 or more characters, the start of the thread's name, or the id of its running job. Errors carry a code (invalid, not_found, ambiguous_ref, conflict, forbidden, unauthorized, unreachable, timeout, ambiguous_outcome, too_large, rate_limited, unavailable, version_skew, …) and say whether retrying can help; `ambiguous_outcome` means the request may have taken effect: check with list or status before repeating it.",
 ].join("\n");

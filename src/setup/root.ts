@@ -31,6 +31,8 @@ export interface RootRequest {
 	mintKey?: boolean;
 	noLinger?: boolean;
 	migrateTeam?: boolean;
+	/** The LAN address vmon listens on for other vibemon machines; absent: this server is alone. */
+	clusterAddress?: string;
 }
 
 /** The arguments after `setup system`. */
@@ -44,6 +46,7 @@ export function rootArgs(request: RootRequest): string[] {
 		...(request.mintKey === true ? ["--mint-key"] : []),
 		...(request.noLinger === true ? ["--no-linger"] : []),
 		...(request.migrateTeam === true ? ["--migrate-team"] : []),
+		...(request.clusterAddress === undefined ? [] : ["--cluster-address", request.clusterAddress]),
 	];
 }
 

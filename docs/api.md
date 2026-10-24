@@ -8,14 +8,14 @@ Every response is JSON with `Cache-Control: no-store` and `X-Content-Type-Option
 
 ## Authentication
 
-The API listener accepts `Authorization: Bearer <token>` (the scheme is matched case-insensitively) where the token is the owner token or a device token; the remote listener accepts device tokens only ([Devices and pairing](#devices-and-pairing)); the dashboard listener has its own session cookie ([Dashboard](#dashboard)). The three listeners are defined under [Listeners](#listeners). The service config holds the owner token's SHA-256 (`apiTokenSha256`, lower-case hex of the UTF-8 token), compared in constant time. There is one user: both kinds of token act as the principal `owner`, and every thread records it as its owner. A device token (`ompd_…`) is looked up in the database on every request.
+The API listener accepts `Authorization: Bearer <token>` (the scheme is matched case-insensitively) where the token is the owner token or a device token; the remote listener accepts device tokens only ([Devices and pairing](#devices-and-pairing)); the dashboard listener has its own session cookie ([Dashboard](#dashboard)). The three listeners are defined under [Listeners](#listeners). The service config holds the owner token's SHA-256 (`apiTokenSha256`, lower-case hex of the UTF-8 token), compared in constant time. There is one user: both kinds of token act as the principal `owner`, and every thread records it as its owner. A device token (`ompd_…`) is looked up in the database on every request. A device has an [access level](#tokens-and-callers), `full` (everything the owner token can do) or `threads`.
 
 | Case | Response |
 |---|---|
 | Missing or wrong token, an unknown or revoked device token, the owner token on the remote listener | `401` `unauthorized` with `WWW-Authenticate: Bearer realm="omp-cloud"` |
-| A device token on an owner-only route ([the list](#tokens-and-callers)) | `403` `only the owner token can do this; it works on the server machine` |
+| A device with `threads` access on a route that needs full access ([the list](#tokens-and-callers)) | `403` `this device has threads-only access; a connection with full access can change that (Devices in the dashboard, or /cloud devices access <device> full)` |
 | Remote listener, source outside `remote.allow` or the gateway host | `403` `forbidden`, before any routing |
-| Unknown route or method | `404` `not found` (after authentication; a device's `403` on an owner-only path comes first) |
+| Unknown route or method | `404` `not found` (after authentication; a threads-only device's `403` on a path that needs full access comes first) |
 | Unknown, deleted, or another owner's thread | `404` `not found` |
 
 `GET /api/v1/health` and the two public pairing steps (`POST /api/v1/pairing/redeem` and `/claim`) need no token: [Health](#health), [Devices and pairing](#devices-and-pairing).
@@ -25,7 +25,7 @@ The API listener accepts `Authorization: Bearer <token>` (the scheme is matched 
 | Route | Purpose |
 |---|---|
 | `GET /api/v1/whoami` | `{user, service, capabilities, limits, spend, models, maxUploadBytes, defaultModel, modelPatterns, ompVersion, gitHosts, github, mcpProxy, mcpLogins, vms, threads, device, remote, update}`: [Version and capabilities](#version-and-capabilities) |
-| `GET /api/v1/health` | Public, no token: `200 {status, version, build, schema}`: [Health](#health) |
+| `GET /api/v1/health` | Public, no token: `200 {status, version, build, schema, vmon}`: [Health](#health) |
 | `POST /api/v1/threads` | Create a thread ([multipart, below](#creating-a-thread)); `201` with a thread summary, or `200` for a repeated `Idempotency-Key` ([below](#idempotent-create)) |
 | `GET /api/v1/threads` | `{threads: [summary], next, total}`, newest activity first, paged and filtered: [Listing threads](#listing-threads) |
 | `GET /api/v1/threads/{id}` | Thread detail |
@@ -40,31 +40,33 @@ The API listener accepts `Authorization: Bearer <token>` (the scheme is matched 
 | `GET /api/v1/threads/{id}/conversation` | The newest `omp session pack` archive (`application/x-tar`): the export the runner packs after every turn, else the uploaded archive; `404` `no conversation yet`. Every export of a thread carries the same session id, never the uploaded one's, and keeps the session header's timestamp, so the file `omp session unpack` writes keeps its name from one export to the next. Entry ids and timestamps are unchanged, so `omp stats` counts each request once however many local copies hold it |
 | `GET`, `POST`, … `/api/v1/threads/{id}/ports/{port}` and `…/ports/{port}/<path>` | Relay any method to the web server on `port` of the thread's VM and stream its answer back (bearer tokens only; the dashboard listener answers `404`): [Environments and previews](#environments-and-previews). Capability `threads.preview` |
 | `DELETE /api/v1/threads/{id}` | Delete the thread with its turns, events and files; `202 {"status": "deleting"}`. Every route answers `404` for it afterwards |
-| `POST /api/v1/logins` | Body `{"provider": "openai-codex"}`: start logging the cloud broker in to a provider, or, with `{"provider": "mcp:https://mcp.example.com/mcp"}`, the service in to an [MCP server](#secrets-and-mcp-servers); `201` with the [login](#logins). Every `/api/v1/logins` route is owner token only |
+| `POST /api/v1/logins` | Body `{"provider": "openai-codex"}`: start logging the cloud broker in to a provider, or, with `{"provider": "mcp:https://mcp.example.com/mcp"}`, the service in to an [MCP server](#secrets-and-mcp-servers); `201` with the [login](#logins). Every `/api/v1/logins` route but the list needs full access |
 | `GET /api/v1/logins/{id}` | The login |
 | `POST /api/v1/logins/{id}/input` | Body `{"input": "<redirect URL or code>"}`: finish a login whose provider redirects the browser to `localhost`; `200` with the login. `409` `login is not waiting for input` once it is done or failed |
 | `DELETE /api/v1/logins/{id}` | Cancel a waiting login; `202 {"status": "cancelled"}`. `409` `login is not waiting` once it is done or failed |
-| `GET /api/v1/settings` | `{settings: [setting]}` for every registered [setting](#settings); a device token may read it, only `PUT` is the owner's |
-| `PUT /api/v1/settings` | Owner token only. Body `{"settings": {"git.push": "ask", "git.protected": null}}`: set keys, `null` resetting one to its default; `200` as `GET`. `400` `unknown setting <key>` or the validator's message applies nothing; `400` `invalid JSON body: expected {"settings": {…}}` for any other body; `413` `request body is too large` over 64 KiB |
+| `GET /api/v1/logins` | `{logins: [entry], brokerError}`: what the cloud is logged in to, accounts blank without full access; open to every caller: [The login list](#the-login-list) |
+| `GET /api/v1/settings` | `{settings: [setting]}` for every registered [setting](#settings); every caller may read it, only `PUT` needs full access |
+| `PUT /api/v1/settings` | Needs full access. Body `{"settings": {"git.push": "ask", "git.protected": null}}`: set keys, `null` resetting one to its default; `200` as `GET`. `400` `unknown setting <key>` or the validator's message applies nothing; `400` `invalid JSON body: expected {"settings": {…}}` for any other body; `413` `request body is too large` over 64 KiB |
 | `GET /api/v1/settings/audit?before=<seq>&limit=<n>` | `{entries: [{seq, at, actor, action, key, old, new}], next}`, newest first, `limit` 1 to 200 (default 50); pass `next` as `before` for the following page, `0` at the end; `400` `before must be an integer from 0 to 9007199254740991` or `limit must be an integer from 1 to 200` |
 | `GET /api/v1/settings/export` | The stored values as nested YAML (`application/yaml`) |
-| `PUT /api/v1/settings/import?mode=replace\|merge` | Owner token only. Body: a YAML settings file, at most 64 KiB (`413` `request body is too large`); `200` as `GET`. `replace` (the default) resets every key the file does not name, `merge` keeps them. `400` `mode must be replace or merge`, `the body is not valid UTF-8`, `invalid YAML: <message>`, an unknown key or an invalid value applies nothing |
+| `PUT /api/v1/settings/import?mode=replace\|merge` | Needs full access. Body: a YAML settings file, at most 64 KiB (`413` `request body is too large`); `200` as `GET`. `replace` (the default) resets every key the file does not name, `merge` keeps them. `400` `mode must be replace or merge`, `the body is not valid UTF-8`, `invalid YAML: <message>`, an unknown key or an invalid value applies nothing |
 | `POST /api/v1/dashboard/links` | Mint a one-time sign-in link for the [dashboard](#dashboard); `201 {url, expiresAt}`, `404` `the dashboard is not configured` |
 | `GET /api/v1/events` | The global event stream of the owner's threads: [Dashboard](#dashboard) |
 | `GET /api/v1/usage?since=<ISO>` | The owner's spend per thread and day: [Dashboard](#dashboard) |
 | `GET /api/v1/vms` | The owner's VMs with live vmon data: [Dashboard](#dashboard) |
+| `GET /api/v1/capacity` | The vibemon cluster's capacity and what is allocated, open to every caller: [Capacity](#capacity) |
 | `POST /api/v1/pairing/redeem`, `POST /api/v1/pairing/claim` | Public pairing steps of a new device: [Devices and pairing](#devices-and-pairing) |
-| `POST /api/v1/pairing/offers`, `GET`, `DELETE /api/v1/pairing/offers/{id}`, `POST /api/v1/pairing/offers/{id}/approve`, `POST …/decline` | The owner's pairing offers (owner token only) |
-| `GET /api/v1/devices`, `DELETE /api/v1/devices/{id}` | List and revoke devices: [Devices](#devices) |
-| `GET /api/v1/update` | The service's own update state (owner token only): [Update routes](#update-routes) |
-| `POST /api/v1/update/check` | Check the release feed now (owner token only); `202 {}` |
-| `POST /api/v1/update/apply` | Install the staged release and restart the service (owner token only); `202 {"applying": {"version"}}`, `409` with a reason |
+| `POST /api/v1/pairing/offers`, `GET`, `DELETE /api/v1/pairing/offers/{id}`, `POST /api/v1/pairing/offers/{id}/approve`, `POST …/decline` | The owner's pairing offers (needs full access); `approve` takes the access the new device gets: [Pairing offers](#pairing-offers) |
+| `GET /api/v1/devices`, `PATCH /api/v1/devices/{id}`, `DELETE /api/v1/devices/{id}` | List devices, change a device's access level, revoke a device: [Devices](#devices) |
+| `GET /api/v1/update` | The service's own update state (every caller): [Update routes](#update-routes) |
+| `POST /api/v1/update/check` | Check the release feed now (needs full access); `202 {}` |
+| `POST /api/v1/update/apply` | Install the staged release and restart the service (needs full access); `202 {"applying": {"version"}}`, `409` with a reason |
 | `GET /api/v1/dashboard/static{path}` (also `HEAD`) | The dashboard page's static files for paired devices: [Dashboard static relay](#dashboard-static-relay) |
-| `GET /api/v1/github` | The connected GitHub App and where it is installed (owner token only): [GitHub, signing and pull requests](#github-signing-and-pull-requests) |
-| `POST /api/v1/github/manifest`, `POST /api/v1/github/conversions`, `DELETE /api/v1/github` | Connect the GitHub App through GitHub's manifest flow, and disconnect it (owner token only) |
-| `GET /api/v1/signing`, `POST /api/v1/signing/key`, `DELETE /api/v1/signing/key` | The service's SSH signing key: read it, make it, delete it (owner token only) |
-| `GET /api/v1/secrets` | The service's secrets, never their values (owner token only): [Secrets and MCP servers](#secrets-and-mcp-servers) |
-| `PUT /api/v1/secrets/{name}`, `DELETE /api/v1/secrets/{name}` | Set or replace a secret; delete one (owner token only) |
+| `GET /api/v1/github` | The connected GitHub App and where it is installed (needs full access): [GitHub, signing and pull requests](#github-signing-and-pull-requests) |
+| `POST /api/v1/github/manifest`, `POST /api/v1/github/conversions`, `DELETE /api/v1/github` | Connect the GitHub App through GitHub's manifest flow, and disconnect it (needs full access) |
+| `GET /api/v1/signing`, `POST /api/v1/signing/key`, `DELETE /api/v1/signing/key` | The service's SSH signing key: read it, make it, delete it (needs full access) |
+| `GET /api/v1/secrets` | The service's secrets, never their values (needs full access): [Secrets and MCP servers](#secrets-and-mcp-servers) |
+| `PUT /api/v1/secrets/{name}`, `DELETE /api/v1/secrets/{name}` | Set or replace a secret; delete one (needs full access) |
 
 The two downloads (`result` and `conversation`) support a single `Range` (`206` with `Content-Range`, `416` when unsatisfiable) and send `Accept-Ranges: bytes`.
 
@@ -244,12 +246,12 @@ Three routes read what a thread changed, without pulling the branch: they are co
 
 `GET /api/v1/whoami` tells a client what this service build serves, so a client can refuse a feature the service lacks instead of reading empty data:
 
-- `service`: `{version, api}`. `version` is the service's version, the one a release build carries (`omp-cloud version` prints it), else the checkout's `package.json` `version`, and `api` an integer that rises when the contract gains something; this build reports `5`.
-- `capabilities`: exactly the features this build serves, among `threads.paging`, `threads.meta`, `threads.idempotency`, `threads.scratch`, `turns.reply`, `events.json`, `inspect`, `messages.interrupt`, `questions.meta`, `threads.irc` (the [IRC route](#irc-messages), the `origin` and `irc*` turn fields and the `irc` and `irc_in` events), `events.live` (the [live events](#live-events) `usage`, `tool_start` and `tool_end`), `events.children` (the [child events](#child-events) `child_start`, `child_progress` and `child_end`), `github.app` (the [GitHub routes](#github-signing-and-pull-requests) and `whoami.github`), `commits.signed` (the [signing routes](#github-signing-and-pull-requests) and the `git.sign` setting), `threads.pr` (the thread's `pr` field and the `pr` and `sign` events), `secrets.store` (the [secret routes](#secrets-and-mcp-servers)), `mcp.proxy` (the create request's `mcp` field, `whoami.mcpProxy` and `mcpLogins`, and `mcp:<url>` [logins](#logins)), `threads.setup` (the create request's `setup` field and the detail's `setup`: [environments](#environments-and-previews)), `threads.preview` (the [preview route](#environments-and-previews)), `threads.readonly` (the `policy.readOnly` key: [read-only threads](#agent-policy)) and `threads.subagent` (a thread of origin `tool` runs as a [subagent](#cloud-subagents)).
+- `service`: `{version, api, name}`. `version` is the service's version, the one a release build carries (`omp-cloud version` prints it), else the checkout's `package.json` `version`, and `api` an integer that rises when the contract gains something; this build reports `6`. `name` is what the cloud is called: the [`service.name`](#settings) setting, else the service host's host name. A service older than this field omits `name`.
+- `capabilities`: exactly the features this build serves, among `threads.paging`, `threads.meta`, `threads.idempotency`, `threads.scratch`, `turns.reply`, `events.json`, `inspect`, `messages.interrupt`, `questions.meta`, `threads.irc` (the [IRC route](#irc-messages), the `origin` and `irc*` turn fields and the `irc` and `irc_in` events), `events.live` (the [live events](#live-events) `usage`, `tool_start` and `tool_end`), `events.children` (the [child events](#child-events) `child_start`, `child_progress` and `child_end`), `github.app` (the [GitHub routes](#github-signing-and-pull-requests) and `whoami.github`), `commits.signed` (the [signing routes](#github-signing-and-pull-requests) and the `git.sign` setting), `threads.pr` (the thread's `pr` field and the `pr` and `sign` events), `secrets.store` (the [secret routes](#secrets-and-mcp-servers)), `mcp.proxy` (the create request's `mcp` field, `whoami.mcpProxy` and `mcpLogins`, and `mcp:<url>` [logins](#logins)), `threads.setup` (the create request's `setup` field and the detail's `setup`: [environments](#environments-and-previews)), `threads.preview` (the [preview route](#environments-and-previews)), `threads.readonly` (the `policy.readOnly` key: [read-only threads](#agent-policy)), `threads.subagent` (a thread of origin `tool` runs as a [subagent](#cloud-subagents)), `devices.access` (a device's [access level](#tokens-and-callers): `PATCH /api/v1/devices/{id}`, the `access` of a device and of an approval, and `whoami.device.access`), `logins.list` (the [login list](#the-login-list): `GET /api/v1/logins`) and `capacity` (the [capacity route](#capacity): `GET /api/v1/capacity`).
 - `limits`: `{maxMessageBytes: 32768, maxAnswerBytes: 4000, maxUploadBytes, listMax: 200, maxTurns: 200}`, the constants the service enforces.
 - `spend`: `{todayUSD, dayCapUSD}`, the owner's cost for the current UTC day and `policy.spend.dayUSD` (`0` is no cap).
 - `models`: `[{id: "provider/id"}]`, what the cloud can run now (the gateway's models plus `models.direct`).
-- `update`: `{state, available}`. `state` is the [update state](#update-routes) and `available` the newer version a managed install has found while the state is not `idle` (it is being fetched, ready, being installed or failed), else `null`. Devices see it; only the owner token acts on it.
+- `update`: `{state, available, mode}`. `state` is the [update state](#update-routes), `available` the newer version a managed install has found while the state is not `idle` (it is being fetched, ready, being installed or failed), else `null`, and `mode` the [`update.mode`](#settings) setting (`off`, `notify` or `auto`). Every caller sees it; checking for an update and installing one need full access.
 - `defaultModel` is the model of a thread that names none; `modelPatterns` are `provider/*` for every provider the cloud can run right now (the gateway serves it, because the cloud broker holds a login for it, or the service routes it directly).
 - `maxUploadBytes` is the largest `source` part, 1 GiB (also in `limits`).
 - `ompVersion` is the omp version a thread that names none runs, the owner's omp on the service host: Tern's managed install when its `manager.json` names `tern`, else the first `omp` on the service's `PATH` (skipping `node_modules/.bin`).
@@ -257,7 +259,7 @@ Three routes read what a thread changed, without pulling the branch: they are co
 - `github` is `{app, signing}`: `app` is the connected App's slug or `null`, and `signing` is `true` when the service has a signing key and `git.sign` is `ssh`.
 - `mcpProxy` is `true` while the service's [MCP proxy](#secrets-and-mcp-servers) is listening (`service.json` `mcp` is set and it bound its address), else `false`: without it an http MCP server in a create request is not delivered. `mcpLogins` is the sorted list of MCP server URLs the service holds an OAuth login for (`[]` for none).
 - `vms` counts the owner's VMs, `{running, paused}`; `threads` counts the owner's threads by phase, `{starting, working, waiting, idle, failed}`.
-- `device` is `{id, name}` when a [device](#devices-and-pairing) called and `null` for the owner token; `remote` is `{fingerprint}` when the service has a [remote listener](#listeners), else `null`.
+- `device` is `{id, name, access}` when a [device](#devices-and-pairing) called (`access` is `full` or `threads`) and `null` for the owner token; `remote` is `{fingerprint}` when the service has a [remote listener](#listeners), else `null`.
 
 ## Updates
 
@@ -267,13 +269,13 @@ The service reads a release feed in the background, downloads and verifies a new
 
 ### Health
 
-`GET /api/v1/health` needs no token and answers on the API listener and on the remote listener (after its source check): `200 {"status": "ok", "version": "<version>", "build": {"id", "commit", "createdAt"}, "schema": <n>}`. `version` and `build` are the running binary's: a release build's `id` is `<YYYYMMDDHHMMSS>-<7 characters of the commit>`, a checkout's `build` is `{"id": "dev", "commit": "", "createdAt": ""}`. `schema` is the number of database migrations the binary knows. The updater polls it after a restart to see which version answers; a monitor may too. Only `GET` is a route: another method takes the ordinary path (`401` without a token, `404` with one).
+`GET /api/v1/health` needs no token and answers on the API listener and on the remote listener (after its source check): `200 {"status": "ok", "version": "<version>", "build": {"id", "commit", "createdAt"}, "schema": <n>, "vmon": "<tag>" | null}`. `version` and `build` are the running binary's: a release build's `id` is `<YYYYMMDDHHMMSS>-<7 characters of the commit>`, a checkout's `build` is `{"id": "dev", "commit": "", "createdAt": ""}`. `schema` is the number of database migrations the binary knows. `vmon` is the vibemon tag installed on the service host (`v0.4.0`), `null` when there is none or it is not known yet: the service reads it in the background (at start, then at most every 30 s when a health request finds the value older) and the answer never waits for that read, so a vibemon machine that follows this server finds its target version here. The updater polls health after a restart to see which version answers; a monitor may too. Only `GET` is a route: another method takes the ordinary path (`401` without a token, `404` with one).
 
 While the service starts, the API listener answers `503` `{"error": "the service is starting"}` to every request, this route included: the updater's health wait counts it as not yet healthy and keeps polling until its deadline.
 
 ### Update routes
 
-Owner token only: a device gets `403` `only the owner token can do this; it works on the server machine`, even for the `GET` (it reads `whoami.update`). The dashboard's owner session may call them.
+`GET /api/v1/update` answers every caller. `POST /api/v1/update/check` and `POST /api/v1/update/apply` need full access: a device with `threads` access gets `403` `this device has threads-only access; a connection with full access can change that (Devices in the dashboard, or /cloud devices access <device> full)` ([Tokens and callers](#tokens-and-callers)). The dashboard's owner session may call them all.
 
 | Route | Answer |
 |---|---|
@@ -398,8 +400,11 @@ omp-cloud <version> (<build id>)
 usage: omp-cloud [command] [options]
 
   setup [--yes] [--no-login] [--no-plugin] [--no-linger] [--no-wait] [--team <slug>] [--max-sandboxes <n>]
-        [--migrate-team] [--checkout] [--json]
-                                         set up this host: vibemon, the services, the plugin and the model login (asks for sudo once)
+        [--cluster-address <ip> | --no-cluster] [--migrate-team] [--checkout] [--json]
+                                         set up this host: vibemon, the services, the plugin and the model login (asks for sudo once);
+                                         --cluster-address <ip> lets other vibemon machines join this server on that LAN address
+  setup node --join <user@server> [--yes] [--json]
+                                         set up this machine as a vibemon machine of that omp-cloud server
   doctor [--json]                        check the host and the stack, with a fix beside each failure
   login [<provider>]                     log the service in to a model provider
   uninstall [--purge] [--yes] [--checkout]
@@ -407,6 +412,9 @@ usage: omp-cloud [command] [options]
   serve [--config <path>]                run the service (the default with no command)
   ssh-pair --name <n> --platform <p> [--config <path>]
                                          pair a device over ssh (prints one JSON line; used by /cloud connect user@host)
+  node-join-info [--member <ip>] [--config <path>]
+                                         what a machine needs to join this server's cluster, or whether it has (prints one JSON line;
+                                         used by setup node --join)
   update                                 check for a new release and download it
   update apply                           install the downloaded release and restart the service
   install [--from <binary>] [--config <path>]
@@ -422,6 +430,14 @@ Config: --config <path>, else $OMP_CLOUD_CONFIG, else ~/.config/omp-cloud/servic
 - `serve` claims the API address (`listen`) before it opens the database, issues the service's gateway client or starts the runner, and answers `503` `{"error": "the service is starting"}` on it until the app is ready. When the address is taken (almost always because the service is already running, for example `omp-cloud` typed with no command on the host) it exits `1` with `http://127.0.0.1:8080 is already in use: the omp-cloud service is probably already running (systemctl --user status omp-cloud). Nothing was changed.` and has touched nothing: no migration, no orphan sweep, no gateway client. Stop the unit before running `serve` by hand.
 - `setup`, `doctor`, `login` and `uninstall` are the host's install lifecycle, described in [Install](install.md). `setup` and `uninstall` run as the owner's user and refuse root; each asks for sudo once for its root part (`sudo -- <binary> setup system …`), and a second `setup` run reports what is already right. `doctor` exits `1` when any check fails; `uninstall` keeps backups.
 - `ssh-pair` is [SSH pairing](#ssh-pairing-omp-cloud-ssh-pair); its output is a contract.
+- `setup --cluster-address <ipv4>` makes a server take other vibemon machines ([More vibemon machines](install.md#more-vibemon-machines)): vmon then binds its cluster and gossip listeners (TCP 7947, TCP and UDP 7946) to that one address, never `0.0.0.0`, and `service.json` gets `vmon.clusterAddress` and `vmon.clusterSecretFile` (0600). The address must be a private LAN address (10/8, 172.16/12 or 192.168/16) of this machine. `--no-cluster` stops it. Both together is a usage error (exit `2`). A host keeps its mode over reruns: without either flag the recorded address stays.
+- `setup node --join <target>` runs on another machine, as a user, with a release binary, and refuses a machine that already runs a server (`this machine runs an omp-cloud server; a machine is either a server or a node`). The target is `user@host`, a host name or `ssh://[user@]host[:port]`. Its steps have ids that start with `node.`: it asks the server for what it needs over ssh (`node-join-info`), plans, asks `Continue? [Y/n]` (`--yes` skips it; without a terminal it needs `--yes`), runs one `sudo` for the root part (`omp-cloud setup system --node …`, which takes only validated flags and a path to a 0600 file holding the cluster secret), then checks that the server sees this machine (`node.member`) and that the service address answers (`node.gateway`). Exit codes: `0` done, `1` a step failed, `2` usage. `--json` prints `{ok, steps}`; the cluster secret is in no step, note or JSON output.
+- `node-join-info [--member <ipv4>] [--config <path>]` runs on the server over ssh and prints one JSON line, the last line of stdout. It reads `service.json` and never opens the database. The output is a contract:
+  - failure, exit `1`: `{"ompCloudNode": 1, "error": "<text>"}`. The texts are `this server does not take vibemon machines: run omp-cloud setup --cluster-address <its LAN address> on it first` (no `vmon.clusterAddress` and `vmon.clusterSecretFile`), `the server has no remote listener: run omp-cloud setup on it`, `vibemon is not installed on the server`, and with `--member` and no `vmon.adminTokenFile` `this server has no vibemon admin token yet: run omp-cloud setup on it`;
+  - success: `{"ompCloudNode": 1, "server": {"address": "<clusterAddress>", "remotePort": <remote port>, "pin": "sha256//<base64>", "version": "<omp-cloud version>"}, "vmon": {"version": "v0.4.0", "join": "<clusterAddress>:7946", "clusterSecret": "<secret>"}}`. `pin` is the SHA-256 of the remote certificate's public key (SPKI), in the form `curl --pinnedpubkey` takes. The cluster secret is in this line by design: it travels over the ssh session the owner authenticated, and is the only place it leaves the server;
+  - `--member <ipv4>` polls vibemon's cluster view every 2 s for up to 60 s until an alive machine with that address has joined, then prints `{"ompCloudNode": 1, "member": {"hostname": "<name>", "status": "<status>", "version": "<vibemon version>"}}`, or fails with `the server's vibemon has not seen a machine at <ip> within 60 s`.
+
+  An older server answers an unknown command with `{"ompCloudPair": 1, "error": …}`, which a node reads as "no `ompCloudNode` line" and reports as an old server.
 - `update [--config <path>]` checks the feed, downloads and verifies a newer release and prints `omp-cloud <v> (<build id>)`, `state:`, and the latest, staged, applying, error, checked and last lines that apply; the exit status is `1` when the state is `failed`. On an install that cannot update it prints the `unsupported` message and exits `1`. `update`, `update apply` and `update apply-staged` take only `--config <path>` (`apply-staged` also `--version`): a bad argument prints the usage and exits `2`, and `update --help` prints it and exits `0`.
 - `update apply [--config <path>]` installs the staged release. It checks first when the state is not `ready`, and prints the status and `no update is ready` (or `no update is staged`), exit `1`, when there is nothing to install. It asks the running service with `POST /api/v1/update/apply`, using the owner token from `OMP_CLOUD_TOKEN`, else `service.token` beside the config, and prints `the service is installing omp-cloud <v>; run omp-cloud update to follow it`; a `409` is printed and exits `1`. When the service cannot be asked (not running, no token, not the owner token) it prints `the service could not be asked (no owner token or not running): installing omp-cloud <v> from here` and applies the release itself, the same steps; the exit status is `0` or `1`. `update apply-staged --version <v> --config <path>` is the applier the service starts; it is not for hand use.
 - `install [--from <binary>] [--config <path>]` turns the current install into a managed one: it runs the binary's `version` (which must print `omp-cloud <version>`), copies it to `<app>/versions/<version>/omp-cloud`, writes `manager.json`, points `<app>/bin/omp-cloud` at it, links `~/.local/bin/omp-cloud` to `<app>/bin/omp-cloud` and points the service unit (`update.unit`) at `<app>/bin/omp-cloud serve --config <path>`: a persistent unit through a drop-in, `$XDG_CONFIG_HOME/systemd/user/<unit>.service.d/managed.conf` (`~/.config/systemd/user/…` when it is unset; reset `ExecStart=`, then the managed one, `WorkingDirectory=<app>`), then a daemon reload and a restart when it runs; a transient unit is stopped and started again on the managed binary with its whole `Environment` and `OMP_CLOUD_APP_DIR`. It prints one line for each thing it changed and a second run changes nothing; an error is `omp-cloud: <message>` with exit `1`. Without `--from` it installs the binary it runs from, and refuses a `bun` (`run omp-cloud install from a release binary, or pass --from <binary>`).
@@ -520,6 +536,22 @@ A login is `{id, provider, state, url, instructions, userCode, account, error}`.
 
 A provider of the form `mcp:<https url>` logs the **service** in to the OAuth of the MCP server at that URL (`unknown provider "<p>"` for `mcp:` followed by anything but an `https` URL): the service discovers the server's authorization endpoints with omp's own discovery (`the MCP server <url> advertises no OAuth endpoints` fails the login), registers a client dynamically when it has none, and runs the same sign-in as for a model provider (`url`, `instructions`, `input`; `account` is the server's host). The tokens are kept in the service's own database under the exact URL, not in the broker, and the MCP proxy refreshes them on use ([below](#secrets-and-mcp-servers)).
 
+### The login list
+
+Capability `logins.list`. `GET /api/v1/logins` answers every caller (a device with threads-only access too) with `200 {"logins": [entry], "brokerError": "<text>"}`: what the cloud is logged in to now, not a login in progress. An entry is `{provider, kind, account, loggedInAt, renewBy, disabled, note}`:
+
+| Field | Meaning |
+|---|---|
+| `provider` | The provider id (`anthropic`), or `mcp:<url>` for an [MCP server](#secrets-and-mcp-servers) the service holds a login for |
+| `kind` | `provider` (a credential in the cloud broker) or `mcp` |
+| `account` | Who is logged in: the credential's email, else its account id, else its organization; `API key` for an API key; the server's host for an MCP login; `""` when none is known. Always `""` for a caller without full access |
+| `loggedInAt` | ISO time the login was made (the credential's `authorizedAt`); `""` when unknown, for a disabled credential and for an MCP login |
+| `renewBy` | ISO time the login must be renewed by: `loggedInAt` plus 30 days for an `anthropic` credential (Anthropic expires the whole OAuth grant that long after authorization, whatever refresh does); `""` for every other provider |
+| `disabled` | `true` for a credential the broker disabled (a definitive refresh failure, for example); it needs a new login |
+| `note` | The broker's verbatim cause of the disable; `""` otherwise |
+
+Provider entries come first, sorted by provider and then account, then the MCP entries. The service reads the broker with its own bearer token (`GET /v1/snapshot` and `GET /v1/credentials/disabled`, 5 s each) and skips what it does not understand; a broker without the second endpoint lists no disabled credentials. When the broker does not answer, `brokerError` is `the cloud broker did not answer: <why>`, the provider entries are missing and the MCP entries are still listed; otherwise `brokerError` is `""`. No token material reaches the answer. Every other `/api/v1/logins` route needs full access.
+
 ## Settings
 
 Settings are the service's run-time knobs, kept in the service database and changed through the API; `service.json` stays bootstrap only. Every registered key has a type, a default and a validator. A setting is `{key, type, value, default, source, doc, choices, updatedAt, updatedBy}`: `type` is `enum`, `string`, `string[]`, `number`, `bool` or `json` (the table shows an enum's values, `list of strings` for `string[]` and `json:` with the shape for `json`), `source` is `default` or `stored`, `choices` lists an enum's values (`[]` otherwise), and `updatedAt` and `updatedBy` are `""` at the default. Setting a key to its default value resets it, so `stored` always means different from the default.
@@ -546,6 +578,7 @@ Settings are the service's run-time knobs, kept in the service database and chan
 | `vm.packages` | list of strings | `["build-essential", "python3", "python3-venv", "python3-pip", "nodejs", "npm", "unzip", "ripgrep"]` | The Debian packages installed in the VM template, besides the runner's own (`ca-certificates`, `curl`, `git`, `jq`, `procps`). Changing the list builds a new template for the next thread; VMs that exist keep theirs. Each entry matches `^[a-z0-9][a-z0-9+.-]{0,99}$`; at most 200 entries (`400` `vm.packages must be a list of strings`, `vm.packages holds at most 200 entries` or `vm.packages entries are Debian package names (lower case letters, digits and + . -): "<entry>"`). Order is irrelevant: the list is sorted and deduplicated before it names the template |
 | `vm.setup` | list of strings | `[]` | Shell lines run as root, in one script under `set -eux`, after the packages and omp are installed when the VM template is built; changing them builds a new template for the next thread. At most 16384 characters in all, each line counting one more for its newline (`400` `vm.setup must be a list of strings (shell lines)` or `vm.setup holds at most 16384 characters in all`) |
 | `lifecycle.archiveAfterDays` | number | `7` | Days without activity before an idle thread's VM is released. Its conversation and work are kept, and the next message restores them (see [Archive](#archive)). A number `>= 0`, fractions allowed; `0` never archives |
+| `service.name` | string | `""` | The name this cloud shows in the dashboard header, the omp footer and `/cloud status`; `whoami` returns it as `service.name`, with the server's host name when this is empty. It is trimmed; empty or 1 to 64 letters, digits, spaces, `.`, `_` and `-` (`400` `service.name must be empty or 1 to 64 letters, digits, spaces, ., _ or -`) |
 | `update.mode` | `off`, `notify`, `auto` | `notify` | How the service follows omp-cloud releases: `off` never checks by itself, `notify` checks hourly and downloads in the background and the owner installs with one click, `auto` also installs by itself when that is safe with no downtime, else it waits for the click ([the exact rule](#updates); [Updating](updating.md#auto)). `400` `update.mode must be one of off, notify, auto` |
 | `update.feed` | string | `github:TechDufus/omp-cloud` | Where releases come from: `github:<owner>/<repo>` (its latest GitHub release) or an `http(s)` base URL that serves `release.json` and the files; [the feed](#the-feed-and-its-token). `400` `update.feed must be a string`, `update.feed must be github:<owner>/<repo> or an http(s) base URL: "<value>"`, `update.feed is not a valid URL: "<value>"`, `update.feed must not carry credentials; put them in update.token` or `update.feed must not have a query or fragment` |
 | `update.token` | string | `""` | The credential the feed is read with, needed for a private repository or fork: a `!command` whose output is the token (for example `!/usr/bin/gh auth token`), the name of an environment variable of the service, or the token itself; empty reads the feed anonymously. It is trimmed; at most 500 characters without control characters (`update.token must be a string of at most 500 characters without control characters`). A literal token reads back as `(set)` and is kept out of the audit and the export: [the feed and its token](#the-feed-and-its-token) |
@@ -570,7 +603,7 @@ The export holds the stored values as nested YAML (`git: {push: ask}`) and nothi
 
 Capabilities `github.app` (the GitHub routes and `whoami.github`), `commits.signed` (the signing routes and `git.sign`) and `threads.pr` (the thread's `pr` field and the `pr` and `sign` events). [GitHub](github.md) explains the flow for the person who runs the service; this is the contract. Setup needs the dashboard: the manifest flow returns the browser to the dashboard's origin.
 
-**Routes.** Owner token only: a device gets the `403` of [Tokens and callers](#tokens-and-callers), and the dashboard's owner session may call them. Bodies are at most 8 KiB. Any other path or method is `404` `not found`.
+**Routes.** Need full access: a device with `threads` access gets the `403` of [Tokens and callers](#tokens-and-callers), and the dashboard's owner session may call them. Bodies are at most 8 KiB. Any other path or method is `404` `not found`.
 
 | Route | Body | Answer |
 |---|---|---|
@@ -594,7 +627,7 @@ Capabilities `github.app` (the GitHub routes and `whoami.github`), `commits.sign
 
 Capabilities `secrets.store` (the secret routes) and `mcp.proxy` (the create request's `mcp`, `whoami.mcpProxy`, `whoami.mcpLogins` and the `mcp:<url>` logins). [Secrets and MCP servers](secrets-and-mcp.md) explains them for the person who runs the service; this is the contract.
 
-**Secret routes.** Owner token only: a device gets the `403` of [Tokens and callers](#tokens-and-callers), and the dashboard's owner session may call them. A body is at most 72 KiB (`413` `request body is too large`). Any other path or method is `404` `not found`.
+**Secret routes.** Need full access: a device with `threads` access gets the `403` of [Tokens and callers](#tokens-and-callers), and the dashboard's owner session may call them. A body is at most 72 KiB (`413` `request body is too large`). Any other path or method is `404` `not found`.
 
 | Route | Body | Answer |
 |---|---|---|
@@ -677,7 +710,7 @@ An archived thread shows `archivedAt`, the time its VM was released, and its `vm
 
 ## Devices and pairing
 
-Other machines use the API over the remote listener, each with a token of its own that the owner can revoke. The owner token stays the service host's credential.
+Other machines use the API over the remote listener, each with a token of its own that the owner can revoke. The owner token stays the service host's credential. Every device is the owner on that machine and has an access level: `full` for everything the owner token can do, or `threads` for threads and reads only.
 
 ### Listeners
 
@@ -690,31 +723,31 @@ Other machines use the API over the remote listener, each with a token of its ow
 
 ### Tokens and callers
 
-A device token is `ompd_` and 32 random bytes as base64url; the service keeps only its SHA-256. Every request with one looks the device up in the database (no cache), so a revoked or unknown token is `401` at once, with the same body and `WWW-Authenticate` as any bad token. The caller is the owner (`principal` `owner`) either way, so a device sees and changes the same threads. The device's `last_seen_at` and address are written at most once a minute.
+A device token is `ompd_` and 32 random bytes as base64url; the service keeps only its SHA-256. Every request with one looks the device up in the database (no cache), so a revoked or unknown token is `401` at once, with the same body and `WWW-Authenticate` as any bad token, and a change of the device's access applies to its next request. The caller is the owner (`principal` `owner`) either way, so a device sees and changes the same threads. The device's `last_seen_at` and address are written at most once a minute.
 
 Turns record who sent, stopped or answered them in `by`, `stoppedBy` and `answeredBy`: `owner` for the owner token, `device:<id>` for a device. A thread created by a device records `device:<id>` as the sender of its first turn. Event texts (`queued by …`, `stop requested by …`) and a stopped turn's `error` (`stopped by …`) name the same values. The one exception is an [IRC message](#irc-messages): the sender is the `from` the caller names, whichever token it used, and it is the `by` of the `irc` turn the message starts and the name in that turn's `queued by <from>` event.
 
-Only the owner token may call these; a device gets `403` `{"error": "only the owner token can do this; it works on the server machine"}`:
+**Access levels.** A device's `access` is `full` or `threads`. The owner token and a device with `full` access can call everything. A device with `threads` access gets `403` `{"error": "this device has threads-only access; a connection with full access can change that (Devices in the dashboard, or /cloud devices access <device> full)"}` on these:
 
 - every [pairing offer](#pairing-offers) route;
-- `DELETE /api/v1/devices/{id}` for any id but its own;
+- `PATCH /api/v1/devices/{id}` for any id, its own included, and `DELETE /api/v1/devices/{id}` for any id but its own;
 - `PUT /api/v1/settings` and `PUT /api/v1/settings/import`;
-- every `/api/v1/logins` route;
+- every `/api/v1/logins` route except `GET /api/v1/logins` (the [login list](#the-login-list), without accounts);
 - every `/api/v1/github` and `/api/v1/signing` route;
 - `POST /api/v1/dashboard/links`;
-- every [update](#update-routes) route.
+- `POST /api/v1/update/check` and `POST /api/v1/update/apply`.
 
-Everything else of the API works with a device token: threads, settings and usage reads, VMs, the event streams, `GET /api/v1/devices` (only itself) and `DELETE` of itself.
+Everything else of the API works with a threads-only device: threads, settings and usage reads, VMs, the event streams, `GET /api/v1/update`, `GET /api/v1/devices` (only itself) and `DELETE` of itself. A device paired over [ssh](#ssh-pairing-omp-cloud-ssh-pair) has `full` access; a device paired with a code has the access the owner's approval gave it (`threads` when the approval names none), and the owner can change it at any time.
 
 ### Pairing offers
 
-Owner only, on the API listener (or the dashboard listener's owner session):
+Need full access, on the API listener (or the dashboard listener's owner session):
 
 | Route | Answer |
 |---|---|
 | `POST /api/v1/pairing/offers` | Body `{}` (an empty body works too; at most 1 KiB). `201 {id, code, expiresAt, fingerprint, addresses}`: `code` is `ompc1:<offer id>:<secret>:<fingerprint base64url>@<address>[,<address>…]`, an offer lives 5 minutes, the secret is 16 random bytes of which the service keeps the SHA-256, and the code is returned only here. At most 3 live (open, pending or approved, unexpired) offers: a fourth cancels the oldest. `404` `remote access is not configured` without a `remote` section |
 | `GET /api/v1/pairing/offers/{id}` | `200 {id, status, expiresAt, request, device}`: `status` is `open`, `pending`, `approved`, `paired`, `declined`, `cancelled`, `burned` or `expired` (computed when a live offer is past `expiresAt`); `request` is `null` or `{name, platform, address, at}`; `device` is `null` or `{id, name}` once paired. `404` `not found` for an unknown offer |
-| `POST /api/v1/pairing/offers/{id}/approve` | `204` for a pending, unexpired offer (it becomes `approved`); `409` `this pairing is not waiting for approval` otherwise; `404` `not found` unknown |
+| `POST /api/v1/pairing/offers/{id}/approve` | Body `{"access": "full" \| "threads"}`, or none (an empty body is `{}`): the access level the new device gets; without `access` it is `threads`, which is what a client that predates access levels gets. `400` `access must be full or threads` for any other value, with the offer left waiting. `204` for a pending, unexpired offer (it becomes `approved`); `409` `this pairing is not waiting for approval` otherwise; `404` `not found` unknown |
 | `POST /api/v1/pairing/offers/{id}/decline` | `204` for a pending, unexpired offer (it becomes `declined`); `409` as above; `404` `not found` unknown |
 | `DELETE /api/v1/pairing/offers/{id}` | `204`: cancels a live offer, leaves a finished one as it is, and is idempotent; `404` `not found` unknown |
 
@@ -733,8 +766,9 @@ Parallel redeem and claim calls have one winner. Failed attempts are limited per
 
 | Route | Answer |
 |---|---|
-| `GET /api/v1/devices` | `200 {devices: [{id, name, platform, createdAt, pairedFrom, lastSeenAt, lastSeenAddress, current}]}`: the active devices, oldest first; a device caller sees only itself; `current` is true for the caller's own device; `lastSeenAt` and `lastSeenAddress` are `null` until the device's first authenticated request |
-| `DELETE /api/v1/devices/{id}` | Revoke: `200 {device: {id, name}, runningThreads: [id]}`. `runningThreads` are the threads whose first turn the device sent that are still starting, working or waiting; they keep running until stopped. The device's in-flight work ends: its open event streams (thread and global), downloads, static relay requests and request bodies still being uploaded are aborted, and every write it could still make (messages, answers, stop, delete, thread creation, revoking itself) is refused with `401` `unauthorized` without writing. `404` for an unknown or already revoked device; a device calling this for another id gets the owner-only `403` |
+| `GET /api/v1/devices` | `200 {devices: [{id, name, platform, createdAt, pairedFrom, lastSeenAt, lastSeenAddress, access, current}]}`: the active devices, oldest first; a device with `threads` access sees only itself, the owner token and a device with `full` access see all; `access` is `full` or `threads`; `current` is true for the caller's own device; `lastSeenAt` and `lastSeenAddress` are `null` until the device's first authenticated request |
+| `PATCH /api/v1/devices/{id}` | Body `{"access": "full" \| "threads"}` (needs full access): set the device's access level; it applies from the device's next request. `200 {device: <the device as listed above>}`; `400` `access must be full or threads` when `access` is missing or anything else (or the body is not a JSON object: `invalid JSON body`); `404` `not found` for an unknown or revoked device |
+| `DELETE /api/v1/devices/{id}` | Revoke: `200 {device: {id, name}, runningThreads: [id]}`. `runningThreads` are the threads whose first turn the device sent that are still starting, working or waiting; they keep running until stopped. The device's in-flight work ends: its open event streams (thread and global), downloads, static relay requests and request bodies still being uploaded are aborted, and every write it could still make (messages, answers, stop, delete, thread creation, revoking itself) is refused with `401` `unauthorized` without writing. `404` for an unknown or already revoked device; a device with `threads` access calling this for another id gets the `403` of [Tokens and callers](#tokens-and-callers) |
 
 ### SSH pairing (`omp-cloud ssh-pair`)
 
@@ -744,7 +778,7 @@ The service host has a command, `omp-cloud`, on the owner's `PATH`: on a [manage
 omp-cloud ssh-pair --name <name> --platform <platform> [--config <path>]
 ```
 
-Whoever can run it has a login on the service's account, which is the proof of ownership, so it pairs a device at once, with no [offer and approval](#pairing-offers). `--name` and `--platform` are validated like a [redeem](#redeem-and-claim) request's and each flag is given exactly once; `--config` (else `OMP_CLOUD_CONFIG`, else the default path) names `service.json`, which it parses as the service does but uses only `dataDir` and `remote` from, contacting nothing the file names, so it works while vmon or the gateway is down. It refuses when the config has no `remote` section, when the TLS key cannot be read safely, when there is no database in `dataDir`, and when the database's schema is not the one this checkout expects: it opens the database without migrating it and says `the service database is at schema <n>, this omp-cloud expects <m>: restart the omp-cloud service first` (the database is behind) or `…: this omp-cloud checkout is older than the service; update it (git pull) first` (it is ahead). It adds an active device (the name gets `-2`, `-3`, … until it is unique, as in a claim) with `pairedFrom` the client address from `SSH_CONNECTION` or `SSH_CLIENT`, else `ssh`.
+Whoever can run it has a login on the service's account, which is the proof of ownership, so it pairs a device at once, with `full` access and no [offer and approval](#pairing-offers). `--name` and `--platform` are validated like a [redeem](#redeem-and-claim) request's and each flag is given exactly once; `--config` (else `OMP_CLOUD_CONFIG`, else the default path) names `service.json`, which it parses as the service does but uses only `dataDir` and `remote` from, contacting nothing the file names, so it works while vmon or the gateway is down. It refuses when the config has no `remote` section, when the TLS key cannot be read safely, when there is no database in `dataDir`, and when the database's schema is not the one this checkout expects: it opens the database without migrating it and says `the service database is at schema <n>, this omp-cloud expects <m>: restart the omp-cloud service first` (the database is behind) or `…: this omp-cloud checkout is older than the service; update it (git pull) first` (it is ahead). It adds an active device (the name gets `-2`, `-3`, … until it is unique, as in a claim) with `pairedFrom` the client address from `SSH_CONNECTION` or `SSH_CLIENT`, else `ssh`.
 
 The last line of stdout is one JSON object and nothing else goes to stdout (diagnostics go to stderr); the token appears nowhere else:
 
@@ -766,7 +800,7 @@ The dashboard is a web page for the owner (thread list and detail, answering que
 
 The dashboard listener serves the page at `/` and the same `/api/v1` routes as the API listener, authenticated by a session cookie instead of the bearer token. The API listener never reads a cookie, so a cookie alone is `401` there, and the dashboard listener never reads a bearer token. A session is the owner's full power.
 
-- **Sign-in.** `POST /api/v1/dashboard/links` (the owner token, on the API listener only; a device token gets `403`, see [Devices and pairing](#devices-and-pairing)) returns `201 {url, expiresAt}`: `url` is `<origin>/#<code>`, a one-time code of 32 random bytes in the fragment (so it never reaches a log or a `Referer`), valid 60 seconds and once. `404` `the dashboard is not configured` without the section. The page reads the fragment, sends `POST /session {"code": "..."}` and clears the fragment. `POST /session {"token": "<owner token>"}` signs in with the owner token instead (the same constant-time comparison); a device token is never a sign-in credential. The body is exactly one of `code` or `token`, a non-empty string, at most 4096 bytes (`400` `send {code} or {token}`); a bad, used or expired credential is `401` `invalid or expired sign-in`. Success is `204` with `Set-Cookie: omp_cloud_session=<id>; Max-Age=604800; Path=/; HttpOnly; SameSite=Strict` (plus `; Secure` when `url` is https) and closes the session the request's previous cookie named. After five failed sign-ins within 60 seconds every `POST /session` answers `429` `too many failed sign-ins` with `Retry-After` until the oldest failure ages out (one counter for the listener). `GET /session` is `200 {"user": "owner"}` or `401` `unauthorized`; `DELETE /session` signs out (`204`, cookie cleared). At most 16 unredeemed links and 32 open sessions are kept, the oldest dropped first.
+- **Sign-in.** `POST /api/v1/dashboard/links` (the owner token or a device with full access, on the API listeners only; a device with threads-only access gets `403`, see [Devices and pairing](#devices-and-pairing)) returns `201 {url, expiresAt}`: `url` is `<origin>/#<code>`, a one-time code of 32 random bytes in the fragment (so it never reaches a log or a `Referer`), valid 60 seconds and once. `404` `the dashboard is not configured` without the section. The page reads the fragment, sends `POST /session {"code": "..."}` and clears the fragment. `POST /session {"token": "<owner token>"}` signs in with the owner token instead (the same constant-time comparison); a device token is never a sign-in credential. The body is exactly one of `code` or `token`, a non-empty string, at most 4096 bytes (`400` `send {code} or {token}`); a bad, used or expired credential is `401` `invalid or expired sign-in`. Success is `204` with `Set-Cookie: omp_cloud_session=<id>; Max-Age=604800; Path=/; HttpOnly; SameSite=Strict` (plus `; Secure` when `url` is https) and closes the session the request's previous cookie named. After five failed sign-ins within 60 seconds every `POST /session` answers `429` `too many failed sign-ins` with `Retry-After` until the oldest failure ages out (one counter for the listener). `GET /session` is `200 {"user": "owner"}` or `401` `unauthorized`; `DELETE /session` signs out (`204`, cookie cleared). At most 16 unredeemed links and 32 open sessions are kept, the oldest dropped first.
 - **Sessions.** The cookie holds 32 random bytes; the service keeps only their SHA-256, in memory, so a restart signs every browser out, except the restart of an [update](#dashboard-sessions-and-an-update-restart), which carries them over. A session ends after 12 hours without a request and 7 days after it began.
 - **Guard.** Every `/session` and `/api/*` request on the dashboard listener must: carry a `Host` of loopback (`127.0.0.1`, `localhost` or `[::1]` with the listen port) or of `url` (`421` `unexpected host`); not be cross-site, `Sec-Fetch-Site` being absent, `same-origin` or `none`; carry no `Origin` other than the listener's own (both `403` `cross-site request refused`); and, unless `GET` or `HEAD`, carry `X-Omp-Dashboard: 1` (`403` `x-omp-dashboard header required`). No response carries a CORS header, so a page on another origin cannot pass the preflight. `POST /api/v1/dashboard/links` is `404` on this listener, as is any path other than `/`, `/session` and `/api/*`; a request without a live session is `401` `unauthorized` without `WWW-Authenticate`.
 - **Bodies.** The listener refuses request bodies over 1 MiB; the page never creates threads.
@@ -778,3 +812,33 @@ The dashboard listener serves the page at `/` and the same `/api/v1` routes as t
 `GET /api/v1/usage?since=<ISO 8601>` (default: 30 days ago) sums the recorded `usage` of the owner's turns completed at or after `since`: `{since, total: {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, cost}, threads: [{thread, title, name, cost, turns}], days: [{day, cost}]}`, `since` normalized to an ISO instant, `threads` by cost descending (ties by thread id; `name` is the thread's [name](#thread-summary-and-detail), `""` when it has none), `days` (`YYYY-MM-DD`, UTC) ascending, `turns` counting the turns that reported usage. `400` `since must be an ISO 8601 time`. The turns of a deleted thread do not count. This is the cloud's own spend; the plugin never reads it, and merged local and cloud spend is `omp stats`.
 
 `GET /api/v1/vms` is `{vmonDashboard, vms: [{thread, sandboxId, state, pid, startedAt, cpuCount, memoryMB, metrics}]}`: the owner's VM records, joined with vmon's live view when the service has a vmon client (the runner is on, or the runner is off and the config has a `dashboard` section; when vmon cannot be opened or its list fails, the list holds the stored records only). `state` is `running` or `paused`, vmon's when it reports the sandbox, else the record's. `vmonDashboard` is vmon's own dashboard (`<vmon.url>/dashboard/`); `startedAt` is `""` and `cpuCount` and `memoryMB` `0` when vmon did not report the sandbox; `pid` is `null` before omp started; `metrics` is `{at, cpuUsedPct, memUsed, memTotal, diskUsed, diskTotal}` (bytes) for a running sandbox with a sample from the last five minutes, else `null` (a paused sandbox, a vmon without metrics, a failed request).
+
+### Capacity
+
+Capability `capacity`. `GET /api/v1/capacity` answers every caller (a device with threads-only access too) with `200` and one `Capacity` object: what the cluster of vibemon machines offers as a whole and how much of it is taken. It answers `404` `not found` in a service that was not given a capacity reader (a test app). vibemon's `max_vcpus`, `max_memory_mb` and `max_disk_mb` are ceilings **per VM**, not team totals; the totals here are sums over the alive machines.
+
+The service reads vibemon's admin API (`GET /admin/cluster` and `GET /admin/teams`, header `X-Admin-Token`) with the token in the file `vmon.adminTokenFile` of `service.json`, which `omp-cloud setup` writes. The file is read on every request, so a setup rerun takes effect without a restart. A failure is never an error response: the answer is `200` with `available: false` and the reason.
+
+| Field | Meaning |
+|---|---|
+| `available` | `true` when vibemon answered; `false` otherwise (every number below is then `0`, every list empty and `cluster` all empty) |
+| `problem` | Why it is not available, `""` when it is |
+| `fix` | What to run about it, `""` when it is available |
+| `machines` | `{total, ready}`: the cluster members that run VMs (`roles.node`), and those that are alive with `node.status` `ready` |
+| `vcpus` | `{total, allocated}`: sums over the alive machines of their CPUs and the vCPUs of their running VMs |
+| `memoryMB` | `{total, allocated}`: the same for memory |
+| `diskFreeMB` | Free disk, summed over the alive machines |
+| `vms` | `{cluster, cloud, size}`: `cluster` is the VMs on all alive machines (the team's and any other's); `cloud` is `{running, paused, limit}` for omp-cloud's vibemon team (`vmon.team`; `0` for all three when none is set or vibemon has none by that slug, `limit` is the team's `maxConcurrentSandboxes`); `size` is `{vcpus, memoryMB}`, what each VM the service starts gets |
+| `history` | The last hour as at most 60 points, the last 5 s sample of each minute, oldest first: `{at, machines, vcpus, vcpusAllocated, memoryMB, memoryAllocatedMB, vms}` (`at` an ISO time) |
+| `members` | Every machine, dead ones too, the server first and then by host name: `{hostname, status, version, server, vcpus, vcpusAllocated, memoryMB, memoryAllocatedMB, vms}`. `status` is the machine's own (`ready`, …) while it is alive, else its gossip state (`suspect`, `dead`, `left`); `server` marks the machine the omp-cloud service runs on |
+| `cluster` | `{accepting, address, joinCommand, versionSkew}`: `accepting` is `true` when `service.json` has `vmon.clusterAddress` (the server takes other vibemon machines), `address` that address, `joinCommand` the command that adds a machine (`curl -fsSL https://omp-cloud.techdufus.com/install.sh \| sh -s -- node --join <user>@<address>`), both `""` when not accepting, and `versionSkew` is `true` when a machine runs another vibemon version than the server's |
+
+When `available` is `false`, `problem` and `fix` are:
+
+| Case | `problem` | `fix` |
+|---|---|---|
+| No `vmon.adminTokenFile`, or the file is missing, empty or unreadable | `this server has no vibemon admin token yet` | `omp-cloud setup` |
+| vibemon refused the token (401) | `vibemon refused the admin token in <file>` | `omp-cloud setup` |
+| Anything else | `vibemon did not answer: <message>` | `systemctl status vmon` |
+
+The admin token itself never reaches the answer.

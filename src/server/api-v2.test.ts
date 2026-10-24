@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { LoginManager } from "../auth/login";
 import { GitService } from "../git";
@@ -124,7 +124,7 @@ describe("whoami (1.1)", () => {
 		expect(res.status).toBe(200);
 		const body = await jsonOf(res);
 
-		expect(body.service).toEqual({ version: isRecord(pkg) ? pkg.version : null, api: 5 });
+		expect(body.service).toEqual({ version: isRecord(pkg) ? pkg.version : null, api: 6, name: hostname() });
 		expect(body.capabilities).toEqual([
 			"threads.paging",
 			"threads.meta",
@@ -147,6 +147,9 @@ describe("whoami (1.1)", () => {
 			"threads.setup",
 			"threads.readonly",
 			"threads.subagent",
+			"devices.access",
+			"logins.list",
+			"capacity",
 		]);
 		expect(body.limits).toEqual({ maxMessageBytes: 32768, maxAnswerBytes: 4000, maxUploadBytes: MAX_SOURCE_BYTES, listMax: 200, maxTurns: 200 });
 		expect(body.models).toEqual([{ id: "anthropic/claude-a" }, { id: "fake/fake-model" }]);

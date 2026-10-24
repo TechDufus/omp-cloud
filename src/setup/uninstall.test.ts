@@ -148,6 +148,67 @@ describe("sandboxes", () => {
 	});
 });
 
+describe("uninstall on a vibemon node", () => {
+	/** A node as `omp-cloud setup node` leaves it: the managed binary and its link, no key, no service data, no user units. */
+	async function nodeHost(options: RigOptions = {}): Promise<TestRig> {
+		const testRig = await rig(dir, { host: { root: [rootReport({ team: null, key: undefined })] }, node: true, ...options });
+		const { paths } = testRig.ctx;
+		await mkdir(join(paths.appDir, "versions", "0.5.1"), { recursive: true });
+		await mkdir(join(paths.appDir, "bin"), { recursive: true });
+		await writeFile(join(paths.appDir, "manager.json"), '{"manager":"omp-cloud"}');
+		await writeFile(join(paths.appDir, "versions", "0.5.1", "omp-cloud"), "#!/bin/sh\n");
+		await symlink(join(paths.appDir, "versions", "0.5.1", "omp-cloud"), join(paths.appDir, "bin", "omp-cloud"));
+		await mkdir(paths.binDir, { recursive: true });
+		await symlink(join(paths.appDir, "bin", "omp-cloud"), join(paths.binDir, "omp-cloud"));
+		return testRig;
+	}
+
+	test("retires no sandboxes, touches no user unit or plugin, and runs the root part", async () => {
+		const testRig = await nodeHost();
+		expect(await runUninstall(args("--yes"), testRig.ctx)).toBe(0);
+		const { paths } = testRig.ctx;
+		expect(sudoLines(testRig)).toEqual([`sudo -- ${testRig.ctx.self.argv[0]} setup system --uninstall --user ${TEST_USER}`]);
+		const stepIds = testRig.ctx.reporter.steps.map((step) => step.id);
+		expect(stepIds).not.toContain("uninstall.sandboxes");
+		expect(stepIds).not.toContain("plugin.remove");
+		expect(testRig.vmon.requests).toEqual([]);
+		expect(testRig.host.lines().filter((line) => line.startsWith("systemctl --user"))).toEqual([]);
+		expect(await exists(join(paths.binDir, "omp-cloud"))).toBe(false);
+		expect(await exists(paths.appDir)).toBe(true);
+	});
+
+	test("the plan names the node's units and the VMs that are lost, not the team's sandboxes", async () => {
+		const testRig = await nodeHost();
+		await runUninstall(args("--yes"), testRig.ctx);
+		const out = testRig.out.join("");
+		expect(out).toContain("VMs running on this machine are lost; the server restores their threads on its other machines");
+		expect(out).toContain("the system units vmon, omp-cloud-node-net and omp-cloud-vmon-sync");
+		expect(out).toContain("asks for sudo once");
+		expect(out).not.toContain("sandboxes of the omp-cloud team");
+		expect(out).not.toContain("user units");
+		expect(out).not.toContain("omp plugin");
+	});
+
+	test("--purge passes it to the root part and removes only the app directory", async () => {
+		const testRig = await nodeHost();
+		const { paths } = testRig.ctx;
+		await mkdir(paths.configDir, { recursive: true });
+		await writeFile(join(paths.configDir, "config.yml"), "url: https://elsewhere\n");
+		expect(await runUninstall(args("--yes", "--purge"), testRig.ctx)).toBe(0);
+		expect(sudoLines(testRig)).toEqual([`sudo -- ${testRig.ctx.self.argv[0]} setup system --uninstall --user ${TEST_USER} --purge`]);
+		expect(await exists(paths.appDir)).toBe(false);
+		expect(await readFile(join(paths.configDir, "config.yml"), "utf8")).toBe("url: https://elsewhere\n");
+		expect(testRig.out.join("")).toContain("--purge: also delete vibemon");
+	});
+
+	test("needs no team key, and a failed root part keeps the app directory", async () => {
+		const testRig = await nodeHost({ host: { root: [rootReport({ ok: false, team: null, steps: [{ id: "system.uninstall.vmon", status: "failed", detail: "could not stop vmon" }] })] } });
+		expect(await Bun.file(testRig.ctx.paths.vmonKey).exists()).toBe(false);
+		expect(await runUninstall(args("--yes", "--purge"), testRig.ctx)).toBe(1);
+		expect(await exists(testRig.ctx.paths.appDir)).toBe(true);
+	});
+});
+
 describe("refusals", () => {
 	test("as root", async () => {
 		const testRig = await installedHost({ uid: 0 });

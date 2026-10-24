@@ -662,7 +662,7 @@ describe("choosing a cloud through the tool", () => {
 		const after = await call(fresh.cloud, fresh.host, { op: "info" });
 		expect(after.isError).toBeUndefined();
 		expect(text(after)).toContain(`cloud: personal · http://127.0.0.1:${personal.port} · this session's choice`);
-		expect(text(after)).toContain("you are owner (other)");
+		expect(text(after)).toContain("you: the owner, with the server's owner token (full access)");
 	});
 
 	test("the choice follows the session: a later omp session of this one reads it back from its entries", async () => {

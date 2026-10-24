@@ -78,7 +78,7 @@ export interface Whoami {
 	vms: { running: number; paused: number };
 	threads: { starting: number; working: number; waiting: number; idle: number; failed: number };
 	/** The paired device this request was made with; null for the owner token. */
-	device: DeviceRef | null;
+	device: WhoamiDevice | null;
 	/** The TLS identity of the remote listener when the request arrived over it; null on the loopback listener. */
 	remote: { fingerprint: string } | null;
 	/** `api` 1 and no capabilities when the service reports no version fields. */
@@ -95,17 +95,20 @@ export interface Whoami {
 }
 
 export type UpdateState = "idle" | "checking" | "downloading" | "ready" | "applying" | "failed" | "unsupported";
+export type UpdateMode = "off" | "notify" | "auto";
 
 /** The update state `whoami` carries for the owner and for devices alike. */
 export interface WhoamiUpdate {
 	state: UpdateState;
 	/** The version that is ready or being fetched; null when none. */
 	available: string | null;
+	/** The service's update mode; `notify` when the service reports none. */
+	mode: UpdateMode;
 }
 
 /** `GET /api/v1/update` (the owner's): what the updater is doing and why. */
 export interface UpdateStatus {
-	mode: "off" | "notify" | "auto";
+	mode: UpdateMode;
 	/** The service runs from a managed install; false when from a git checkout (updates are then `unsupported`). */
 	managed: boolean;
 	state: UpdateState;
@@ -117,12 +120,16 @@ export interface UpdateStatus {
 	error: string | null;
 	message: string | null;
 	checkedAt: string | null;
+	/** The vibemon the service runs and the one this release needs (`components.vmon`); null when unknown or not installed. */
+	vmon: { installed: string | null; required: string | null };
 }
 
 export interface ServiceInfo {
 	/** `""` when the service reports no version. */
 	version: string;
 	api: number;
+	/** What the cloud is called (`service.name`, else the server's host name); `""` for a service that predates names. */
+	name: string;
 }
 
 export interface ServiceLimits {
@@ -144,6 +151,14 @@ export interface Spend {
 export interface DeviceRef {
 	id: string;
 	name: string;
+}
+
+/** What a device may do: `full` is everything the owner token can, `threads` only its own threads. */
+export type DeviceAccess = "full" | "threads";
+
+/** The device a request was made with, in `whoami`. */
+export interface WhoamiDevice extends DeviceRef {
+	access: DeviceAccess;
 }
 
 export interface ThreadLatest {
@@ -536,6 +551,7 @@ export interface Device {
 	id: string;
 	name: string;
 	platform: string;
+	access: DeviceAccess;
 	createdAt: string;
 	pairedFrom: string;
 	lastSeenAt: string;
@@ -549,6 +565,42 @@ export interface Revoked {
 	device: DeviceRef;
 	/** Threads that device started and that still run. */
 	runningThreads: string[];
+}
+
+/** One entry of `GET /api/v1/logins` (`logins.list`): what the cloud is logged in to. */
+export interface LoginEntry {
+	/** The provider id, or `mcp:<url>`. */
+	provider: string;
+	kind: "provider" | "mcp";
+	/** `""` when unknown, and for a caller without full access. */
+	account: string;
+	/** ISO time; `""` when unknown. */
+	loggedInAt: string;
+	/** ISO time the login must be renewed by; `""` when it does not expire this way. */
+	renewBy: string;
+	disabled: boolean;
+	/** The broker's cause of a disable; `""` otherwise. */
+	note: string;
+}
+
+/** `GET /api/v1/logins`. */
+export interface LoginList {
+	logins: LoginEntry[];
+	/** `""` when the broker answered. */
+	brokerError: string;
+}
+
+/** `GET /api/v1/capacity` (`capacity`): the vibemon cluster as one pool. Every number is `0` when it is not `available`. */
+export interface Capacity {
+	available: boolean;
+	problem: string;
+	fix: string;
+	machines: { total: number; ready: number };
+	vcpus: { total: number; allocated: number };
+	memoryMB: { total: number; allocated: number };
+	diskFreeMB: number;
+	vms: { cluster: number; cloud: { running: number; paused: number; limit: number }; size: { vcpus: number; memoryMB: number } };
+	cluster: { accepting: boolean; address: string; joinCommand: string; versionSkew: boolean };
 }
 
 // ---------------------------------------------------------------------------

@@ -55,11 +55,11 @@ describe("/cloud status", () => {
 		expect(type).toBe("info");
 		expect(text).toBe(
 			[
-				"☁ omp-cloud",
+				"☁ omp-cloud · omp-cloud 0.4.0",
+				"  you: the owner, with the server's owner token (full access)",
 				`  url: ${origin} (${personal})`,
 				`  token: set (${personal})`,
 				"  deliver: tray (default)",
-				"  user: dev",
 				"  runs: anthropic",
 				"  a handoff from here runs: anthropic/claude-sonnet-5-5 (thinking high), this session's model",
 				"  fallback for requests that name no model: anthropic/claude-sonnet-5-5 · omp 18.12.3",
@@ -77,11 +77,41 @@ describe("/cloud status", () => {
 		expect(text).not.toContain("default model");
 	});
 
+	test("the cloud's name, version, your access, the update mode and the capacity come first", async () => {
+		const named = Bun.serve({
+			port: 0,
+			fetch: req => {
+				const path = new URL(req.url).pathname;
+				if (path === "/api/v1/whoami") {
+					return Response.json(whoami({ service: { version: "0.6.0", api: 6, name: "home" }, capabilities: ["capacity"], device: { id: "d1", name: "laptop", access: "threads" }, update: { state: "idle", available: null, mode: "auto" } }));
+				}
+				if (path === "/api/v1/capacity") {
+					return Response.json({ available: true, machines: { total: 2, ready: 2 }, vcpus: { total: 24, allocated: 4 }, memoryMB: { total: 98304, allocated: 8192 }, vms: { cluster: 2, cloud: { running: 2, paused: 0, limit: 32 } }, cluster: { versionSkew: false } });
+				}
+				return Response.json({ error: "not found" }, { status: 404 });
+			},
+		});
+		try {
+			const env = await cloudEnv(`url: http://127.0.0.1:${named.port}\ntoken: tok\n`);
+			const host = fakeHost({ cwd: await tmp("omp-cloud-repo-") });
+			await new Cloud(fakePi().pi, "/own", env, await tmp("omp-cloud-home-"), undefined, undefined, FAST_RETRY).handle("status", { ...host.host, switchSession: async () => ({ cancelled: false }) });
+			const [text = ""] = host.notes[0] ?? [];
+			expect(text.split("\n").slice(0, 4)).toEqual([
+				"☁ omp-cloud · home · omp-cloud 0.6.0",
+				"  you: device laptop, threads only (a connection with full access runs /cloud devices access laptop full)",
+				"  updates: auto · up to date",
+				"  capacity: 24 vCPU (4 allocated) · 96 GiB (8 allocated) · 2 machines · 2 of 32 VMs running",
+			]);
+		} finally {
+			void named.stop(true);
+		}
+	});
+
 	test("a !command token works and its output never shows", async () => {
 		const { text, personal } = await status({ personal: `url: ${origin}\ntoken: "!printf tok"\n` });
 		expect(text).toContain(`token: set (${personal})`);
 		expect(text).not.toContain("printf");
-		expect(text).toContain("user: dev");
+		expect(text).toContain("you: the owner, with the server's owner token (full access)");
 	});
 
 	test("the environment is the origin when it wins", async () => {
@@ -96,7 +126,7 @@ describe("/cloud status", () => {
 		expect(text).toMatch(new RegExp(`url: ${origin} \\(.*\\) · the repository's value is ignored`));
 		expect(text).toContain(`repository file: ${repoFile}`);
 		expect(text).not.toContain("evil.invalid");
-		expect(text).toContain("user: dev");
+		expect(text).toContain("you: the owner, with the server's owner token (full access)");
 	});
 
 	test("a repository url with no personal one leaves it unconfigured, and the error names the ignored key", async () => {
@@ -114,7 +144,7 @@ describe("/cloud status", () => {
 		expect(text).toContain(`warning: ${personal}: colour is not a known key, ignored`);
 		expect(text).toContain(`warning: ${personal}: secretEnv is not a list, ignored`);
 		expect(text).not.toContain("secret-marker");
-		expect(text).toContain("user: dev");
+		expect(text).toContain("you: the owner, with the server's owner token (full access)");
 	});
 
 	test("an unreachable service still reports the connection, as an error", async () => {
@@ -122,7 +152,7 @@ describe("/cloud status", () => {
 		expect(type).toBe("error");
 		expect(text).toContain(`url: http://127.0.0.1:9 (${personal})`);
 		expect(text).toContain(`token: set (${personal})`);
-		expect(text).not.toContain("user:");
+		expect(text).not.toContain("you:");
 	});
 
 	test("nothing configured says how to configure it, naming the personal file", async () => {
@@ -154,6 +184,7 @@ describe("/cloud login", () => {
 			fetch: req => {
 				const path = new URL(req.url).pathname;
 				seen.push(`${req.method} ${path}`);
+				if (req.method === "GET" && path === "/api/v1/whoami") return Response.json(whoami());
 				if (req.method === "POST" && path === "/api/v1/logins") return Response.json(login({ url: URL_SHOWN, instructions: "Sign in, then paste the address." }), { status: 201 });
 				if (req.method === "POST" && path === "/api/v1/logins/l1/input") return Response.json(login({ state: "done", account: "ada" }));
 				return Response.json({ error: "not found" }, { status: 404 });
@@ -185,14 +216,14 @@ describe("/cloud login", () => {
 		expect(card?.message.content).not.toContain(URL_SHOWN);
 		expect(host.notes.some(([text]) => text.includes(URL_SHOWN))).toBe(false);
 		expect(host.notes.at(-1)).toEqual(["☁ the cloud broker is logged in to openai-codex as ada", "info"]);
-		expect(seen).toEqual(["POST /api/v1/logins", "POST /api/v1/logins/l1/input"]);
+		expect(seen).toEqual(["GET /api/v1/whoami", "POST /api/v1/logins", "POST /api/v1/logins/l1/input"]);
 	});
 
 	test("in the interactive UI while the agent is working it refuses before any login starts", async () => {
 		const { host, pi } = await loginIn("tui", false);
 		expect(host.notes).toEqual([["☁ the agent is working: run /cloud login again when it is idle, so the sign-in link can go in the transcript", "error"]]);
 		expect(pi.sent).toEqual([]);
-		expect(seen).toEqual([]);
+		expect(seen).toEqual(["GET /api/v1/whoami"]);
 	});
 
 	test("without the interactive UI the link is an info notification and no card is posted", async () => {

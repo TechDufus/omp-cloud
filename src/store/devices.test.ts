@@ -1,11 +1,13 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sha256Hex } from "../pairing/secrets";
 import { pairDevice } from "../pairing/test-support";
 import { Store } from "./index";
+import { MIGRATIONS } from "./schema";
 import type { ClaimOutcome, NewThread, OfferRedemption } from "./types";
 
 const T0 = Date.UTC(2026, 0, 1);
@@ -78,6 +80,73 @@ describe("migration 8", () => {
 		expect(raw.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBeGreaterThanOrEqual(8);
 		raw.close();
 		store = Store.open({ dataDir: dir, now: () => new Date(clock) });
+	});
+});
+
+describe("migration 17", () => {
+	test("a device with no offer (paired over ssh) becomes full, a claimed one stays threads, and an offer defaults to threads", () => {
+		store.close();
+		for (const suffix of ["", "-wal", "-shm"]) rmSync(join(dir, `omp-cloud.db${suffix}`), { force: true });
+		const raw = new Database(join(dir, "omp-cloud.db"));
+		for (const migration of MIGRATIONS.slice(0, 16)) raw.run(migration);
+		raw.run("PRAGMA user_version = 16");
+		const device = (id: string, name: string): void => {
+			raw
+				.query("INSERT INTO devices (id, owner, name, platform, token_sha256, created_at, paired_from) VALUES (?, 'owner', ?, 'linux', ?, ?, 'ssh')")
+				.run(id, name, sha256Hex(id), iso());
+		};
+		device("via-ssh", "ssh laptop");
+		device("via-code", "code laptop");
+		raw
+			.query("INSERT INTO pairing_offers (id, owner, secret_sha256, created_at, expires_at, status, device_id) VALUES ('o1', 'owner', ?, ?, ?, 'paired', 'via-code')")
+			.run(sha256Hex("s"), iso(), iso(5 * MINUTE));
+		raw.close();
+
+		store = Store.open({ dataDir: dir, now: () => new Date(clock) });
+		expect(store.device("via-ssh")?.access).toBe("full");
+		expect(store.device("via-code")?.access).toBe("threads");
+		store.close();
+		const check = new Database(join(dir, "omp-cloud.db"), { readonly: true });
+		expect(check.query<{ access: string }, []>("SELECT access FROM pairing_offers WHERE id = 'o1'").get()?.access).toBe("threads");
+		check.close();
+		store = Store.open({ dataDir: dir, now: () => new Date(clock) });
+	});
+});
+
+describe("device access", () => {
+	test("an approval's access is what the claimed device gets; a plain approval and addDevice's access are as given", () => {
+		expect(pairDevice(store, { name: "default" })).toMatchObject({ name: "default" });
+		const full = pairDevice(store, { name: "full one", access: "full" });
+		const threads = pairDevice(store, { name: "threads one", access: "threads" });
+		expect(store.device(full.id)?.access).toBe("full");
+		expect(store.device(threads.id)?.access).toBe("threads");
+		expect(store.devices("owner").map(d => [d.name, d.access])).toEqual([
+			["default", "threads"],
+			["full one", "full"],
+			["threads one", "threads"],
+		]);
+		const added = store.addDevice({ id: "ssh-1", owner: "owner", name: "ssh", platform: "linux", tokenSha256: sha256Hex("t"), pairedFrom: "ssh", access: "full" });
+		expect(store.device(added.id)?.access).toBe("full");
+		expect(store.deviceByTokenSha256(sha256Hex("t"))?.access).toBe("full");
+	});
+
+	test("a decline ignores the access it is given, and a declined offer creates no device", () => {
+		open();
+		store.redeemOffer(redemption("offer-1", "secret-1", "r1"));
+		expect(store.decideOffer("offer-1", "decline", "full")).toBe("done");
+		expect(store.claimOffer("r1", sha256Hex("request-secret-r1"), { id: "d", tokenSha256: sha256Hex("x") })).toEqual({ kind: "declined" });
+		expect(store.devices("owner")).toEqual([]);
+	});
+
+	test("setDeviceAccess changes an active device and answers it; unknown, revoked and other owners' devices answer null", () => {
+		const device = pairDevice(store, { name: "laptop" });
+		expect(store.setDeviceAccess(device.id, "owner", "full")).toMatchObject({ id: device.id, access: "full" });
+		expect(store.device(device.id)?.access).toBe("full");
+		expect(store.setDeviceAccess(device.id, "owner", "threads")?.access).toBe("threads");
+		expect(store.setDeviceAccess("nope", "owner", "full")).toBeNull();
+		expect(store.setDeviceAccess(device.id, "someone else", "full")).toBeNull();
+		store.revokeDevice(device.id, "owner");
+		expect(store.setDeviceAccess(device.id, "owner", "full")).toBeNull();
 	});
 });
 

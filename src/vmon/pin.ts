@@ -6,6 +6,7 @@
  */
 import { stat } from "node:fs/promises";
 import helperScript from "../../infra/vmon-install.sh" with { type: "text" };
+import syncScript from "../../infra/vmon-sync.sh" with { type: "text" };
 import pin from "../../infra/vmon.json" with { type: "json" };
 import { isRecord } from "../guards";
 
@@ -22,6 +23,10 @@ export const VMON_BINARY = "/opt/vmon/vmon";
 export const VMON_HELPER_PATH = "/usr/local/libexec/omp-cloud/vmon-install";
 /** The text of `infra/vmon-install.sh`, carried by the binary: `omp-cloud setup system` installs it as the root helper at {@link VMON_HELPER_PATH}. */
 export const VMON_HELPER_SCRIPT: string = helperScript;
+/** The root script a node's timer runs to keep its vmon at the server's version. */
+export const VMON_SYNC_PATH = "/usr/local/libexec/omp-cloud/vmon-sync";
+/** The text of `infra/vmon-sync.sh`, carried by the binary: `omp-cloud setup node` installs it at {@link VMON_SYNC_PATH}. */
+export const VMON_SYNC_SCRIPT: string = syncScript;
 
 /** The helper takes up to a download of two tarballs, a restart (stop timeout 60 s) and a 60 s health wait, twice when it rolls back. */
 const HELPER_TIMEOUT_MS = 5 * 60_000;

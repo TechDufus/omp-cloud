@@ -1,13 +1,22 @@
 /** The header's update pill, after Tern's: nothing when up to date, else the state with its one action. */
 import { CircleArrowUp, CircleCheck, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import { useState } from "react";
+import { getCapacity } from "../api";
 import { Modal } from "../kit/ui";
 import { Markdown } from "./Markdown";
+import { useQuery } from "./query";
+import { useAccess } from "./session";
+import { vmonMoves, vmonMoveText } from "./update";
 import { useUpdate } from "./update-context";
 
 export function UpdatePill() {
-	const { pill, busy, apply, check, dismiss } = useUpdate();
+	const { pill, status, busy, apply, check, dismiss } = useUpdate();
+	const full = useAccess() === "full";
 	const [confirming, setConfirming] = useState(false);
+	// The machine count is read only while the modal is open on a release that moves vibemon.
+	const moving = status !== undefined && vmonMoves(status.components.vmon);
+	const capacity = useQuery(["update-capacity"], () => getCapacity(), { enabled: confirming && moving });
+	const vmonText = status === undefined ? "" : vmonMoveText(status.components.vmon, capacity.data?.available ? capacity.data.machines.total : undefined);
 	const [reading, setReading] = useState(false);
 	if (pill === null) return null;
 
@@ -41,15 +50,17 @@ export function UpdatePill() {
 				<span className="update-pill" data-tone="bad" role="alert" title={pill.error}>
 					<TriangleAlert size={13} />
 					<span className="update-pill-text">Update failed: {pill.error}</span>
-					<button
-						type="button"
-						className="btn"
-						data-size="sm"
-						disabled={busy}
-						onClick={() => void (pill.retry === "apply" ? apply() : check())}
-					>
-						Retry
-					</button>
+					{full && (
+						<button
+							type="button"
+							className="btn"
+							data-size="sm"
+							disabled={busy}
+							onClick={() => void (pill.retry === "apply" ? apply() : check())}
+						>
+							Retry
+						</button>
+					)}
 				</span>
 			);
 		case "updated":
@@ -75,12 +86,14 @@ export function UpdatePill() {
 		case "ready":
 			return (
 				<>
-					<span className="update-pill" data-tone="accent" role="status">
+					<span className="update-pill" data-tone="accent" role="status" title={full ? undefined : "A connection with full access installs it"}>
 						<CircleArrowUp size={13} />
 						<span className="update-pill-text">Update ready · {pill.version}</span>
-						<button type="button" className="btn" data-variant="accent" data-size="sm" disabled={busy} onClick={() => setConfirming(true)}>
-							Restart to update
-						</button>
+						{full && (
+							<button type="button" className="btn" data-variant="accent" data-size="sm" disabled={busy} onClick={() => setConfirming(true)}>
+								Restart to update
+							</button>
+						)}
 					</span>
 					<Modal
 						open={confirming}
@@ -99,6 +112,7 @@ export function UpdatePill() {
 							omp-cloud restarts to run {pill.version}. This dashboard signs out when the service comes back; open a new link with{" "}
 							<code>/cloud dashboard</code>.
 						</p>
+						{vmonText !== "" && <p>{vmonText}</p>}
 					</Modal>
 				</>
 			);

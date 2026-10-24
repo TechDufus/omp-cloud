@@ -26,7 +26,7 @@ export function whoami(over: Partial<Whoami> = {}): Whoami {
 		threads: { starting: 0, working: 0, waiting: 0, idle: 0, failed: 0 },
 		device: null,
 		remote: null,
-		service: { version: "0.4.0", api: 2 },
+		service: { version: "0.4.0", api: 2, name: "" },
 		capabilities: [],
 		limits: { maxMessageBytes: 32768, maxAnswerBytes: 4000, maxUploadBytes: 1024 * 1024 * 1024, listMax: 200, maxTurns: 200 },
 		spend: null,

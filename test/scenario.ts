@@ -84,6 +84,7 @@ import { takeRunLockOrExit } from "./run-lock";
 const REPO_ROOT = join(import.meta.dir, "..");
 const VMON_URL = "http://127.0.0.1:3000";
 const VMON_KEY_FILE = join(homedir(), ".config", "omp-cloud", "vmon.key");
+const VMON_ADMIN_TOKEN_FILE = join(homedir(), ".config", "omp-cloud", "vmon-admin.token");
 const PROVIDER_HOST = "10.254.254.1";
 const GATEWAY_URL = `http://${PROVIDER_HOST}:4000`;
 const CLIENTS_FILE = join(homedir(), ".local", "share", "omp-cloud", "auth-home", "clients.json");
@@ -148,6 +149,8 @@ const startedAt = performance.now();
 // Everything the finally block cleans up.
 let tempDir: string | null = null;
 let vmonKey: string | null = null;
+/** Whether `omp-cloud setup` left the vibemon admin token this host's capacity is read with. */
+let adminToken = false;
 let threadId: string | null = null;
 let provider: FakeProvider | null = null;
 let gitServer: GitHttpServer | null = null;
@@ -562,13 +565,14 @@ async function run(): Promise<void> {
 		gitServer = server;
 		remoteUrl = server.url("app");
 		remoteHost = server.host;
+		adminToken = await Bun.file(VMON_ADMIN_TOKEN_FILE).exists();
 
 		const providers = obj(obj(Bun.YAML.parse(modelsYaml(providerUrl)), "fake models.yml").providers, "providers");
 		const config = {
 			listen: `127.0.0.1:${listenPort}`,
 			apiTokenSha256: createHash("sha256").update(token).digest("hex"),
 			dataDir: join(dir, "data"),
-			vmon: { url: VMON_URL, keyFile: VMON_KEY_FILE, template: "omp-agent" },
+			vmon: { url: VMON_URL, keyFile: VMON_KEY_FILE, template: "omp-agent", ...(adminToken ? { adminTokenFile: VMON_ADMIN_TOKEN_FILE } : {}) },
 			gateway: { url: GATEWAY_URL, clientsFile: CLIENTS_FILE },
 			broker: { url: BROKER_URL, tokenFile: BROKER_TOKEN_FILE },
 			mcp: { listen: `${PROVIDER_HOST}:4101` },
@@ -1830,7 +1834,9 @@ async function run(): Promise<void> {
 		expectEqual("service.version", service.version, pkg.version);
 		expectContains("service.version", text(service.version), ".");
 		expectEqual("service.api", service.api, API_VERSION);
-		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.preview", "threads.setup", "threads.readonly", "threads.subagent"];
+		if (text(service.name) === "") throw new Error(`whoami.service.name is empty: ${JSON.stringify(service)}`);
+		expectEqual("update.mode", obj(who.update, "whoami.update").mode, "notify");
+		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.preview", "threads.setup", "threads.readonly", "threads.subagent", "devices.access", "logins.list", "capacity"];
 		expectEqual("capabilities", JSON.stringify((Array.isArray(who.capabilities) ? who.capabilities.map(text) : []).sort()), JSON.stringify([...expected].sort()));
 		const limits = obj(who.limits, "whoami.limits");
 		expectEqual("limits", JSON.stringify([limits.maxMessageBytes, limits.maxAnswerBytes, limits.listMax, limits.maxTurns]), JSON.stringify([32768, 4000, 200, 200]));
@@ -1860,6 +1866,18 @@ async function run(): Promise<void> {
 		await expectRefused("GET", `/threads/${scratchId}/turns/1/reply`, 404, "not found");
 		expectEqual("threads with the scratch ref after the delete", (await listThreads(`ref=${SCRATCH_REF}`)).total, 0);
 	});
+
+	// The service reads vibemon's admin API with the token `omp-cloud setup` wrote; a host that has not rerun setup has none.
+	await report.step("AD2 capacity: the cluster's vCPU and machines as vibemon reports them", async () => {
+		if (!adminToken) return "capacity: skipped (no vmon-admin.token; rerun omp-cloud setup)";
+		const capacity = await apiJson("GET", "/capacity", 200);
+		expectEqual("capacity.available", capacity.available, true);
+		const machines = obj(capacity.machines, "capacity.machines");
+		if (!(Number(machines.total) >= 1)) throw new Error(`capacity.machines.total is below 1: ${JSON.stringify(machines)}`);
+		const vcpus = obj(capacity.vcpus, "capacity.vcpus");
+		if (!(Number(vcpus.total) > 0)) throw new Error(`capacity.vcpus.total is not above 0: ${JSON.stringify(vcpus)}`);
+		return `${machines.total} machine(s), ${vcpus.total} vCPU (${vcpus.allocated} allocated)`;
+	}, shown => shown);
 
 	await report.step("AF environment: setup runs once per repository state, its snapshot starts the VMs (egress still applies), a changed lockfile prepares again", async () => {
 		const repo = join(dir, "repo-af");

@@ -6,6 +6,7 @@ import pkg from "../../package.json" with { type: "json" };
 import { hostOmp } from "../omp-version";
 import { compareVersions } from "../update/manifest";
 import { type CommandResult, type CommandRunner, runCommand } from "../update/system";
+import { isPrivateLan } from "./ipv4";
 import { detectPackageManager, installCommand, type PackageManager, PREFLIGHT_TOOLS, packagesFor } from "./packages";
 import type { StepResult } from "./steps";
 
@@ -42,6 +43,11 @@ export interface PreflightResult {
 	/** Null when omp is missing (setup installs it). */
 	omp: { path: string; version: string } | null;
 }
+
+export type PreflightMode = "setup" | "doctor" | "node";
+
+/** The ports a node checks: vibemon's cluster listeners; every other port of the server stack is the server's. */
+const NODE_PORTS: readonly number[] = [7946, 7947];
 
 const GIB = 1024 ** 3;
 const MIN_DISK_BYTES = 30 * GIB;
@@ -207,14 +213,14 @@ async function checkOmp(deps: PreflightDeps, mode: "setup" | "doctor"): Promise<
 	return { step: step("omp", "ok", `omp ${found.version} at ${found.path}`), omp: found };
 }
 
-function checkTools(deps: PreflightDeps, mode: "setup" | "doctor", packageManager: PackageManager | null): { step: StepResult; missing: string[] } {
+function checkTools(deps: PreflightDeps, mode: PreflightMode, packageManager: PackageManager | null): { step: StepResult; missing: string[] } {
 	const missing = PREFLIGHT_TOOLS.filter((tool) => deps.which(tool) === null);
 	if (missing.length === 0) return { step: step("tools", "ok", `all ${PREFLIGHT_TOOLS.length} required tools are installed`), missing: [] };
 	if (packageManager === null) {
 		return { step: step("tools", "failed", `missing tools: ${missing.join(", ")}; no package manager (apt, dnf or pacman) was found to install them`, `install: ${missing.join(" ")}`), missing };
 	}
 	const packages = packagesFor(packageManager, missing);
-	if (mode === "setup") {
+	if (mode !== "doctor") {
 		return { step: step("tools", "skipped", `missing: ${missing.join(", ")}; will be installed: ${packages.join(", ")}`), missing };
 	}
 	return { step: step("tools", "failed", `missing tools: ${missing.join(", ")}`, installCommand(packageManager, packages)), missing };
@@ -247,11 +253,11 @@ async function checkRam(deps: PreflightDeps): Promise<StepResult> {
 	return step("ram", "ok", `${gib} GiB RAM`);
 }
 
-async function checkPorts(deps: PreflightDeps): Promise<StepResult> {
+async function checkPorts(deps: PreflightDeps, mode: PreflightMode): Promise<StepResult> {
 	const free: number[] = [];
 	const ours: number[] = [];
 	const strangers: number[] = [];
-	for (const { port, owner } of PORTS) {
+	for (const { port, owner } of mode === "node" ? PORTS.filter((entry) => NODE_PORTS.includes(entry.port)) : PORTS) {
 		if (!(await deps.portInUse(port))) {
 			free.push(port);
 			continue;
@@ -274,14 +280,22 @@ async function checkPorts(deps: PreflightDeps): Promise<StepResult> {
 	return step("ports", "ok", parts.join("; "));
 }
 
-async function checkServiceIp(deps: PreflightDeps): Promise<StepResult> {
+/** The IPv4 addresses of this machine and the device each is on; null when `ip` cannot list them. */
+async function localAddresses(deps: PreflightDeps): Promise<{ device: string; address: string }[] | null> {
 	const result = await attempt(deps.run, [deps.which("ip") ?? "ip", "-o", "-4", "addr", "show"]);
-	if (result === null || result.code !== 0) return step("service-ip", "skipped", `could not list the host's addresses to look for ${SERVICE_IP}`);
-	const holders: string[] = [];
+	if (result === null || result.code !== 0) return null;
+	const found: { device: string; address: string }[] = [];
 	for (const line of result.stdout.split("\n")) {
 		const match = /^\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+)\//.exec(line);
-		if (match?.[2] === SERVICE_IP && match[1] !== undefined) holders.push(match[1].split("@")[0] ?? match[1]);
+		if (match?.[1] !== undefined && match[2] !== undefined) found.push({ device: match[1].split("@")[0] ?? match[1], address: match[2] });
 	}
+	return found;
+}
+
+async function checkServiceIp(deps: PreflightDeps): Promise<StepResult> {
+	const addresses = await localAddresses(deps);
+	if (addresses === null) return step("service-ip", "skipped", `could not list the host's addresses to look for ${SERVICE_IP}`);
+	const holders = addresses.filter((entry) => entry.address === SERVICE_IP).map((entry) => entry.device);
 	const foreign = holders.find((device) => device !== SERVICE_DEVICE);
 	if (foreign !== undefined) {
 		return step("service-ip", "failed", `${SERVICE_IP} is already on the device ${foreign}; sandboxes reach the host only through it on ${SERVICE_DEVICE}`, `remove ${SERVICE_IP} from ${foreign}: sudo ip addr del ${SERVICE_IP}/32 dev ${foreign}, and find what put it there`);
@@ -290,18 +304,41 @@ async function checkServiceIp(deps: PreflightDeps): Promise<StepResult> {
 	return step("service-ip", "ok", `${SERVICE_IP} is free (setup creates ${SERVICE_DEVICE})`);
 }
 
+/** The address other vibemon machines join on must be this machine's own, on a real device, and a LAN address. */
+async function checkClusterAddress(deps: PreflightDeps, address: string): Promise<StepResult> {
+	const addresses = await localAddresses(deps);
+	if (addresses === null) {
+		return step("cluster-address", "failed", `could not list the host's addresses to look for ${address}`, "check that `ip -o -4 addr show` works on this machine");
+	}
+	if (!addresses.some((entry) => entry.address === address && entry.device !== SERVICE_DEVICE)) {
+		return step("cluster-address", "failed", `${address} is not an address of this machine`, "pass this machine's own LAN address: omp-cloud setup --cluster-address <ip>, or --no-cluster to stay single-machine");
+	}
+	if (!isPrivateLan(address)) {
+		return step(
+			"cluster-address",
+			"failed",
+			`${address} is not a private LAN address: vibemon's cluster ports must not face the internet, and VMs on other machines reach the server's ${SERVICE_IP} only over a LAN`,
+			"pass a 10.x, 172.16-31.x or 192.168.x address of this machine: omp-cloud setup --cluster-address <ip>, or --no-cluster to stay single-machine",
+		);
+	}
+	return step("cluster-address", "ok", `${address} is a LAN address of this machine`);
+}
+
 /** What setup and the VM templates download from; any HTTP answer means the host can reach it. */
 const NETWORK_HOSTS: readonly { host: string; url: string; what: string }[] = [
 	{ host: "github.com", url: "https://github.com/", what: "omp-cloud and vibemon releases" },
 	{ host: "build.stencil.so", url: "https://build.stencil.so/", what: "omp's build service, which VM templates install omp from" },
 	{ host: "registry-1.docker.io", url: "https://registry-1.docker.io/v2/", what: "the base image of VM templates; it answers 401 when reachable" },
 ];
+/** A node only downloads omp-cloud and vibemon releases: its VMs' templates are built by the server. */
+const NODE_NETWORK_HOSTS = NETWORK_HOSTS.filter((target) => target.host === "github.com");
 
 /** Warning level only: a host that cannot be reached is named, but never blocks (a mirror or proxy may be in place). */
-async function checkNetwork(deps: PreflightDeps): Promise<StepResult> {
-	const answers = await Promise.all(NETWORK_HOSTS.map(async (target) => ({ target, status: await deps.httpsStatus(target.url) })));
+async function checkNetwork(deps: PreflightDeps, mode: PreflightMode): Promise<StepResult> {
+	const hosts = mode === "node" ? NODE_NETWORK_HOSTS : NETWORK_HOSTS;
+	const answers = await Promise.all(hosts.map(async (target) => ({ target, status: await deps.httpsStatus(target.url) })));
 	const unreachable = answers.filter((answer) => answer.status === null).map((answer) => answer.target);
-	if (unreachable.length === 0) return step("network", "ok", `reachable over HTTPS: ${NETWORK_HOSTS.map((target) => target.host).join(", ")}`);
+	if (unreachable.length === 0) return step("network", "ok", `reachable over HTTPS: ${hosts.map((target) => target.host).join(", ")}`);
 	return step(
 		"network",
 		"ok",
@@ -312,9 +349,12 @@ async function checkNetwork(deps: PreflightDeps): Promise<StepResult> {
 /**
  * Every precondition of the service host, read-only. A failed step names its fix. `setup` mode treats a missing omp and
  * missing tools as work setup does itself (a `skipped` step that says so); `doctor` mode reports them as failures.
- * `blocked` is true for an unsupported platform in either mode and, in `setup` mode, for any failed step.
+ * `node` mode is a machine that only joins a server's vibemon cluster: no omp and no user manager are needed, only
+ * ports 7946 and 7947 matter, and only github.com has to be reachable; a missing tool is work the root part does.
+ * `blocked` is true for an unsupported platform in any mode and, outside `doctor` mode, for any failed step.
+ * `options.clusterAddress` (a server that takes other machines) adds the `cluster-address` check.
  */
-export async function preflight(deps: PreflightDeps, mode: "setup" | "doctor"): Promise<PreflightResult> {
+export async function preflight(deps: PreflightDeps, mode: PreflightMode, options: { clusterAddress?: string } = {}): Promise<PreflightResult> {
 	if (deps.platform !== "linux" || deps.arch !== "x64") {
 		return {
 			steps: [
@@ -338,15 +378,15 @@ export async function preflight(deps: PreflightDeps, mode: "setup" | "doctor"): 
 			: step("kvm", "failed", "/dev/kvm is missing", "enable hardware virtualization in the BIOS, or nested virtualization in the VM settings of this machine"),
 	);
 	steps.push(await checkSystemd(deps));
-	steps.push(await checkUserManager(deps));
+	if (mode !== "node") steps.push(await checkUserManager(deps));
 	steps.push(
 		deps.which("sudo") === null
 			? step("sudo", "failed", "sudo is not installed; setup needs it once for the root part", "install sudo with your package manager as root, then run omp-cloud setup again")
 			: step("sudo", "ok", "sudo is installed"),
 	);
 
-	const ompCheck = await checkOmp(deps, mode);
-	steps.push(ompCheck.step);
+	const ompCheck = mode === "node" ? null : await checkOmp(deps, mode);
+	if (ompCheck !== null) steps.push(ompCheck.step);
 
 	const packageManager = detectPackageManager(deps.which);
 	const tools = checkTools(deps, mode, packageManager);
@@ -354,15 +394,16 @@ export async function preflight(deps: PreflightDeps, mode: "setup" | "doctor"): 
 
 	steps.push(await checkDisk(deps));
 	steps.push(await checkRam(deps));
-	steps.push(await checkPorts(deps));
+	steps.push(await checkPorts(deps, mode));
 	steps.push(await checkServiceIp(deps));
-	steps.push(await checkNetwork(deps));
+	if (options.clusterAddress !== undefined) steps.push(await checkClusterAddress(deps, options.clusterAddress));
+	steps.push(await checkNetwork(deps, mode));
 
 	return {
 		steps,
-		blocked: mode === "setup" && steps.some((s) => s.status === "failed"),
+		blocked: mode !== "doctor" && steps.some((s) => s.status === "failed"),
 		missingTools: tools.missing,
 		packageManager,
-		omp: ompCheck.omp,
+		omp: ompCheck?.omp ?? null,
 	};
 }

@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { cloudLines, knownClouds, notConfigured, readConfig, resolveConnection, statusLines, tilde, type CloudConfig, type ConfigInput } from "../src/config";
+import { lstat, mkdir, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { cloudLines, knownClouds, notConfigured, readConfig, resolveConnection, setDefaultCloud, statusLines, tilde, type CloudConfig, type ConfigInput, type ConnectionSource } from "../src/config";
+import { CloudClient } from "../src/api";
+import { CloudError } from "../src/errors";
 import { writeConnectionFile, type PairedConnection } from "../src/connection";
 import { UserError } from "../src/types";
 import { cleanup, tmp } from "./helpers";
@@ -44,6 +46,10 @@ const failure = async (p: Promise<unknown>): Promise<string> => {
 	return (err as UserError).message;
 };
 
+const PERSONAL_HINT = `the service refused the token in ~/.config/omp-cloud/config.yml: it must be the server's owner token (setup writes token: "!cat ~/.config/omp-cloud/service.token")`;
+const ENV_HINT = "the service refused the token in OMP_CLOUD_TOKEN (this omp's environment): correct it or unset it";
+const PAIRED_HINT = "the server refused this device's token: it was revoked, or the server was set up again; /cloud connect --replace pairs this machine again";
+
 describe("readConfig", () => {
 	test("no files and an empty environment: everything is empty, nothing was read", async () => {
 		const l = await layout();
@@ -60,6 +66,7 @@ describe("readConfig", () => {
 			secretEnv: [],
 			policy: {},
 			setup: undefined,
+			use: undefined,
 			deliver: "tray",
 			deliverFrom: undefined,
 			personalFile: l.personal,
@@ -374,7 +381,7 @@ describe("resolveConnection", () => {
 	const connect = async (personal: string, env: ConfigInput["env"] = {}) => resolveConnection(await read(await layout({ personal }), { env }));
 
 	test("a !command token is resolved by omp and its output trimmed", async () => {
-		expect(await connect('url: https://u.example\ntoken: "!printf \'tok\\n\'"\n')).toEqual({ url: "https://u.example", token: "tok", source: "personal", paired: undefined, ignoredToken: undefined });
+		expect(await connect('url: https://u.example\ntoken: "!printf \'tok\\n\'"\n')).toEqual({ url: "https://u.example", token: "tok", source: "personal", paired: undefined, ignoredToken: undefined, unauthorizedHint: PERSONAL_HINT });
 	});
 
 	test("a token that names an environment variable resolves to its value; anything else is a literal", async () => {
@@ -384,7 +391,7 @@ describe("resolveConnection", () => {
 	});
 
 	test("the environment alone is a whole connection", async () => {
-		expect(await connect("", { OMP_CLOUD_URL: "https://e.example/", OMP_CLOUD_TOKEN: "etok" })).toEqual({ url: "https://e.example", token: "etok", source: "env", paired: undefined, ignoredToken: undefined });
+		expect(await connect("", { OMP_CLOUD_URL: "https://e.example/", OMP_CLOUD_TOKEN: "etok" })).toEqual({ url: "https://e.example", token: "etok", source: "env", paired: undefined, ignoredToken: undefined, unauthorizedHint: ENV_HINT });
 	});
 
 	test("a missing url or token is the not-configured error", async () => {
@@ -460,7 +467,7 @@ describe("the clouds of a machine and the session's choice", () => {
 		const l = await layout({ personal: BOTH });
 		const cfg = await read(l, { env: ENV });
 		expect(await resolveConnection(cfg)).toMatchObject({ url: "https://env.example", token: "etok", source: "env" });
-		expect(await resolveConnection(cfg, "personal")).toEqual({ url: "https://personal.example", token: "ptok", source: "personal", paired: undefined, ignoredToken: undefined });
+		expect(await resolveConnection(cfg, "personal")).toEqual({ url: "https://personal.example", token: "ptok", source: "personal", paired: undefined, ignoredToken: undefined, unauthorizedHint: PERSONAL_HINT });
 		expect(await resolveConnection(cfg, "env")).toMatchObject({ url: "https://env.example", token: "etok", source: "env" });
 	});
 
@@ -508,5 +515,120 @@ describe("the clouds of a machine and the session's choice", () => {
 		await pair(only);
 		const onlyCfg = await read(only);
 		expect(cloudLines(onlyCfg, await knownClouds(onlyCfg), "paired", false)).toEqual(["cloud: paired · https://10.0.0.5:8443 · the default (the paired server; no url configured)"]);
+	});
+});
+
+describe("use: the default cloud of a machine", () => {
+	const BOTH = "url: https://personal.example\ntoken: ptok\n";
+	const ENV = { OMP_CLOUD_URL: "https://env.example/", OMP_CLOUD_TOKEN: "etok" };
+	const FILE = "~/.config/omp-cloud/config.yml";
+
+	test("the environment's url beats use:, and use: beats the personal url and the pairing", async () => {
+		const l = await layout({ personal: `${BOTH}use: paired\n` });
+		const connection = await pair(l);
+		expect(await resolveConnection(await read(l, { env: ENV }))).toMatchObject({ url: "https://env.example", source: "env" });
+		expect(await resolveConnection(await read(l))).toMatchObject({ url: "https://10.0.0.5:8443", token: connection.token, source: "paired", ignoredToken: undefined });
+
+		const personal = await layout({ personal: `${BOTH}use: personal\n` });
+		await pair(personal);
+		expect(await resolveConnection(await read(personal))).toMatchObject({ url: "https://personal.example", token: "ptok", source: "personal" });
+	});
+
+	test("use: personal with no personal url, and use: paired with no pairing, name the way out", async () => {
+		for (const source of ["personal", "paired"] as const) {
+			const l = await layout({ personal: `use: ${source}\n` });
+			expect(await failure(resolveConnection(await read(l)))).toBe(
+				`☁ use: ${source} in ${FILE} names a cloud this machine does not have (/cloud connect pairs one; /cloud use <cloud> --default picks another)`,
+			);
+		}
+	});
+
+	test("a session's own choice still wins over use:", async () => {
+		const l = await layout({ personal: `${BOTH}use: paired\n` });
+		expect(await resolveConnection(await read(l), "personal")).toMatchObject({ source: "personal" });
+	});
+
+	test("use: is a personal setting: a repository file's value is ignored with a warning; another value is reported", async () => {
+		const l = await layout({ personal: "use: elsewhere\n", repo: "use: paired\n" });
+		const cfg = await read(l);
+		expect(cfg.use).toBeUndefined();
+		expect(cfg.warnings).toEqual([`${l.personal}: use is not personal or paired, ignored`, `${l.repoFile}: use is a personal setting, ignored`]);
+		expect((await read(await layout({ personal: "use: paired\n" }))).use).toBe("paired");
+	});
+
+	test("cloudLines says the default came from use:, and statusLines shows the row", async () => {
+		const l = await layout({ personal: `${BOTH}use: paired\n` });
+		await pair(l);
+		const cfg = await read(l);
+		expect(cloudLines(cfg, await knownClouds(cfg), "paired", false)[0]).toBe(`cloud: paired · https://10.0.0.5:8443 · the default (use: paired in ${FILE})`);
+		expect(statusLines(cfg)).toContain(`  use: paired (${FILE})`);
+	});
+});
+
+describe("setDefaultCloud", () => {
+	const cfgOf = async (personal?: string): Promise<{ cfg: CloudConfig; l: Layout }> => {
+		const l = await layout(personal === undefined ? {} : { personal });
+		return { cfg: await read(l), l };
+	};
+
+	test("replaces a top-level use: and keeps every other line byte for byte", async () => {
+		const before = "# my settings\nurl: https://u.example\n\nuse: personal   # was this\ntoken: t\npolicy:\n  use: nested\n";
+		const { cfg, l } = await cfgOf(before);
+		await setDefaultCloud(cfg, "paired");
+		expect(await readFile(l.personal, "utf8")).toBe(before.replace("use: personal   # was this", "use: paired"));
+		expect((await stat(l.personal)).mode & 0o777).toBe(0o600);
+	});
+
+	test("appends use: when absent, on its own line even when the file does not end with a newline", async () => {
+		const { cfg, l } = await cfgOf("url: https://u.example\ntoken: t");
+		await setDefaultCloud(cfg, "personal");
+		expect(await readFile(l.personal, "utf8")).toBe("url: https://u.example\ntoken: t\nuse: personal\n");
+	});
+
+	test("creates a missing file and its directory with a header, mode 0600", async () => {
+		const { cfg, l } = await cfgOf();
+		await setDefaultCloud(cfg, "paired");
+		expect(await readFile(l.personal, "utf8")).toBe("# omp-cloud settings for this machine (see docs/configuration.md)\nuse: paired\n");
+		expect((await stat(l.personal)).mode & 0o777).toBe(0o600);
+		expect((await read(l)).use).toBe("paired");
+	});
+
+	test("a symlinked config.yml stays a link: the target is rewritten", async () => {
+		const l = await layout();
+		const real = join(await tmp("omp-cloud-dotfiles-"), "omp-cloud.yml");
+		await writeFile(real, "url: https://u.example\ntoken: t\n");
+		await mkdir(dirname(l.personal), { recursive: true });
+		await symlink(real, l.personal);
+		await setDefaultCloud(await read(l), "paired");
+		expect((await lstat(l.personal)).isSymbolicLink()).toBe(true);
+		expect(await readlink(l.personal)).toBe(real);
+		expect(await readFile(real, "utf8")).toBe("url: https://u.example\ntoken: t\nuse: paired\n");
+	});
+});
+
+describe("the 401 hint of each source", () => {
+	const refused = async (cfg: CloudConfig, choice?: ConnectionSource): Promise<CloudError> => {
+		const conn = await resolveConnection(cfg, choice);
+		const unauthorized = async (): Promise<Response> => Response.json({ error: "unauthorized" }, { status: 401 });
+		const err = await new CloudClient(conn.url, conn.token, unauthorized, { backoffMs: [] }, conn.unauthorizedHint).whoami().catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(CloudError);
+		return err as CloudError;
+	};
+
+	test("a paired device's token", async () => {
+		const l = await layout();
+		await pair(l);
+		expect((await refused(await read(l))).hint).toBe(PAIRED_HINT);
+	});
+
+	test("a token from OMP_CLOUD_TOKEN", async () => {
+		const l = await layout();
+		expect((await refused(await read(l, { env: { OMP_CLOUD_URL: "https://e.example", OMP_CLOUD_TOKEN: "etok" } }))).hint).toBe(ENV_HINT);
+	});
+
+	test("a token from the personal file, and an env url with the file's token as the personal choice", async () => {
+		const l = await layout({ personal: "url: https://u.example\ntoken: ptok\n" });
+		expect((await refused(await read(l))).hint).toBe(PERSONAL_HINT);
+		expect((await refused(await read(l, { env: { OMP_CLOUD_URL: "https://e.example", OMP_CLOUD_TOKEN: "etok" } }), "personal")).hint).toBe(PERSONAL_HINT);
 	});
 });

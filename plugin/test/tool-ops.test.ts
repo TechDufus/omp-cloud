@@ -30,7 +30,7 @@ import {
 import { describeCall, describeResult } from "../src/tool-view";
 import type { FollowState, PullResult } from "../src/verbs";
 import type { WaitOptions, WaitResult } from "../src/wait";
-import { UserError, type DiffStatResult, type DiffTextResult, type EventsPage, type FileResult, type Host, type IrcReceiptKind, type Question, type SentMessage, type ThreadDetail, type ThreadOrigin, type ThreadsPage, type TreeResult, type TurnTextPage, type Whoami } from "../src/types";
+import { UserError, type Capacity, type DiffStatResult, type DiffTextResult, type EventsPage, type FileResult, type Host, type IrcReceiptKind, type Question, type SentMessage, type ThreadDetail, type ThreadOrigin, type ThreadsPage, type TreeResult, type TurnTextPage, type Whoami } from "../src/types";
 import { detail, metrics, pending, question, summary, turn, whoami } from "./builders";
 import { fakeHost } from "./fakes";
 
@@ -72,6 +72,8 @@ interface World {
 	settingsError: CloudError | undefined;
 	/** What the host's cloud lines say: the clouds this machine knows and the one the session uses. */
 	clouds: CloudsView;
+	/** What `GET /capacity` answers; undefined makes it fail. */
+	capacity: Capacity | undefined;
 }
 
 function world(): World {
@@ -92,6 +94,7 @@ function world(): World {
 		settings: [],
 		settingsError: undefined,
 		clouds: { known: [], active: undefined, chosen: false, lines: [] },
+		capacity: undefined,
 	};
 	w.threads.set(ID, detail({ id: ID, title: "Add Greet", phase: "idle", origin: "tool", session: SESSION, turns: [turn(1, { reply: "Done." })] }));
 	return w;
@@ -111,6 +114,11 @@ function fakeClient(w: World): ToolClient {
 	};
 	return {
 		whoami: async () => w.who,
+		capacity: async () => {
+			log("capacity");
+			if (!w.capacity) throw notFound("capacity");
+			return w.capacity;
+		},
 		settings: async () => {
 			log("settings");
 			if (w.settingsError) throw w.settingsError;
@@ -372,7 +380,7 @@ describe("info", () => {
 		const res = await call(r, { op: "info" });
 		expect(first(res)).toBe("cloud info: ok omp-cloud 0.4.0");
 		const t = text(res);
-		expect(t).toContain("service: omp-cloud 0.4.0 (api 2) · you are owner (dev)");
+		expect(t).toContain("service: omp-cloud 0.4.0 (api 2) · you: the owner, with the server's owner token (full access)");
 		expect(t).toContain(`capabilities: ${CAPS.join(", ")}`);
 		expect(t).toContain("models: anthropic/claude-sonnet-5-5, openai-codex/gpt-5");
 		expect(t).toContain("limits: message 32768 bytes · answer 4000 bytes");
@@ -385,18 +393,49 @@ describe("info", () => {
 
 	test("a paired device is named, an uncapped day says so, an old service says what it lacks", async () => {
 		const r = rig();
-		r.w.who = whoami({ device: { id: "d1", name: "laptop" }, spend: { todayUSD: 0, dayCapUSD: 0 }, service: { version: "", api: 1 } });
+		r.w.who = whoami({ device: { id: "d1", name: "laptop", access: "threads" }, spend: { todayUSD: 0, dayCapUSD: 0 }, service: { version: "", api: 1, name: "" } });
 		const t = text(await call(r, { op: "info" }));
-		expect(t).toContain("you are device laptop");
+		expect(t).toContain("you: device laptop, threads only (a connection with full access runs /cloud devices access laptop full)");
 		expect(t).toContain("spend: $0 today, no day cap");
 		expect(t).toContain("service: omp-cloud unknown (api 1)");
 		expect(t).toContain("capabilities: none reported");
 	});
 
+	test("the cloud's name leads the service line; a device with full access is the owner on that device", async () => {
+		const r = rig();
+		r.w.who = whoami({ device: { id: "d1", name: "laptop", access: "full" }, service: { version: "0.6.0", api: 6, name: "home" } });
+		const res = await call(r, { op: "info" });
+		expect(text(res)).toContain("service: home · omp-cloud 0.6.0 (api 6) · you: the owner, on device laptop (full access)");
+		expect(res.details).toMatchObject({ op: "info", caller: { kind: "device", name: "laptop", access: "full" } });
+	});
+
+	test("capacity follows the vms line when the service serves it; unavailable says why; a service without it says nothing", async () => {
+		const r = rig();
+		const pool = { total: 0, allocated: 0 };
+		const base: Capacity = {
+			available: true,
+			problem: "",
+			fix: "",
+			machines: { total: 3, ready: 2 },
+			vcpus: { total: 24, allocated: 4 },
+			memoryMB: { total: 98304, allocated: 8192 },
+			diskFreeMB: 500000,
+			vms: { cluster: 2, cloud: { running: 2, paused: 1, limit: 32 }, size: { vcpus: 2, memoryMB: 4096 } },
+			cluster: { accepting: true, address: "192.168.1.20", joinCommand: "", versionSkew: true },
+		};
+		r.w.who = whoami({ capabilities: [...CAPS, "capacity"] });
+		r.w.capacity = base;
+		expect(text(await call(r, { op: "info" }))).toContain("capacity: 24 vCPU (4 allocated) · 96 GiB (8 allocated) · 3 machines · 2 of 32 VMs running · vibemon versions differ");
+		r.w.capacity = { ...base, available: false, problem: "this server has no vibemon admin token yet", fix: "omp-cloud setup", vcpus: pool, memoryMB: pool };
+		expect(text(await call(r, { op: "info" }))).toContain("capacity: unavailable (this server has no vibemon admin token yet)");
+		r.w.who = whoami({ capabilities: CAPS });
+		expect(text(await call(r, { op: "info" }))).not.toContain("capacity:");
+	});
+
 	test("a device is told the owner logs the server in on the server machine; the owner connection names /cloud login", async () => {
 		const r = rig();
 		r.host = fakeHost({ model: { provider: "google", id: "gemini-3" } }).host;
-		r.w.who = whoami({ device: { id: "d1", name: "laptop" }, models: [], modelPatterns: [], defaultModel: "" });
+		r.w.who = whoami({ device: { id: "d1", name: "laptop", access: "threads" }, models: [], modelPatterns: [], defaultModel: "" });
 		const device = text(await call(r, { op: "info" }));
 		expect(device).toContain("models: none yet (ask the user to run omp-cloud login <provider> on the server machine)");
 		expect(device).toContain("this session's model: google/gemini-3 (not served: pass model with one the cloud serves, or ask the user to run omp-cloud login <provider> on the server machine)");
@@ -473,12 +512,12 @@ describe("info", () => {
 
 	test("the update state is one line: ready for the owner names the command, for a device it names the owner, a service that reports none says nothing", async () => {
 		const r = rig();
-		r.w.who = whoami({ update: { state: "ready", available: "0.5.1" } });
-		expect(text(await call(r, { op: "info" }))).toContain("update: 0.5.1 is downloaded and ready: /cloud update (or the card's Restart to update button) restarts the service to install it");
-		r.w.who = whoami({ device: { id: "d1", name: "laptop" }, update: { state: "ready", available: "0.5.1" } });
-		expect(text(await call(r, { op: "info" }))).toContain("update: 0.5.1 is downloaded and ready: the owner installs it");
-		r.w.who = whoami({ update: { state: "idle", available: null } });
-		expect(text(await call(r, { op: "info" }))).toContain("update: up to date");
+		r.w.who = whoami({ update: { state: "ready", available: "0.5.1", mode: "notify" } });
+		expect(text(await call(r, { op: "info" }))).toContain("update: notify · 0.5.1 is downloaded and ready: /cloud update (or the card's Restart to update button) restarts the service to install it");
+		r.w.who = whoami({ device: { id: "d1", name: "laptop", access: "threads" }, update: { state: "ready", available: "0.5.1", mode: "notify" } });
+		expect(text(await call(r, { op: "info" }))).toContain("update: notify · 0.5.1 is downloaded and ready: a connection with full access installs it");
+		r.w.who = whoami({ update: { state: "idle", available: null, mode: "auto" } });
+		expect(text(await call(r, { op: "info" }))).toContain("update: auto · up to date");
 		r.w.who = whoami({ update: null });
 		expect(text(await call(r, { op: "info" }))).not.toContain("update:");
 	});
@@ -1916,7 +1955,7 @@ describe("native views of a result", () => {
 		const recorded = Object.fromEntries(Object.entries(info.details).filter(([key]) => !["clouds", "active", "chosen", "planning", "agents"].includes(key)));
 		const replayed = describeResult({ content: info.content, details: recorded }, FINAL);
 		expect(headText(replayed)).toStartWith("Cloud info omp-cloud");
-		expect(JSON.stringify(replayed?.body)).toContain("you are owner");
+		expect(JSON.stringify(replayed?.body)).toContain("you: the owner");
 	});
 
 	test("the call view shows while the call runs and hands over to the result view; a progress update keeps the call view", async () => {

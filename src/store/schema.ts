@@ -306,4 +306,12 @@ export const MIGRATIONS: readonly string[] = [
 	`
 	ALTER TABLE threads DROP COLUMN memory_bank;
 	`,
+	// 17: device access levels. `devices.access` is `full` (everything the owner token can do) or `threads`; a device with no
+	// offer row was paired over ssh, which proves control of the service's account, so it becomes `full`, and every code-paired
+	// one stays `threads`. `pairing_offers.access` is what the owner's approval granted, copied to the device at claim.
+	`
+	ALTER TABLE devices ADD COLUMN access TEXT NOT NULL DEFAULT 'threads';
+	UPDATE devices SET access = 'full' WHERE id NOT IN (SELECT device_id FROM pairing_offers WHERE device_id IS NOT NULL);
+	ALTER TABLE pairing_offers ADD COLUMN access TEXT NOT NULL DEFAULT 'threads';
+	`,
 ];

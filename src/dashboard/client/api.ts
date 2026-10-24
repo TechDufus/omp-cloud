@@ -5,9 +5,9 @@
  * The thread, question and turn shapes mirror `src/server/views.ts`. They are not imported from there because that
  * module reaches for `Buffer`, which the client's DOM-only tsconfig does not have; `store/types.ts` is pure.
  */
-import type { Paths, QuestionOption, Repo, ThreadPhase, TurnState, Usage } from "../../store/types";
+import type { DeviceAccess, Paths, QuestionOption, Repo, ThreadPhase, TurnState, Usage } from "../../store/types";
 
-export type { Paths, QuestionOption, Repo, ThreadPhase, TurnState, Usage };
+export type { DeviceAccess, Paths, QuestionOption, Repo, ThreadPhase, TurnState, Usage };
 
 export interface QuestionView {
 	id: number;
@@ -181,6 +181,12 @@ export interface GlobalDeletion {
 export interface Whoami {
 	user: string;
 	modelPatterns: string[];
+	/** `name` is what the cloud is called; `""` from a service older than the field. */
+	service: { version: string; api: number; name: string };
+	/** The device whose token made the call, with its access level; `null` for the owner. */
+	device: { id: string; name: string; access: DeviceAccess } | null;
+	remote: { fingerprint: string } | null;
+	update: { state: UpdateState; available: string | null; mode: UpdateMode };
 }
 
 export interface UsageReport {
@@ -281,6 +287,66 @@ export interface Login {
 	error: string;
 }
 
+/** One row of `GET /api/v1/logins`: what the cloud is logged in to. Times are ISO strings or `""`; `account` is `""` without full access. */
+export interface LoginEntry {
+	provider: string;
+	kind: "provider" | "mcp";
+	account: string;
+	loggedInAt: string;
+	renewBy: string;
+	disabled: boolean;
+	note: string;
+}
+
+export interface LoginList {
+	logins: LoginEntry[];
+	/** `""` when the broker answered. */
+	brokerError: string;
+}
+
+/** One sample of the last hour on the capacity chart. */
+export interface CapacityPoint {
+	at: string;
+	machines: number;
+	vcpus: number;
+	vcpusAllocated: number;
+	memoryMB: number;
+	memoryAllocatedMB: number;
+	vms: number;
+}
+
+/** One vibemon machine of the cluster. */
+export interface CapacityMachine {
+	hostname: string;
+	status: string;
+	version: string;
+	server: boolean;
+	vcpus: number;
+	vcpusAllocated: number;
+	memoryMB: number;
+	memoryAllocatedMB: number;
+	vms: number;
+}
+
+/** `GET /api/v1/capacity`: the vibemon cluster as one pool. Unavailable: `available` is false, `problem` and `fix` say why, the numbers are 0. */
+export interface Capacity {
+	available: boolean;
+	problem: string;
+	fix: string;
+	machines: { total: number; ready: number };
+	vcpus: { total: number; allocated: number };
+	memoryMB: { total: number; allocated: number };
+	diskFreeMB: number;
+	vms: {
+		cluster: number;
+		cloud: { running: number; paused: number; limit: number };
+		size: { vcpus: number; memoryMB: number };
+	};
+	history: CapacityPoint[];
+	members: CapacityMachine[];
+	cluster: { accepting: boolean; address: string; joinCommand: string; versionSkew: boolean };
+}
+
 /** A paired device, as `GET /api/v1/devices` lists it. */
 export interface Device {
 	id: string;
@@ -290,6 +356,7 @@ export interface Device {
 	pairedFrom: string;
 	lastSeenAt: string | null;
 	lastSeenAddress: string | null;
+	access: DeviceAccess;
 	/** True for the device whose token made the call; never true on the server machine's own dashboard. */
 	current: boolean;
 }
@@ -448,6 +515,11 @@ export async function getVms(): Promise<VmsReport> {
 	return call<VmsReport>("GET", "/api/v1/vms");
 }
 
+/** The cluster's capacity; open to every caller. */
+export async function getCapacity(): Promise<Capacity> {
+	return call<Capacity>("GET", "/api/v1/capacity");
+}
+
 // Updates
 
 export async function getUpdate(): Promise<UpdateStatus> {
@@ -500,6 +572,11 @@ export async function inputLogin(id: string, input: string): Promise<Login> {
 
 export async function cancelLogin(id: string): Promise<void> {
 	await send("DELETE", `/api/v1/logins/${encodeURIComponent(id)}`);
+}
+
+/** What the cloud is logged in to; open to every caller, accounts blank without full access. */
+export async function getLogins(): Promise<LoginList> {
+	return call<LoginList>("GET", "/api/v1/logins");
 }
 
 // GitHub App and commit signing
@@ -613,6 +690,11 @@ export async function revokeDevice(id: string): Promise<{ device: { id: string; 
 	return call("DELETE", `/api/v1/devices/${encodeURIComponent(id)}`);
 }
 
+/** Sets a device's access level; it applies from the device's next request. */
+export async function setDeviceAccess(id: string, access: DeviceAccess): Promise<Device> {
+	return (await call<{ device: Device }>("PATCH", `/api/v1/devices/${encodeURIComponent(id)}`, { json: { access } })).device;
+}
+
 export async function createOffer(): Promise<OfferCreated> {
 	return call<OfferCreated>("POST", "/api/v1/pairing/offers", { json: {} });
 }
@@ -621,8 +703,9 @@ export async function getOffer(id: string): Promise<OfferState> {
 	return call<OfferState>("GET", `/api/v1/pairing/offers/${encodeURIComponent(id)}`);
 }
 
-export async function approveOffer(id: string): Promise<void> {
-	await send("POST", `/api/v1/pairing/offers/${encodeURIComponent(id)}/approve`);
+/** Approves a waiting pairing request; the new device gets `access`. */
+export async function approveOffer(id: string, access: DeviceAccess): Promise<void> {
+	await send("POST", `/api/v1/pairing/offers/${encodeURIComponent(id)}/approve`, { json: { access } });
 }
 
 export async function declineOffer(id: string): Promise<void> {

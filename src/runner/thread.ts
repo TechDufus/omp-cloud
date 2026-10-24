@@ -138,11 +138,11 @@ export async function releaseVm(env: ThreadEnv, threadId: string, kill: boolean)
  * The sandbox is gone: forget the VM and requeue the running turn (a turn that was asked to stop ends failed). The thread
  * lives on: the next turn restores it on a new VM from its last result and conversation.
  */
-export async function loseVm(env: ThreadEnv, threadId: string): Promise<void> {
+export async function loseVm(env: ThreadEnv, threadId: string, event = "the VM was lost; restoring the thread on a new VM"): Promise<void> {
 	await releaseVm(env, threadId, false);
 	try {
 		env.store.requeueRunningTurn(threadId);
-		env.store.appendEvent(threadId, "vm", "the VM was lost; restoring the thread on a new VM", null);
+		env.store.appendEvent(threadId, "vm", event, null);
 	} catch (error) {
 		if (!isMissingThread(error)) throw error;
 	}
@@ -1244,6 +1244,17 @@ export class ThreadRunner {
 		this.#vmFailures++;
 		const delay = RETRY_DELAYS_S[this.#vmFailures - 1];
 		if (delay === undefined) {
+			// vmon itself answers while this one VM never does (its machine is asleep or gone: a paused VM there answers 503 for
+			// good): restore the thread on a new VM instead of failing it. The old sandbox is not killed (vmon cannot be asked
+			// about it); `loseVm` revokes its gateway client, and the orphan sweep kills it once vmon reaches it.
+			if (await this.env.vmon.healthy()) {
+				this.#sandbox = null;
+				if (this.#live !== null) this.#dropLive(this.#live);
+				this.#children.cancel("the VM was lost");
+				await loseVm(this.env, this.id, `the VM did not answer for about 4 minutes (${message}); restoring the thread on a new VM`);
+				this.#vmFailures = 0;
+				return (await this.#restored()) ? "retry" : null;
+			}
 			await this.#fail(`the VM stopped responding: ${message}`);
 			return null;
 		}

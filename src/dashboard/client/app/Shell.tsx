@@ -1,12 +1,12 @@
 // Adapted from omp-stats' app/Shell.tsx (MIT, Stencil Labs, Inc.; see ../kit/LICENSE).
-import { LogOut, type LucideIcon, Menu, Monitor, Moon, Sun } from "lucide-react";
+import { Lock, LogOut, type LucideIcon, Menu, Monitor, Moon, Sun } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
-import { Dot, type Tone } from "../kit/ui";
+import { Badge, Dot, type Tone } from "../kit/ui";
 import "./app.css";
 import { NAV, NAV_ITEMS } from "./nav";
 import { messageOf } from "./query";
 import { navigate, type PageId } from "./route";
-import { useLiveConnected, useSession } from "./session";
+import { NEEDS_FULL_ACCESS, useAccess, useLiveConnected, useSession } from "./session";
 import { type ThemePreference, useThemePreference } from "./theme";
 import { UpdatePill } from "./UpdatePill";
 
@@ -39,6 +39,8 @@ const PREFERENCE_LABEL: Record<ThemePreference, string> = {
  */
 export function Shell({ page, children }: ShellProps) {
 	const [menuOpen, setMenuOpen] = useState(false);
+	const { identity } = useSession();
+	const access = useAccess();
 	const scrolled = useScrolled();
 	useShortcuts();
 
@@ -76,6 +78,11 @@ export function Shell({ page, children }: ShellProps) {
 					<span>omp</span>
 					<span className="topbar-slash">/</span>
 					<span className="topbar-title">cloud</span>
+					{identity.service.name !== "" && (
+						<span className="topbar-chip" title={`omp-cloud ${identity.service.version}`}>
+							{identity.service.name}
+						</span>
+					)}
 				</div>
 				<div className="topbar-spacer" />
 				<div className="topbar-actions">
@@ -104,6 +111,11 @@ export function Shell({ page, children }: ShellProps) {
 							>
 								<item.icon size={15} />
 								<span className="nav-row-label">{item.label}</span>
+								{item.needsFullAccess === true && access === "threads" && (
+									<span className="nav-lock" title={NEEDS_FULL_ACCESS}>
+										<Lock size={12} aria-label={NEEDS_FULL_ACCESS} />
+									</span>
+								)}
 								<kbd>G {item.hotkey.toUpperCase()}</kbd>
 							</button>
 						))}
@@ -141,7 +153,7 @@ function LiveChip() {
 
 /** The signed-in user and Sign out. */
 function AccountMenu() {
-	const { user, signOut } = useSession();
+	const { identity, signOut } = useSession();
 	const [busy, setBusy] = useState(false);
 	const onSignOut = () => {
 		setBusy(true);
@@ -150,11 +162,19 @@ function AccountMenu() {
 			window.alert(`Sign-out failed: ${messageOf(error)}`);
 		});
 	};
+	const { device } = identity;
 	return (
 		<>
-			<span className="topbar-user topbar-hide-narrow" title="Signed in as">
-				{user}
-			</span>
+			{device === null ? (
+				<span className="topbar-user topbar-hide-narrow" title="Signed in on the server">
+					Owner
+				</span>
+			) : (
+				<span className="topbar-user topbar-hide-narrow row" title={`Signed in on device ${device.name}`}>
+					{device.name}
+					<Badge tone={device.access === "full" ? "ok" : "warn"}>{device.access === "full" ? "full access" : "threads only"}</Badge>
+				</span>
+			)}
 			<button type="button" className="btn" data-size="sm" data-variant="ghost" onClick={onSignOut} disabled={busy} title="Sign out">
 				<LogOut size={14} />
 				<span className="topbar-hide-narrow">Sign out</span>

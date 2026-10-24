@@ -46,6 +46,12 @@ export function bytes(value: number): string {
 	return `${unit === 0 ? size : size.toFixed(1)} ${units[unit]}`;
 }
 
+/** Mebibytes as gibibytes for a tile: whole numbers stay whole ("96"), others get one decimal ("7.5"). */
+export function gib(mebibytes: number): string {
+	const value = Math.round((mebibytes / 1024) * 10) / 10;
+	return value.toLocaleString("en-US", { maximumFractionDigits: 1 });
+}
+
 /** `url` when it is an http(s) URL, else null: server-supplied links never become `javascript:` hrefs. */
 export function safeHref(url: string): string | null {
 	try {

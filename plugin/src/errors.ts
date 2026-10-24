@@ -75,14 +75,14 @@ const IN_PROGRESS = /Idempotency-Key is still in progress/i;
 const KEY_REUSED = /^Idempotency-Key \S+ was used for a different request \(thread ([A-Za-z0-9]+)\)/;
 const UNAUTHORIZED_HINT = "a revoked device must run /cloud connect again; the owner checks the configured token";
 
-/** The error for an HTTP answer that was not a success. `message` is the service's `error` text (or the status line). */
-export function cloudErrorFromStatus(status: number, message: string, retryAfterSec?: number): CloudError {
+/** The error for an HTTP answer that was not a success. `message` is the service's `error` text (or the status line); `unauthorizedHint` replaces the generic hint of a 401 with where the refused token came from. */
+export function cloudErrorFromStatus(status: number, message: string, retryAfterSec?: number, unauthorizedHint?: string): CloudError {
 	const base = { status, message, ...(retryAfterSec === undefined ? {} : { retryAfterSec }), outcomeKnown: true };
 	switch (status) {
 		case 400:
 			return new CloudError({ ...base, code: "invalid", retriable: false });
 		case 401:
-			return new CloudError({ ...base, code: "unauthorized", retriable: false, hint: UNAUTHORIZED_HINT });
+			return new CloudError({ ...base, code: "unauthorized", retriable: false, hint: unauthorizedHint ?? UNAUTHORIZED_HINT });
 		case 403:
 			return new CloudError({ ...base, code: "forbidden", retriable: false });
 		case 404:

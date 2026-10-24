@@ -485,6 +485,9 @@ export interface ThreadEvent {
 	text: string;
 }
 
+/** What a device may do: `full` is everything the owner token can; `threads` is threads and events only. */
+export type DeviceAccess = "full" | "threads";
+
 /** A paired device. A revoked one keeps its row (`revokedAt`) and its token no longer works. */
 export interface Device {
 	id: string;
@@ -495,6 +498,8 @@ export interface Device {
 	createdAt: string;
 	/** The address the pairing request came from. */
 	pairedFrom: string;
+	/** `full` for a device paired over ssh or approved with full access; `threads` otherwise. */
+	access: DeviceAccess;
 	lastSeenAt: string | null;
 	lastSeenAddress: string | null;
 	revokedAt: string | null;
@@ -550,6 +555,7 @@ export interface NewDeviceRecord extends NewDevice {
 	name: string;
 	platform: string;
 	pairedFrom: string;
+	access: DeviceAccess;
 }
 
 /** `pending` the owner has not decided; `created` the device now exists (with a name unique among active ones); `declined`; `rejected` any other case. */

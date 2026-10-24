@@ -37,6 +37,7 @@ import {
 	ANSWERED_BY_STOP,
 	type ClaimOutcome,
 	type Device,
+	type DeviceAccess,
 	deviceActor,
 	type EnvironmentRow,
 	IRC_IN_EVENT,
@@ -1344,6 +1345,7 @@ export class Store {
 					platform: row.request_platform,
 					tokenSha256: device.tokenSha256,
 					pairedFrom: row.request_address,
+					access: row.access === "full" ? "full" : "threads",
 				});
 				this.db.query("UPDATE pairing_offers SET status = 'paired', device_id = ? WHERE id = ?").run(device.id, row.id);
 				return { kind: "created", device: created };
@@ -1366,25 +1368,29 @@ export class Store {
 		for (let n = 2; this.activeNameTaken(input.owner, name); n++) name = suffixedName(input.name, n);
 		this.db
 			.query(
-				`INSERT INTO devices (id, owner, name, platform, token_sha256, created_at, paired_from)
-				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO devices (id, owner, name, platform, token_sha256, created_at, paired_from, access)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
-			.run(input.id, input.owner, name, input.platform, input.tokenSha256, this.now().toISOString(), input.pairedFrom);
+			.run(input.id, input.owner, name, input.platform, input.tokenSha256, this.now().toISOString(), input.pairedFrom, input.access);
 		return { id: input.id, name };
 	}
 
 	/**
 	 * The owner's decision on a `pending`, unexpired offer: `done`, `not_waiting` for any other state, `not_found` for an
-	 * unknown offer.
+	 * unknown offer. An approval records the `access` the device will get when it claims; a decline ignores it.
 	 */
-	decideOffer(id: string, decision: "approve" | "decline"): "done" | "not_waiting" | "not_found" {
+	decideOffer(id: string, decision: "approve" | "decline", access: DeviceAccess = "threads"): "done" | "not_waiting" | "not_found" {
 		const at = this.now().toISOString();
 		return this.db
 			.transaction((): "done" | "not_waiting" | "not_found" => {
 				const row = this.offerRow(id);
 				if (row === null) return "not_found";
 				if (row.status !== "pending" || row.expires_at <= at) return "not_waiting";
-				this.db.query("UPDATE pairing_offers SET status = ? WHERE id = ?").run(decision === "approve" ? "approved" : "declined", id);
+				if (decision === "approve") {
+					this.db.query("UPDATE pairing_offers SET status = 'approved', access = ? WHERE id = ?").run(access, id);
+				} else {
+					this.db.query("UPDATE pairing_offers SET status = 'declined' WHERE id = ?").run(id);
+				}
 				return "done";
 			})
 			.immediate();
@@ -1422,6 +1428,18 @@ export class Store {
 			.query<DeviceRow, [string]>("SELECT * FROM devices WHERE owner = ? AND revoked_at IS NULL ORDER BY created_at, rowid")
 			.all(owner)
 			.map(deviceFromRow);
+	}
+
+	/** Sets the access of the owner's active device `id` and returns it, or null when there is no such device. */
+	setDeviceAccess(id: string, owner: string, access: DeviceAccess): Device | null {
+		return this.db
+			.transaction((): Device | null => {
+				const changed = this.db
+					.query("UPDATE devices SET access = ? WHERE id = ? AND owner = ? AND revoked_at IS NULL")
+					.run(access, id, owner).changes;
+				return changed === 0 ? null : this.device(id);
+			})
+			.immediate();
 	}
 
 	/**

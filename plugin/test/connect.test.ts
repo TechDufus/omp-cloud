@@ -70,13 +70,21 @@ describe("/cloud connect", () => {
 
 		// What was shown.
 		expect(card.title).toBe("Connected to omp-cloud");
-		expect(card.lines).toEqual([`server ${cert.fingerprint} at ${svc.address}`, "this device: laptop-2 (dev12345)"]);
+		expect(card.lines).toEqual([`server ${cert.fingerprint} at ${svc.address}`, "this device: laptop-2 (dev12345)", "access: full access"]);
 		const shown = JSON.stringify([card, r.host.notes]);
 		for (const secret of [svc.token, "secret1234567890123456", "reqsecret1234567890123", code]) expect(shown).not.toContain(secret);
 		const shownWidgets = r.host.widgets.filter((w): w is string[] => Array.isArray(w)).map(w => w.join("\n"));
 		expect(shownWidgets.find(w => w.includes("waiting for approval on the server machine"))).toMatch(/expires in \d+:\d\d/);
 		expect(r.host.widgets.at(-1)).toBeUndefined();
 		expect(JSON.stringify(shownWidgets)).not.toContain(svc.token);
+	});
+
+	test("a device the owner approved with threads-only access is told so on the card, and how it can change", async () => {
+		const svc = service();
+		svc.access = "threads";
+		const r = await setup(pairingCode(cert, [svc.address]), { name: "laptop" });
+		const card = await runConnect(r.input, r.deps);
+		expect(card.lines.at(-1)).toBe("access: threads only — a connection with full access can change that");
 	});
 
 	test("the default device name is the machine's, made valid", async () => {

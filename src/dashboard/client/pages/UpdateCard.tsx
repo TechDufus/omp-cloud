@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { putSettings, type UpdateMode, type UpdateStatus } from "../api";
 import { Markdown } from "../app/Markdown";
+import { NEEDS_FULL_ACCESS, useAccess } from "../app/session";
 import { checkedText, vmonRow } from "../app/update";
 import { useUpdate } from "../app/update-context";
 import { dateTime } from "../format";
@@ -47,6 +48,7 @@ function headline(status: UpdateStatus, now: number): string {
 
 export function UpdateCard({ onModeChanged }: { onModeChanged: () => void }) {
 	const { status, failure, busy, check, refetch } = useUpdate();
+	const full = useAccess() === "full";
 	const [modeBusy, setModeBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [reading, setReading] = useState(false);
@@ -137,7 +139,8 @@ export function UpdateCard({ onModeChanged }: { onModeChanged: () => void }) {
 						type="button"
 						className="btn"
 						data-size="sm"
-						disabled={busy || status.state === "checking" || status.state === "applying" || status.state === "unsupported"}
+						disabled={!full || busy || status.state === "checking" || status.state === "applying" || status.state === "unsupported"}
+						title={full ? undefined : NEEDS_FULL_ACCESS}
 						onClick={() => void check()}
 					>
 						Check for updates
@@ -152,9 +155,9 @@ export function UpdateCard({ onModeChanged }: { onModeChanged: () => void }) {
 				)}
 				<div className="access-stack">
 					<span className="cell-primary">Update mode</span>
-					<div>
+					<fieldset className="access-fieldset" disabled={!full} title={full ? undefined : NEEDS_FULL_ACCESS}>
 						<Segmented options={MODES} value={status.mode} onChange={mode => void setMode(mode)} size="sm" aria-label="Update mode" />
-					</div>
+					</fieldset>
 					<p className="access-fine" style={{ margin: 0 }}>
 						{MODE_TEXT[status.mode]}
 					</p>

@@ -386,3 +386,137 @@ describe("service IP", () => {
 		expect(stepOf(result, "service-ip").status).toBe("ok");
 	});
 });
+
+describe("node mode", () => {
+	test("runs the node checks in order: no user manager, no omp", async () => {
+		const { deps, commands } = fakeHost();
+		const result = await preflight(deps, "node");
+		expect(result.steps.map((s) => `${s.id}:${s.status}`)).toEqual([
+			"preflight.platform:ok",
+			"preflight.kvm:ok",
+			"preflight.systemd:ok",
+			"preflight.sudo:ok",
+			"preflight.tools:ok",
+			"preflight.disk:ok",
+			"preflight.ram:ok",
+			"preflight.ports:ok",
+			"preflight.service-ip:ok",
+			"preflight.network:ok",
+		]);
+		expect(result.blocked).toBe(false);
+		expect(result.omp).toBeNull();
+		expect(commands().map((argv) => argv.join(" "))).toEqual(["/usr/bin/ip -o -4 addr show"]);
+	});
+
+	test("a machine with no omp and no user manager is fine", async () => {
+		const result = await preflight(fakeHost({ omp: NO_OMP, userManager: false }).deps, "node");
+		expect(result.blocked).toBe(false);
+	});
+
+	test("only ports 7946 and 7947 are looked at", async () => {
+		const { deps, commands } = fakeHost({ listening: [3000, 8080, 8443, 4000] });
+		const result = await preflight(deps, "node");
+		expect(stepOf(result, "ports")).toMatchObject({ status: "ok", detail: "free: 7946 7947" });
+		expect(commands().some((argv) => argv.includes("is-active"))).toBe(false);
+	});
+
+	test("a stranger on 7946 blocks, an active vmon there is ours", async () => {
+		const stranger = await preflight(fakeHost({ listening: [7946] }).deps, "node");
+		expect(stepOf(stranger, "ports")).toMatchObject({ status: "failed", fix: "ss -ltnp 'sport = :7946'" });
+		expect(stranger.blocked).toBe(true);
+		const ours = await preflight(fakeHost({ listening: [7946, 7947], active: ["vmon"] }).deps, "node");
+		expect(stepOf(ours, "ports")).toMatchObject({ status: "ok", detail: "already ours: 7946 7947" });
+		expect(ours.blocked).toBe(false);
+	});
+
+	test("only github.com has to be reachable", async () => {
+		const asked: string[] = [];
+		const host = fakeHost({
+			httpsStatus: (url) => {
+				asked.push(url);
+				return url.includes("github.com") ? 200 : null;
+			},
+		});
+		const result = await preflight(host.deps, "node");
+		expect(asked).toEqual(["https://github.com/"]);
+		expect(stepOf(result, "network")).toMatchObject({ status: "ok", detail: "reachable over HTTPS: github.com" });
+	});
+
+	test("a missing tool is skipped with its packages, like setup, and a failed check blocks", async () => {
+		const result = await preflight(fakeHost({ missing: ["curl"] }).deps, "node");
+		expect(stepOf(result, "tools").status).toBe("skipped");
+		expect(result.missingTools).toEqual(["curl"]);
+		expect(result.blocked).toBe(false);
+		const noKvm = await preflight(fakeHost({ kvm: false }).deps, "node");
+		expect(noKvm.blocked).toBe(true);
+	});
+
+	test("an unsupported platform blocks", async () => {
+		const result = await preflight(fakeHost({ platform: "darwin" }).deps, "node");
+		expect(result.blocked).toBe(true);
+	});
+});
+
+describe("cluster address", () => {
+	const PUBLIC_LISTING = `${IP_LISTING}3: eth1    inet 203.0.113.7/24 scope global eth1\\       valid_lft forever\n`;
+
+	test("is not checked without an address", async () => {
+		const result = await preflight(fakeHost().deps, "setup");
+		expect(result.steps.some((s) => s.id === "preflight.cluster-address")).toBe(false);
+	});
+
+	test("a LAN address of this machine passes, and the step sits between service-ip and network", async () => {
+		const result = await preflight(fakeHost().deps, "setup", { clusterAddress: "192.168.1.5" });
+		expect(stepOf(result, "cluster-address")).toMatchObject({ status: "ok" });
+		const ids = result.steps.map((s) => s.id);
+		expect(ids.slice(-3)).toEqual(["preflight.service-ip", "preflight.cluster-address", "preflight.network"]);
+		expect(result.blocked).toBe(false);
+	});
+
+	test("an address that is not on this machine fails", async () => {
+		const result = await preflight(fakeHost().deps, "setup", { clusterAddress: "192.168.1.99" });
+		expect(stepOf(result, "cluster-address")).toMatchObject({ status: "failed", detail: "192.168.1.99 is not an address of this machine" });
+		expect(stepOf(result, "cluster-address").fix).toContain("--cluster-address");
+		expect(result.blocked).toBe(true);
+	});
+
+	test("the service IP on ompsvc0 does not count as an address of this machine", async () => {
+		const result = await preflight(fakeHost({ ipAddrs: SERVICE_IP_ON_DUMMY }).deps, "setup", { clusterAddress: "10.254.254.1" });
+		expect(stepOf(result, "cluster-address").detail).toBe("10.254.254.1 is not an address of this machine");
+	});
+
+	test("a public address of this machine fails as not private", async () => {
+		const result = await preflight(fakeHost({ ipAddrs: PUBLIC_LISTING }).deps, "setup", { clusterAddress: "203.0.113.7" });
+		expect(stepOf(result, "cluster-address")).toMatchObject({
+			status: "failed",
+			detail:
+				"203.0.113.7 is not a private LAN address: vibemon's cluster ports must not face the internet, and VMs on other machines reach the server's 10.254.254.1 only over a LAN",
+		});
+		expect(stepOf(result, "cluster-address").fix).toContain("--cluster-address");
+		expect(result.blocked).toBe(true);
+	});
+
+	test("the private ranges are 10/8, 172.16/12 and 192.168/16", async () => {
+		const addresses = ["10.1.2.3", "172.16.0.9", "172.31.255.1", "172.15.0.1", "172.32.0.1", "192.168.0.2", "192.169.0.2", "100.64.0.5"];
+		const listing = addresses.map((address, index) => `${index + 10}: net${index}    inet ${address}/24 scope global net${index}\\       valid_lft forever\n`).join("");
+		const result: Record<string, string> = {};
+		for (const address of addresses) {
+			result[address] = stepOf(await preflight(fakeHost({ ipAddrs: listing }).deps, "doctor", { clusterAddress: address }), "cluster-address").status;
+		}
+		expect(result).toEqual({
+			"10.1.2.3": "ok",
+			"172.16.0.9": "ok",
+			"172.31.255.1": "ok",
+			"172.15.0.1": "failed",
+			"172.32.0.1": "failed",
+			"192.168.0.2": "ok",
+			"192.169.0.2": "failed",
+			"100.64.0.5": "failed",
+		});
+	});
+
+	test("an address that is neither this machine's nor private reports 'not an address of this machine' first", async () => {
+		const result = await preflight(fakeHost().deps, "setup", { clusterAddress: "8.8.8.8" });
+		expect(stepOf(result, "cluster-address").detail).toBe("8.8.8.8 is not an address of this machine");
+	});
+});

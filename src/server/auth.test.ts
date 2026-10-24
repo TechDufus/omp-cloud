@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { sha256Hex } from "../pairing/secrets";
 import type { Device } from "../store/types";
-import { actorOf, authenticate, type AuthOptions, bearerToken, OWNER, OWNER_CALLER, tokenSha256 } from "./auth";
+import { actorOf, authenticate, type AuthOptions, bearerToken, hasFullAccess, OWNER, OWNER_CALLER, tokenSha256 } from "./auth";
 
 const TOKEN = "s3cret-token";
 const HASH = tokenSha256(TOKEN);
@@ -17,6 +17,7 @@ const DEVICE: Device = {
 	lastSeenAt: null,
 	lastSeenAddress: null,
 	revokedAt: null,
+	access: "threads",
 };
 
 /** A store that knows `DEVICE_TOKEN`'s device only; `lookups` records the hashes it was asked for. */
@@ -100,7 +101,7 @@ describe("authenticate", () => {
 	test("a device token is looked up by its SHA-256 on every request and is a device caller", () => {
 		const lookups: string[] = [];
 		const caller = authenticate(request(`Bearer ${DEVICE_TOKEN}`), options({}, lookups));
-		expect(caller).toEqual({ kind: "device", principal: OWNER, device: { id: DEVICE.id, name: DEVICE.name } });
+		expect(caller).toEqual({ kind: "device", principal: OWNER, device: { id: DEVICE.id, name: DEVICE.name, access: "threads" } });
 		authenticate(request(`Bearer ${DEVICE_TOKEN}`), options({}, lookups));
 		expect(lookups).toEqual([sha256Hex(DEVICE_TOKEN), sha256Hex(DEVICE_TOKEN)]);
 	});
@@ -121,6 +122,19 @@ describe("authenticate", () => {
 describe("actorOf", () => {
 	test("is owner for the owner token and device:<id> for a device", () => {
 		expect(actorOf(OWNER_CALLER)).toBe("owner");
-		expect(actorOf({ kind: "device", principal: OWNER, device: { id: "abc", name: "n" } })).toBe("device:abc");
+		expect(actorOf({ kind: "device", principal: OWNER, device: { id: "abc", name: "n", access: "threads" } })).toBe("device:abc");
+	});
+});
+
+describe("hasFullAccess", () => {
+	test("is true for the owner token and a device with full access, false for a threads-only device", () => {
+		expect(hasFullAccess(OWNER_CALLER)).toBe(true);
+		expect(hasFullAccess({ kind: "device", principal: OWNER, device: { id: "a", name: "n", access: "full" } })).toBe(true);
+		expect(hasFullAccess({ kind: "device", principal: OWNER, device: { id: "a", name: "n", access: "threads" } })).toBe(false);
+	});
+
+	test("authenticate carries the device's access into the caller", () => {
+		const full = authenticate(request(`Bearer ${DEVICE_TOKEN}`), options({ store: { deviceByTokenSha256: () => ({ ...DEVICE, access: "full" }) } }));
+		expect(full?.device?.access).toBe("full");
 	});
 });

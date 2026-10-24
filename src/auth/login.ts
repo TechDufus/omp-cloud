@@ -8,8 +8,26 @@
  * can drive a login for an owner on another machine; a device-code provider needs no callback or paste at all.
  */
 import { randomBytes } from "node:crypto";
+import { ANTHROPIC_OAUTH_GRANT_TTL_MS } from "@oh-my-pi/pi-ai/oauth/anthropic";
 import { type AuthCredential, getOAuthProvider, getOAuthProviders, getProviderDefinition } from "@oh-my-pi/pi-ai";
+import { isRecord } from "../guards";
 import { formatLoginIdentity } from "@oh-my-pi/pi-coding-agent/cli/oauth-terminal";
+
+/** One login of the cloud as `GET /api/v1/logins` lists it (`docs/api.md`, Logins). Empty strings stand for "none". */
+export interface LoginEntry {
+	/** The provider id, or `mcp:<url>` for an MCP server. */
+	provider: string;
+	kind: "provider" | "mcp";
+	/** Who is logged in; empty for a caller without full access and for a login that names no account. */
+	account: string;
+	/** ISO time of the login (the broker's `authorizedAt`); empty when unknown. */
+	loggedInAt: string;
+	/** ISO time the login must be renewed by: only Anthropic's OAuth grants expire on a known date. */
+	renewBy: string;
+	disabled: boolean;
+	/** Why a disabled login was disabled. */
+	note: string;
+}
 
 /** A login as the API shows it (`docs/api.md`, Logins). Empty strings stand for "none". */
 export interface LoginView {
@@ -90,6 +108,42 @@ const INPUT_WAIT_MS = 20_000;
 const REPLACE_WAIT_MS = 2_000;
 const UPLOAD_TIMEOUT_MS = 15_000;
 const USER_CODE = /Enter code:\s*(\S+)/i;
+const LIST_TIMEOUT_MS = 5_000;
+
+function compareText(a: string, b: string): number {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** `body[key]` when `body` is an object whose `key` is a list, else none. */
+function listOf(body: unknown, key: string): unknown[] {
+	const value = isRecord(body) ? body[key] : undefined;
+	return Array.isArray(value) ? value : [];
+}
+
+/** The ISO time of epoch milliseconds, or "" when they are no time. */
+function isoOf(ms: number): string {
+	const date = new Date(ms);
+	return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+/** Who a broker credential (or tombstone) belongs to: its email, account id or organization; `API key` for a key. */
+function accountOf(row: Record<string, unknown>): string {
+	if (row.type === "api_key") return "API key";
+	for (const key of ["email", "accountId", "orgName"]) {
+		const value = row[key];
+		if (typeof value === "string" && value !== "") return value;
+	}
+	return "";
+}
+
+/** The host of an MCP server URL; the text itself when it is no URL. */
+function hostOf(url: string): string {
+	try {
+		return new URL(url).host;
+	} catch {
+		return url;
+	}
+}
 
 function describe(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -184,6 +238,70 @@ export class LoginManager {
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.#retentionMs = options.retentionMs ?? DEFAULT_RETENTION_MS;
 		this.#flow = options.flow ?? ompLoginFlow;
+	}
+
+	/**
+	 * The cloud's logins: the broker's credentials and its disabled ones, then the MCP servers in `mcpUrls`. `full: false`
+	 * blanks every `account`. A broker that fails or answers something unexpected gives `brokerError` and no provider rows;
+	 * the MCP rows still come. The broker is read over plain `fetch` with tolerant guards, not through its client, because
+	 * the client's strict schemas refuse a broker newer than the pinned package.
+	 */
+	async list(full: boolean, mcpUrls: readonly string[] = []): Promise<{ logins: LoginEntry[]; brokerError: string }> {
+		const provider: LoginEntry[] = [];
+		let brokerError = "";
+		let token = "";
+		try {
+			token = (await Bun.file(this.#tokenFile).text()).trim();
+			if (token === "") throw new Error("the broker token file is empty");
+			const [snapshot, disabled] = await Promise.all([this.#brokerGet("/v1/snapshot", token, false), this.#brokerGet("/v1/credentials/disabled", token, true)]);
+			for (const row of listOf(snapshot, "credentials")) {
+				if (!isRecord(row) || !isRecord(row.credential) || typeof row.provider !== "string") continue;
+				const { credential } = row;
+				const authorizedAt = typeof credential.authorizedAt === "number" ? credential.authorizedAt : null;
+				provider.push({
+					provider: row.provider,
+					kind: "provider",
+					account: accountOf(credential),
+					loggedInAt: authorizedAt === null ? "" : isoOf(authorizedAt),
+					renewBy: row.provider === "anthropic" && authorizedAt !== null ? isoOf(authorizedAt + ANTHROPIC_OAUTH_GRANT_TTL_MS) : "",
+					disabled: false,
+					note: "",
+				});
+			}
+			for (const row of listOf(disabled, "disabled")) {
+				if (!isRecord(row) || typeof row.provider !== "string") continue;
+				provider.push({
+					provider: row.provider,
+					kind: "provider",
+					account: accountOf(row),
+					loggedInAt: "",
+					renewBy: "",
+					disabled: true,
+					note: typeof row.cause === "string" ? row.cause : "",
+				});
+			}
+		} catch (error) {
+			provider.length = 0;
+			brokerError = `the cloud broker did not answer: ${token === "" ? describe(error) : describe(error).replaceAll(token, "[redacted]")}`;
+		}
+		provider.sort((a, b) => compareText(a.provider, b.provider) || compareText(a.account, b.account) || Number(a.disabled) - Number(b.disabled));
+		const mcp = mcpUrls.map((url): LoginEntry => ({ provider: `mcp:${url}`, kind: "mcp", account: hostOf(url), loggedInAt: "", renewBy: "", disabled: false, note: "" }));
+		const logins = [...provider, ...mcp];
+		return { logins: full ? logins : logins.map((entry) => ({ ...entry, account: "" })), brokerError };
+	}
+
+	/** One broker GET as parsed JSON. A 404 is `null` when `optional` (an older broker lacks the endpoint). */
+	async #brokerGet(path: string, token: string, optional: boolean): Promise<unknown> {
+		const response = await fetch(`${this.#brokerUrl}${path}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(LIST_TIMEOUT_MS) });
+		if (optional && response.status === 404) {
+			await response.body?.cancel();
+			return null;
+		}
+		if (!response.ok) {
+			await response.body?.cancel();
+			throw new Error(`HTTP ${response.status} from ${path}`);
+		}
+		return response.json();
 	}
 
 	/** Starts a login and returns it once the provider has offered a sign-in (or it has already ended). */

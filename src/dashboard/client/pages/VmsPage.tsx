@@ -1,9 +1,10 @@
 /** The sandboxes behind the threads, with live metrics when vmon reports them. */
-import { RotateCw } from "lucide-react";
+import { ExternalLink, RotateCw } from "lucide-react";
 import { useMemo } from "react";
-import { getVms, type VmEntry, type VmsReport } from "../api";
+import { getCapacity, getVms, type VmEntry, type VmsReport } from "../api";
 import type { PageProps } from "../app/page";
 import { useQuery } from "../app/query";
+import { useSession } from "../app/session";
 import { formatInteger, formatPercent } from "../kit/data/formatters";
 import {
 	Badge,
@@ -22,6 +23,7 @@ import {
 	type Tone,
 } from "../kit/ui";
 import { ago, bytes, safeHref } from "../format";
+import { CapacityCard } from "./CapacityCard";
 
 const REFRESH_MS = 10_000;
 const MIB = 1024 * 1024;
@@ -117,6 +119,8 @@ const COLUMNS: Column<VmEntry>[] = [
 
 export function VmsPage({ active }: PageProps) {
 	const query = useQuery(["vms"], () => getVms(), { enabled: active, refetchMs: REFRESH_MS });
+	const capacity = useQuery(["capacity"], () => getCapacity(), { enabled: active, refetchMs: REFRESH_MS });
+	const { identity } = useSession();
 	const isEmpty = (data: VmsReport) => data.vms.length === 0;
 	const empty = <EmptyState title="No VMs" hint="A sandbox appears here once a thread starts one." />;
 	const vmonHref = useMemo(() => (query.data ? safeHref(query.data.vmonDashboard) : null), [query.data]);
@@ -125,25 +129,31 @@ export function VmsPage({ active }: PageProps) {
 		<div className="page">
 			<PageHeader
 				title="VMs"
-				description={
+				description={`Your cloud's machines as one pool, and the VMs on it. Metrics refresh every ${REFRESH_MS / 1000} s.`}
+				actions={
 					<>
-						Terminals, files and logs live in{" "}
-						{vmonHref ? (
-							<a href={vmonHref} target="_blank" rel="noreferrer noopener">
-								the vmon dashboard
+						{identity.device === null && vmonHref !== null && (
+							<a className="btn" data-size="sm" data-variant="ghost" href={vmonHref} target="_blank" rel="noreferrer noopener" title="Terminals, files and logs of the VMs">
+								vmon dashboard <ExternalLink size={13} />
 							</a>
-						) : (
-							"the vmon dashboard"
 						)}
-						. Metrics refresh every {REFRESH_MS / 1000} s.
+						<button
+							type="button"
+							className="btn"
+							data-size="sm"
+							data-variant="ghost"
+							onClick={() => {
+								query.refetch();
+								capacity.refetch();
+							}}
+						>
+							<RotateCw size={13} /> Refresh
+						</button>
 					</>
 				}
-				actions={
-					<button type="button" className="btn" data-size="sm" data-variant="ghost" onClick={query.refetch}>
-						<RotateCw size={13} /> Refresh
-					</button>
-				}
 			/>
+
+			<CapacityCard query={capacity} />
 
 			<QueryView
 				query={query}

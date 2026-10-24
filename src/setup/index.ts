@@ -7,20 +7,21 @@ import type { HostOmp } from "../omp-version";
 import { healthBase } from "../update/real";
 import { Units } from "../update/system";
 import { VMON_PIN } from "../vmon/pin";
-import { DEFAULT_TEAM, ensureDirs, ensureGatewayClients, ensureServiceConfig, readVmonKey, recordedTeam, writeFileAtomic, writeVmonKey } from "./config";
+import { DEFAULT_TEAM, ensureAdminToken, ensureClusterSecret, ensureDirs, ensureGatewayClients, ensureServiceConfig, readVmonKey, recordedClusterAddress, recordedTeam, writeFileAtomic, writeVmonKey } from "./config";
 import { findOmp, realContext, type SetupContext } from "./context";
 import { collectDoctor, doctorDeps, formatDoctor } from "./doctor";
 import { checkVmonKey, waitGateway, waitService, waitTemplate } from "./health";
+import { isPlainIpv4 } from "./ipv4";
 import { installCheckoutWrapper, installManagedBinary } from "./managed";
 import { packagesFor } from "./packages";
 import { type PreflightResult, preflight } from "./preflight";
 import { type RootRequest, rootArgs, runRootPart, sudoCommand, sudoReady } from "./root";
 import { Reporter, type StepResult } from "./steps";
-import type { SystemReport } from "./system";
+import { NODE_ENV_FILE, type SystemReport } from "./system";
 import { ensureTls } from "./tls";
 import { installUserUnits, type UnitMode, unitSearchPath } from "./units";
 
-const USAGE = `usage: omp-cloud setup [--yes] [--no-login] [--no-plugin] [--no-linger] [--no-wait] [--team <slug>] [--max-sandboxes <n>] [--migrate-team] [--checkout] [--json]`;
+const USAGE = `usage: omp-cloud setup [--yes] [--no-login] [--no-plugin] [--no-linger] [--no-wait] [--team <slug>] [--max-sandboxes <n>] [--migrate-team] [--cluster-address <ip> | --no-cluster] [--checkout] [--json]`;
 const OMP_INSTALL = "curl -fsSL https://omp.sh/install | sh";
 const OMP_INSTALL_TIMEOUT_MS = 5 * 60_000;
 const LOGIN_LATER = "log in later: omp-cloud login <provider>";
@@ -34,6 +35,10 @@ export interface SetupArgs {
 	/** The vibemon team slug for a new host. */
 	team?: string;
 	maxSandboxes?: number;
+	/** The LAN address vmon listens on for other vibemon machines (`--cluster-address`); undefined: what the host already does. */
+	clusterAddress?: string;
+	/** `--no-cluster`: stop listening for other vibemon machines. */
+	noCluster: boolean;
 	migrateTeam: boolean;
 	checkout: boolean;
 	json: boolean;
@@ -41,7 +46,7 @@ export interface SetupArgs {
 
 export type ParsedSetupArgs = { ok: true; args: SetupArgs } | { ok: false; error: string };
 
-type SwitchFlag = "yes" | "noLogin" | "noPlugin" | "noLinger" | "noWait" | "migrateTeam" | "checkout" | "json";
+type SwitchFlag = "yes" | "noLogin" | "noPlugin" | "noLinger" | "noWait" | "migrateTeam" | "checkout" | "json" | "noCluster";
 
 const SWITCHES: Readonly<Record<string, SwitchFlag>> = {
 	"--yes": "yes",
@@ -52,12 +57,13 @@ const SWITCHES: Readonly<Record<string, SwitchFlag>> = {
 	"--no-wait": "noWait",
 	"--migrate-team": "migrateTeam",
 	"--checkout": "checkout",
+	"--no-cluster": "noCluster",
 	"--json": "json",
 };
 
 /** Validates `setup`'s flags; an error is a usage error (exit 2). */
 export function parseSetupArgs(argv: readonly string[]): ParsedSetupArgs {
-	const args: SetupArgs = { yes: false, noLogin: false, noPlugin: false, noLinger: false, noWait: false, migrateTeam: false, checkout: false, json: false };
+	const args: SetupArgs = { yes: false, noLogin: false, noPlugin: false, noLinger: false, noWait: false, migrateTeam: false, noCluster: false, checkout: false, json: false };
 	for (let index = 0; index < argv.length; index++) {
 		const flag = argv[index] ?? "";
 		const switchName = SWITCHES[flag];
@@ -78,8 +84,15 @@ export function parseSetupArgs(argv: readonly string[]): ParsedSetupArgs {
 			args.maxSandboxes = count;
 			continue;
 		}
+		if (flag === "--cluster-address") {
+			const value = argv[++index];
+			if (value === undefined || !isPlainIpv4(value)) return { ok: false, error: "--cluster-address needs an IPv4 address: this server's LAN address that other vibemon machines reach" };
+			args.clusterAddress = value;
+			continue;
+		}
 		return { ok: false, error: `unknown argument ${JSON.stringify(flag)}` };
 	}
+	if (args.noCluster && args.clusterAddress !== undefined) return { ok: false, error: "--cluster-address and --no-cluster cannot be used together" };
 	return { ok: true, args };
 }
 
@@ -94,6 +107,9 @@ export interface PlanInput {
 	appDir: string;
 	configDir: string;
 	migrateFrom: string | null;
+	/** The LAN address vibemon will listen on for other machines after this run, and what service.json records now; null: none. */
+	clusterAddress?: string | null;
+	clusterWas?: string | null;
 }
 
 export function buildPlan(input: PlanInput): string[] {
@@ -106,6 +122,13 @@ export function buildPlan(input: PlanInput): string[] {
 		"  - add the service network (ompsvc0, 10.254.254.1) and the system units omp-cloud-net and vmon, which start at boot",
 		`  - make sure the vibemon team ${input.team} exists with its limits${args.maxSandboxes === undefined ? "" : ` (${args.maxSandboxes} sandboxes)`}`,
 	);
+	const cluster = input.clusterAddress ?? null;
+	const clusterWas = input.clusterWas ?? null;
+	if (cluster !== null && cluster !== clusterWas) {
+		lines.push(`  - let other vibemon machines join: vmon listens for them on ${cluster} (ports 7946 and 7947) and restarts, so a turn running now is re-run`);
+	} else if (cluster === null && clusterWas !== null) {
+		lines.push("  - stop listening for other vibemon machines (vmon restarts; machines that joined lose contact, and threads whose VMs ran there are restored on this server)");
+	}
 	if (input.migrateFrom !== null) lines.push(`  - switch the team from ${input.migrateFrom} to ${input.team} (paused threads come back as cold restores and the VM template rebuilds)`);
 	if (!args.noLinger) lines.push(`  - enable linger for ${input.user} (loginctl enable-linger), so the services start at boot without a login`);
 	lines.push("", `as ${input.user}:`);
@@ -166,7 +189,7 @@ async function installOmp(ctx: SetupContext): Promise<HostOmp | undefined> {
 }
 
 /** `vmon.key` for the team: from the report when one was minted, else the file when vmon still accepts it, else a second root call mints one. */
-async function ensureKey(ctx: SetupContext, request: RootRequest, report: SystemReport, plan: TeamPlan): Promise<boolean> {
+async function ensureKey(ctx: SetupContext, request: RootRequest, report: SystemReport, plan: TeamPlan, teamSlug: string): Promise<boolean> {
 	const { reporter, paths } = ctx;
 	let key = report.key;
 	if (key === undefined && !plan.migrate) {
@@ -183,7 +206,7 @@ async function ensureKey(ctx: SetupContext, request: RootRequest, report: System
 		reporter.note(`${state === "missing" ? "no team key yet" : "the team key in vmon.key is not known to vmon (the team was recreated)"}: minting one`);
 	}
 	if (key === undefined) {
-		const second = await runRootPart(ctx.run, ctx.self, rootArgs({ ...request, team: report.team.slug, mintKey: true, migrateTeam: false, packages: [] }));
+		const second = await runRootPart(ctx.run, ctx.self, rootArgs({ ...request, team: teamSlug, mintKey: true, migrateTeam: false, packages: [] }));
 		if (!second.ok) {
 			reportRootFailure(ctx, second);
 			return false;
@@ -192,7 +215,7 @@ async function ensureKey(ctx: SetupContext, request: RootRequest, report: System
 		key = second.report.key;
 	}
 	if (key === undefined) {
-		reporter.report({ id: "config.key", status: "failed", detail: "the root part minted no team key", fix: `sudo -- ${ctx.self.argv.join(" ")} setup system ${rootArgs({ ...request, team: report.team.slug, mintKey: true }).join(" ")}` });
+		reporter.report({ id: "config.key", status: "failed", detail: "the root part minted no team key", fix: `sudo -- ${ctx.self.argv.join(" ")} setup system ${rootArgs({ ...request, team: teamSlug, mintKey: true }).join(" ")}` });
 		return false;
 	}
 	if (plan.migrate && plan.from !== null) {
@@ -237,8 +260,14 @@ export async function runSetup(args: SetupArgs, ctx: SetupContext): Promise<numb
 		process.stderr.write("omp-cloud: --checkout is for a checkout (bun run src/bin.ts setup --checkout); a release binary installs itself\n");
 		return 2;
 	}
+	if (await ctx.preflight.exists(NODE_ENV_FILE)) {
+		reporter.report({ id: "setup.node", status: "failed", detail: "this machine is a vibemon node; omp-cloud uninstall first", fix: "omp-cloud uninstall" });
+		return finish(ctx, args);
+	}
 
-	const pre = await preflight(ctx.preflight, "setup");
+	const clusterWas = await recordedClusterAddress(paths);
+	const clusterAddress = args.noCluster ? null : (args.clusterAddress ?? clusterWas);
+	const pre = await preflight(ctx.preflight, "setup", clusterAddress === null ? {} : { clusterAddress });
 	reporter.reportAll(pre.steps);
 	if (pre.blocked) return finish(ctx, args);
 
@@ -255,8 +284,9 @@ export async function runSetup(args: SetupArgs, ctx: SetupContext): Promise<numb
 		packages,
 		noLinger: args.noLinger,
 		migrateTeam: plan.migrate,
+		...(clusterAddress === null ? {} : { clusterAddress }),
 	};
-	const lines = buildPlan({ args, pre, packages, team: plan.requested ?? DEFAULT_TEAM, user: paths.user, version: ctx.version, appDir: paths.appDir, configDir: paths.configDir, migrateFrom: plan.from });
+	const lines = buildPlan({ args, pre, packages, team: plan.requested ?? DEFAULT_TEAM, user: paths.user, version: ctx.version, appDir: paths.appDir, configDir: paths.configDir, migrateFrom: plan.from, clusterAddress, clusterWas });
 	reporter.note(lines.join("\n"));
 	if (!args.yes) {
 		if (!ctx.stdinIsTty) {
@@ -299,12 +329,21 @@ export async function runSetup(args: SetupArgs, ctx: SetupContext): Promise<numb
 		return finish(ctx, args);
 	}
 	reporter.collect(root.report.steps);
-	if (!(await ensureKey(ctx, request, root.report, plan))) return finish(ctx, args);
+	const rootTeam = root.report.team;
+	if (rootTeam === null) {
+		reporter.report({ id: "system", status: "failed", detail: "the root part reported no vibemon team", fix: "omp-cloud setup" });
+		return finish(ctx, args);
+	}
+	if (!(await ensureKey(ctx, request, root.report, plan, rootTeam.slug))) return finish(ctx, args);
+	reporter.report(await ensureAdminToken(paths, root.report.adminToken));
+	const clusterSecret = await ensureClusterSecret(paths, clusterAddress, root.report.clusterSecret);
+	if (clusterSecret !== null) reporter.report(clusterSecret);
+	if (reporter.failed) return finish(ctx, args);
 	if (plan.migrate) reporter.note("the team changed: paused threads come back as cold restores and the VM template rebuilds");
 
 	reporter.report(await ensureTls(paths.tlsDir, ctx.hostname));
-	const slug = plan.record ?? root.report.team.slug;
-	const config = await ensureServiceConfig(paths, slug);
+	const slug = plan.record ?? rootTeam.slug;
+	const config = await ensureServiceConfig(paths, slug, clusterAddress);
 	reporter.reportAll(config.steps);
 	if (reporter.failed) return finish(ctx, args);
 	try {

@@ -28,6 +28,12 @@ export function fingerprintsOf(digest: Buffer): Pick<Identity, "fingerprint" | "
 	};
 }
 
+/** The `curl --pinnedpubkey` pin of a certificate: `sha256//` and the base64 SHA-256 of its SubjectPublicKeyInfo DER. */
+export function spkiPin(certPem: string): string {
+	const spki = new X509Certificate(certPem).publicKey.export({ type: "spki", format: "der" });
+	return `sha256//${createHash("sha256").update(spki).digest("base64")}`;
+}
+
 async function readText(path: string, label: string): Promise<string> {
 	try {
 		return await Bun.file(path).text();

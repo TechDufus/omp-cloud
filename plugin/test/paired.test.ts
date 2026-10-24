@@ -6,6 +6,7 @@ import { CloudClient } from "../src/api";
 import { CARD_VERSION, loadTui, type CardDetails } from "../src/cards";
 import { readConfig, resolveConnection } from "../src/config";
 import { readConnectionFile, writeConnectionFile, type PairedConnection } from "../src/connection";
+import { isRecord } from "../src/guards";
 import { runTool, TOOL_OPS } from "../src/tool";
 import { UserError } from "../src/types";
 import { Cloud } from "../src/verbs";
@@ -105,7 +106,7 @@ describe("which credential is used", () => {
 		expect(text).toContain("device: laptop-2 (dev12345)");
 		expect(text).toContain(`server: ${cert.fingerprint} at ${svc.address}`);
 		expect(text).toContain("OMP_CLOUD_TOKEN is set and ignored");
-		expect(text).toContain("user: dev");
+		expect(text).toContain("you: the owner, with the server's owner token (full access)");
 		expect(text).not.toContain(ENV_TOKEN);
 		expect(text).not.toContain(r.connection.token);
 		expect(svc.seen).toHaveLength(1);
@@ -251,9 +252,9 @@ describe("launch text that holds a pairing code", () => {
 });
 
 describe("provider login on a paired device", () => {
-	const noProviders = (req: Request, url: URL): Response => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", modelPatterns: [], models: [], device: PAIRING_DEVICE })) : answerWhoami(req, url));
+	const noProviders = (req: Request, url: URL): Response => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", modelPatterns: [], models: [], device: { ...PAIRING_DEVICE, access: "threads" } })) : answerWhoami(req, url));
 
-	test("/cloud login makes no request and says the server machine does it, naming the host the client reaches", async () => {
+	test("/cloud login asks only who the caller is, then says the server machine does it, naming the host the client reaches", async () => {
 		const svc = fakeTls(cert, noProviders);
 		// The first address refuses connections: the client settles on the second, which is the one the guidance must name.
 		const r = await pairedRig(["127.0.0.2:1", svc.address]);
@@ -265,14 +266,14 @@ describe("provider login on a paired device", () => {
 		await run(r, "login anthropic");
 
 		expect(r.host.notes).toEqual([
-			["☁ a paired device cannot log the cloud in: log the server in: run omp-cloud login anthropic on 127.0.0.1 (over ssh: ssh -t <user>@127.0.0.1 '~/.local/bin/omp-cloud login anthropic')", "error"],
+			["☁ this device has threads-only access and cannot log the cloud in: log the server in: run omp-cloud login anthropic on 127.0.0.1 (over ssh: ssh -t <user>@127.0.0.1 '~/.local/bin/omp-cloud login anthropic')", "error"],
 		]);
-		expect(svc.seen).toHaveLength(before);
+		expect(svc.seen.slice(before).every(s => s.method === "GET" && s.path === "/api/v1/whoami")).toBe(true);
 		expect(notes(r)).not.toContain(r.connection.token);
 	});
 
 	test("a handoff of a model the cloud does not serve names the device's way to log the server in, and uploads nothing", async () => {
-		const svc = fakeTls(cert, (_req, url) => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", device: PAIRING_DEVICE, defaultModel: "", capabilities: ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch"] })) : Response.json({ error: "not found" }, { status: 404 })));
+		const svc = fakeTls(cert, (_req, url) => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", device: { ...PAIRING_DEVICE, access: "threads" }, defaultModel: "", capabilities: ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch"] })) : Response.json({ error: "not found" }, { status: 404 })));
 		const r = await pairedRig([svc.address], cert, undefined, {}, { model: { provider: "google", id: "gemini-3" } });
 
 		const out = await runTool({ cloud: r.cloud, ctx: r.host.host, toolCallId: "call-1" }, { op: "delegate", task: "x" });
@@ -283,6 +284,23 @@ describe("provider login on a paired device", () => {
 		expect(text).toContain("run omp-cloud login google on 127.0.0.1 (over ssh: ssh -t <user>@127.0.0.1 '~/.local/bin/omp-cloud login google')");
 		expect(text).not.toContain("/cloud login");
 		expect(svc.seen.some(s => s.method === "POST")).toBe(false);
+	});
+
+	test("bare /cloud login lists what the cloud is logged in to when the service can say, else prints the usage", async () => {
+		const listed = plainService((req, url) => {
+			if (url.pathname === "/api/v1/whoami") return Response.json(whoami({ capabilities: ["logins.list"] }));
+			if (url.pathname === "/api/v1/logins") return Response.json({ logins: [{ provider: "anthropic", kind: "provider", account: "me@example.com", loggedInAt: "2026-10-01T08:30:00.000Z", renewBy: "", disabled: false, note: "" }], brokerError: "" });
+			return answerWhoami(req, url);
+		});
+		const r = await rig(`url: ${listed.origin}\ntoken: tok\n`);
+		await run(r, "login");
+		expect(r.host.notes).toEqual([["☁ the cloud is logged in to:\n  anthropic · me@example.com · logged in 2026-10-01\n  /cloud login <provider> logs the cloud in (again)", "info"]]);
+
+		const old = plainService(answerWhoami);
+		const o = await rig(`url: ${old.origin}\ntoken: tok\n`);
+		await run(o, "login");
+		expect(o.host.notes).toEqual([["☁ usage: /cloud login <provider>", "info"]]);
+		expect(old.seen.map(s => s.path)).toEqual(["/api/v1/whoami"]);
 	});
 
 	test("an owner connection keeps /cloud login", async () => {
@@ -405,13 +423,19 @@ describe("/cloud dashboard on a paired connection", () => {
 });
 
 const DEVICES = [
-	{ id: "dev12345abcdef", name: "laptop-2", platform: "linux", createdAt: "2026-10-19T00:00:00.000Z", pairedFrom: "10.0.0.7", lastSeenAt: "2026-10-20T00:00:00.000Z", lastSeenAddress: "10.0.0.7", current: true },
-	{ id: "devzzzzz999999", name: "phone", platform: "ios", createdAt: "2026-10-18T00:00:00.000Z", pairedFrom: "10.0.0.9", lastSeenAt: "", lastSeenAddress: "", current: false },
+	{ id: "dev12345abcdef", name: "laptop-2", platform: "linux", access: "full", createdAt: "2026-10-19T00:00:00.000Z", pairedFrom: "10.0.0.7", lastSeenAt: "2026-10-20T00:00:00.000Z", lastSeenAddress: "10.0.0.7", current: true },
+	{ id: "devzzzzz999999", name: "phone", platform: "ios", access: "threads", createdAt: "2026-10-18T00:00:00.000Z", pairedFrom: "10.0.0.9", lastSeenAt: "", lastSeenAddress: "", current: false },
 ];
 
 function deviceService(): FakeTls {
-	return fakeTls(cert, (req, url) => {
+	return fakeTls(cert, async (req, url) => {
+		if (req.method === "GET" && url.pathname === "/api/v1/whoami") return Response.json(whoami({ user: "dev", capabilities: ["devices.access"], device: { ...PAIRING_DEVICE, access: "full" } }));
 		if (req.method === "GET" && url.pathname === "/api/v1/devices") return Response.json({ devices: DEVICES });
+		const patch = /^\/api\/v1\/devices\/(\w+)$/.exec(url.pathname);
+		if (req.method === "PATCH" && patch) {
+			const body: unknown = await req.json();
+			return Response.json({ device: { ...DEVICES.find(d => d.id === patch[1]), access: isRecord(body) ? body.access : "" } });
+		}
 		if (req.method === "DELETE" && url.pathname === "/api/v1/devices/devzzzzz999999") return Response.json({ device: { id: "devzzzzz999999", name: "phone" }, runningThreads: [THREAD] });
 		if (req.method === "DELETE" && url.pathname === "/api/v1/devices/dev12345abcdef") return Response.json({ device: { id: "dev12345abcdef", name: "laptop-2" }, runningThreads: [] });
 		return Response.json({ error: "not found" }, { status: 404 });
@@ -426,8 +450,8 @@ describe("/cloud devices", () => {
 		const card = r.pi.sent[0]?.message;
 		expect((card?.details as CardDetails).kind).toBe("notice");
 		expect(card?.content).toContain("Paired devices (2)");
-		expect(card?.content).toContain("laptop-2 (this device)");
-		expect(card?.content).toContain("phone · ios · devzzzzz");
+		expect(card?.content).toContain("laptop-2 (this device) · full access · linux");
+		expect(card?.content).toContain("phone · threads only · ios · devzzzzz");
 		expect(card?.content).not.toContain(r.connection.token);
 	});
 
@@ -456,6 +480,25 @@ describe("/cloud devices", () => {
 		expect(r.host.notes[0]?.[0]).toContain('no device matches "nobody"');
 		expect(r.host.notes[1]?.[0]).toContain("/cloud disconnect");
 		expect(svc.seen.filter(s => s.method === "DELETE")).toEqual([]);
+	});
+
+	test("access sets a device's level by name or id prefix, and asks only before demoting this machine's own device", async () => {
+		const svc = deviceService();
+		const patches = (): string[] => svc.seen.filter(s => s.method === "PATCH").map(s => `${s.path} ${s.body}`);
+		const r = await pairedRig([svc.address]);
+		await run(r, "devices access phone full");
+		await run(r, "devices access devzzz threads");
+		expect(patches()).toEqual(['/api/v1/devices/devzzzzz999999 {"access":"full"}', '/api/v1/devices/devzzzzz999999 {"access":"threads"}']);
+		expect(r.host.notes).toEqual([
+			["☁ phone now has full access", "info"],
+			["☁ phone now has threads-only access", "info"],
+		]);
+
+		const declined = await pairedRig([svc.address], cert, undefined, {}, { confirm: false });
+		await run(declined, "devices access laptop-2 threads");
+		expect(patches()).toHaveLength(2);
+		await run(declined, "devices access phone full");
+		expect(patches()).toHaveLength(3);
 	});
 });
 
@@ -537,7 +580,7 @@ describe("/cloud connect", () => {
 		r.host.notes.length = 0;
 		await run(r, "status");
 		expect(notes(r)).toContain("source: paired device");
-		expect(notes(r)).toContain("user: owner");
+		expect(notes(r)).toContain("you: the owner, on device laptop-2 (full access)");
 	});
 
 	test("a session without threads uses the new pairing from then on, and the choice is recorded", async () => {
@@ -563,11 +606,11 @@ describe("/cloud connect", () => {
 
 		const card = r.pi.sent[0]?.message.content ?? "";
 		expect(card).toContain("this session uses it now");
-		expect(card).toContain("new sessions use url in ");
-		expect(card).toContain("/cloud use paired switches a session");
+		expect(card).toContain("new sessions on this machine still use url in ");
+		expect(card).toContain("/cloud use paired --default makes this pairing the default");
 		r.host.notes.length = 0;
 		await run(r, "status");
-		expect(notes(r)).toContain("user: owner");
+		expect(notes(r)).toContain("you: the owner, on device laptop-2 (full access)");
 		expect(configured.seen).toEqual([]);
 	});
 
@@ -671,12 +714,20 @@ describe("/cloud pair", () => {
 		expect(svc.seen.filter(s => s.method === "POST")).toEqual([]);
 	});
 
-	test("a paired device cannot pair others", async () => {
-		const svc = fakeTls(cert, answerWhoami);
+	test("a paired device with threads-only access cannot pair others and names itself", async () => {
+		const svc = fakeTls(cert, (req, url) => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", device: { ...PAIRING_DEVICE, access: "threads" } })) : answerWhoami(req, url)));
 		const r = await pairedRig([svc.address], cert, undefined, {}, { mode: "tui" });
 		await run(r, "pair");
-		expect(notes(r)).toContain("paired device");
-		expect(svc.seen).toEqual([]);
+		expect(r.host.notes).toEqual([["☁ /cloud pair needs full access; this device (laptop-2) has threads-only access", "error"]]);
+		expect(svc.seen.every(s => s.path === "/api/v1/whoami")).toBe(true);
+	});
+
+	test("a paired device with full access goes on to the overlay check", async () => {
+		const svc = fakeTls(cert, (req, url) => (url.pathname === "/api/v1/whoami" ? Response.json(whoami({ user: "dev", device: { ...PAIRING_DEVICE, access: "full" } })) : answerWhoami(req, url)));
+		const r = await pairedRig([svc.address], cert, undefined, {}, { mode: "tui" });
+		await run(r, "pair");
+		expect(notes(r)).toContain("needs omp's interactive UI");
+		expect(notes(r)).not.toContain("needs full access");
 	});
 
 	test("a service without a remote section says how to add one", async () => {

@@ -12,8 +12,11 @@ const HELP = `omp-cloud ${SERVICE_VERSION} (${BUILD.id})
 usage: omp-cloud [command] [options]
 
   setup [--yes] [--no-login] [--no-plugin] [--no-linger] [--no-wait] [--team <slug>] [--max-sandboxes <n>]
-        [--migrate-team] [--checkout] [--json]
-                                         set up this host: vibemon, the services, the plugin and the model login (asks for sudo once)
+        [--cluster-address <ip> | --no-cluster] [--migrate-team] [--checkout] [--json]
+                                         set up this host: vibemon, the services, the plugin and the model login (asks for sudo once);
+                                         --cluster-address <ip> lets other vibemon machines join this server on that LAN address
+  setup node --join <user@server> [--yes] [--json]
+                                         set up this machine as a vibemon machine of that omp-cloud server
   doctor [--json]                        check the host and the stack, with a fix beside each failure
   login [<provider>]                     log the service in to a model provider
   uninstall [--purge] [--yes] [--checkout]
@@ -21,6 +24,9 @@ usage: omp-cloud [command] [options]
   serve [--config <path>]                run the service (the default with no command)
   ssh-pair --name <n> --platform <p> [--config <path>]
                                          pair a device over ssh (prints one JSON line; used by /cloud connect user@host)
+  node-join-info [--member <ip>] [--config <path>]
+                                         what a machine needs to join this server's cluster, or whether it has (prints one JSON line;
+                                         used by setup node --join)
   update                                 check for a new release and download it
   update apply                           install the downloaded release and restart the service
   install [--from <binary>] [--config <path>]
@@ -42,7 +48,8 @@ async function run(argv: readonly string[]): Promise<number | undefined> {
 			return serveFrom(rest);
 		case "--config":
 			return serveFrom(argv);
-		case "ssh-pair": {
+		case "ssh-pair":
+		case "node-join-info": {
 			const { cliMain } = await import("./cli");
 			await cliMain(argv);
 			return undefined;
@@ -68,6 +75,10 @@ async function run(argv: readonly string[]): Promise<number | undefined> {
 			if (subcommand === "plugin") {
 				const { pluginMain } = await import("./setup/plugin");
 				return pluginMain(subRest);
+			}
+			if (subcommand === "node") {
+				const { nodeMain } = await import("./setup/node");
+				return nodeMain(subRest);
 			}
 			const { setupMain } = await import("./setup/index");
 			return setupMain(rest);

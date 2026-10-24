@@ -75,7 +75,10 @@ interface Outcome {
 }
 
 /** Runs the helper with `args`; the unit is `active` (a fake systemctl that answers is-active) unless told otherwise. */
-async function helper(args: string[], options: { active?: boolean; restartFails?: boolean; env?: Record<string, string>; healthWait?: number } = {}): Promise<Outcome> {
+async function helper(
+	args: string[],
+	options: { active?: boolean; restartFails?: boolean; env?: Record<string, string>; healthWait?: number; node?: boolean } = {},
+): Promise<Outcome> {
 	const systemctl = join(dir, "systemctl");
 	const log = join(dir, "systemctl.log");
 	await writeFile(
@@ -84,7 +87,7 @@ async function helper(args: string[], options: { active?: boolean; restartFails?
 			"#!/bin/sh",
 			'echo "$@" >> "$FAKE_LOG"',
 			'case "$1" in',
-			'  is-active) [ -e "$FAKE_ACTIVE" ] ;;',
+			'  is-active) [ -e "$FAKE_ACTIVE" ] && { [ -z "$FAKE_ROOT" ] || ! grep -q BROKEN "$FAKE_ROOT/vmon" 2>/dev/null; } ;;',
 			'  restart) [ ! -e "$FAKE_RESTART_FAIL" ] ;;',
 			"esac",
 			"",
@@ -98,17 +101,28 @@ async function helper(args: string[], options: { active?: boolean; restartFails?
 	if (options.active !== false) await writeFile(active, "");
 	if (options.restartFails === true) await writeFile(restartFail, "");
 	await rm(log, { force: true });
+	// A node's unit file says `--role node`; its vmon opens no listener, so health is the unit staying active. `sleep` is
+	// replaced by a no-op so the 10 one-second checks take no time, and a "BROKEN" vmon in $FAKE_ROOT makes the unit inactive.
+	const units = join(dir, "units");
+	const bin = join(dir, "bin");
+	await mkdir(units, { recursive: true });
+	await mkdir(bin, { recursive: true });
+	await writeFile(join(units, `${UNIT}.service`), `[Service]\nExecStart=/opt/vmon/vmon serve${options.node === true ? " --role node " : " "}--bind 0.0.0.0\n`);
+	await writeFile(join(bin, "sleep"), "#!/bin/sh\nexit 0\n");
+	await chmod(join(bin, "sleep"), 0o755);
 	const proc = Bun.spawn(["bash", HELPER, ...args], {
 		stdout: "pipe",
 		stderr: "pipe",
 		env: {
-			PATH: process.env.PATH ?? "",
+			PATH: `${options.node === true ? `${bin}:` : ""}${process.env.PATH ?? ""}`,
 			VMON_INSTALL_ROOT: root,
 			VMON_INSTALL_UNIT: UNIT,
 			VMON_INSTALL_BASE: `http://127.0.0.1:${server.port}/releases`,
 			VMON_INSTALL_HEALTH_URL: `http://127.0.0.1:${server.port}/health`,
 			VMON_INSTALL_HEALTH_WAIT: String(options.healthWait ?? 5),
 			VMON_INSTALL_SYSTEMCTL: systemctl,
+			VMON_INSTALL_UNIT_DIR: units,
+			FAKE_ROOT: options.node === true ? root : "",
 			FAKE_LOG: log,
 			FAKE_ACTIVE: active,
 			FAKE_RESTART_FAIL: restartFail,
@@ -313,6 +327,50 @@ describe.skipIf(!supported)("infra/vmon-install.sh", () => {
 
 		expect(result.code).toBe(1);
 		expect(String(result.verdict.error)).toContain("no previous vmon to roll back to");
+	});
+
+	describe("node role (`--role node` in the unit file)", () => {
+		/** A node-only vmon opens no listener: the health URL points at a closed port, so only the unit's state can decide. */
+		const noListener = { VMON_INSTALL_HEALTH_URL: "http://127.0.0.1:9/health" };
+		const activeCall = `is-active --quiet ${UNIT}`;
+
+		test("passes once the unit has been active for 10 consecutive checks, without asking the health URL", async () => {
+			await installFakeVmon("0.4.0");
+			await publish("v0.4.1");
+
+			const result = await helper(["v0.4.1"], { node: true, healthWait: 12, env: noListener });
+
+			expect(result.verdict).toEqual({ ok: true, version: "v0.4.1" });
+			expect(result.code).toBe(0);
+			expect(await installedVersion()).toBe("vmon 0.4.1");
+			// One check before the swap (was the unit running?) and the 10 of the wait.
+			expect(result.systemctl.filter(call => call === activeCall)).toHaveLength(11);
+			expect(result.systemctl.filter(call => call.startsWith("restart"))).toEqual([`restart ${UNIT}`]);
+		});
+
+		test("a unit that goes inactive is rolled back to the previous vmon", async () => {
+			await installFakeVmon("0.4.0");
+			await publish("v0.4.1", { broken: true });
+
+			const result = await helper(["v0.4.1"], { node: true, healthWait: 12, env: noListener });
+
+			expect(result.code).toBe(1);
+			expect(String(result.verdict.error)).toContain("vmon v0.4.1 did not stay active for 10 s within 12 s");
+			expect(String(result.verdict.error)).toContain("rolled back to vmon 0.4.0");
+			expect(await installedVersion()).toBe("vmon 0.4.0");
+			expect(result.systemctl.filter(call => call.startsWith("restart"))).toEqual([`restart ${UNIT}`, `restart ${UNIT}`]);
+			// Before the swap 1, the failed wait 12 (a check per second of the window), the rolled-back wait 10.
+			expect(result.systemctl.filter(call => call === activeCall)).toHaveLength(1 + 12 + 10);
+		});
+
+		test("a health wait shorter than the 10 s window cannot succeed", async () => {
+			await publish("v0.4.1");
+
+			const result = await helper(["v0.4.1"], { node: true, healthWait: 9, env: noListener });
+
+			expect(result.code).toBe(1);
+			expect(String(result.verdict.error)).toContain("did not stay active for 10 s within 9 s");
+		});
 	});
 
 	test.each([[[]], [["v0.4"]], [["0.4.0"]], [["v0.4.0 "]], [["v0.4.0;touch"]], [["v1.2.3\n"]], [["v0.4.0", "v0.4.1"]], [["../v0.4.0"]]])(

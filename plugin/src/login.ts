@@ -9,7 +9,7 @@ import type { PairedConnection } from "./connection";
 import { CloudError } from "./errors";
 import { parseServerAddress } from "./pairing";
 import { usedAddress } from "./transport";
-import { UserError, type HostUi, type Login } from "./types";
+import { UserError, type HostUi, type Login, type LoginList } from "./types";
 
 export type LoginApi = Pick<CloudClient, "startLogin" | "login" | "loginInput" | "cancelLogin">;
 
@@ -21,17 +21,17 @@ export function serverHostOf(paired: PairedConnection | undefined): string | und
 }
 
 /**
- * What the user does to log the broker in to `provider`: the owner token runs `/cloud login`; a paired device cannot, so it
- * is pointed at the server machine, where `omp-cloud login` works.
+ * What the user does to log the broker in to `provider`: a connection with full access runs `/cloud login`; a device with
+ * threads-only access cannot, so it is pointed at the server machine, where `omp-cloud login` works.
  */
-export function userLoginStep(provider: string, serverHost: string | undefined): string {
-	if (serverHost === undefined) return `run /cloud login ${provider}`;
+export function userLoginStep(provider: string, serverHost: string | undefined, full: boolean): string {
+	if (full || serverHost === undefined) return `run /cloud login ${provider}`;
 	return `run omp-cloud login ${provider} on ${serverHost} (over ssh: ssh -t <user>@${serverHost} '~/.local/bin/omp-cloud login ${provider}')`;
 }
 
 /** What to tell the user who needs the broker logged in to `provider`. */
-export function loginHint(provider: string, serverHost: string | undefined): string {
-	return serverHost === undefined ? `/cloud login ${provider}` : `log the server in: ${userLoginStep(provider, serverHost)}`;
+export function loginHint(provider: string, serverHost: string | undefined, full: boolean): string {
+	return full || serverHost === undefined ? `/cloud login ${provider}` : `log the server in: ${userLoginStep(provider, serverHost, full)}`;
 }
 
 export interface RunLoginOptions {
@@ -47,6 +47,26 @@ export function loginLines(l: Login): string[] {
 	if (l.url) lines.push(`  open: ${l.url}`);
 	if (l.userCode) lines.push(`  enter the code: ${l.userCode}`);
 	if (l.instructions) lines.push(`  ${l.instructions}`);
+	return lines;
+}
+
+/** `/cloud login` with no provider: what the cloud is logged in to, one line each, and how to log it in to more. */
+export function loginListLines(list: LoginList): string[] {
+	const lines = ["☁ the cloud is logged in to:"];
+	for (const e of list.logins) {
+		if (e.disabled) {
+			lines.push(`  ${e.provider} · disabled: ${e.note}`);
+			continue;
+		}
+		const parts = [e.provider];
+		if (e.account) parts.push(e.account);
+		if (e.loggedInAt) parts.push(`logged in ${e.loggedInAt.slice(0, 10)}`);
+		if (e.renewBy) parts.push(`renew by ${e.renewBy.slice(0, 10)}`);
+		lines.push(`  ${parts.join(" · ")}`);
+	}
+	if (list.logins.length === 0) lines.push("  nothing yet");
+	if (list.brokerError) lines.push(`  ! ${list.brokerError}`);
+	lines.push("  /cloud login <provider> logs the cloud in (again)");
 	return lines;
 }
 
