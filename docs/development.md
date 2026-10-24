@@ -30,7 +30,7 @@ mise run typecheck         # tsc --noEmit, service, dashboard client and website
 mise run smoke             # curl the API of a fresh service, no VM
 mise run scenario          # API end to end on local vmon, fake model
 mise run plugin:scenario   # real local omp + plugin installed from the release bundle through a marketplace → fresh service on local vmon
-mise run parity:capture    # native-parity harness on a real omp, fake model, throwaway service on local vmon (~5 min); `-- --assert`, `--only native|ansi`, `--no-cloud`
+mise run parity:capture    # native-parity harness on a real omp, fake model, throwaway service on local vmon (~14 min: two passes of ~7); `-- --assert`, `--only native|ansi`, `--no-cloud`
 mise run update:scenario   # the updater against real compiled releases and a throwaway user unit (no VM, no model; minutes)
 mise run install:scenario  # the installer on a clean Debian 13 VM (nested KVM; tens of minutes); `-- --no-nested` for a host whose nested KVM kills the VM
 mise run cleanhost -- list # clean Debian 13 VMs on the local vmon (team omp-cloud-test): create, exec, put, get, destroy, list, template, nested

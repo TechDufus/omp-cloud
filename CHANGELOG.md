@@ -6,6 +6,8 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 ## Unreleased
 
+You are the owner on every machine: a paired device has full or threads-only access, the cloud has a name you see everywhere, and updates, logins and the capacity of the whole vibemon cluster are visible from omp and the dashboard. More vibemon machines can join the server's cluster with `omp-cloud setup node --join`. This is Service API 6, with database migration 17, so `update.mode: auto` waits for a click on this release.
+
 ### Upgrade notes
 
 - **Devices have access levels (schema migration 17, Service API 6).** A paired device is now the owner on its machine, with `full` access (everything the owner token can do) or `threads` access (threads and reads). On upgrade, devices paired over ssh become `full` and devices paired with a code stay `threads`; an approval that names no access, which is what a plugin older than this release sends, grants `threads`. Change one with `PATCH /api/v1/devices/{id}`. The service must restart to migrate the database before `omp-cloud ssh-pair` works again.
