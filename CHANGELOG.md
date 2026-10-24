@@ -6,6 +6,8 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 ## Unreleased
 
+## 0.8.0 (2026-10-24)
+
 You are the owner on every machine: a paired device has full or threads-only access, the cloud has a name you see everywhere, and updates, logins and the capacity of the whole vibemon cluster are visible from omp and the dashboard. More vibemon machines can join the server's cluster with `omp-cloud setup node --join`. This is Service API 6, with database migration 17, so `update.mode: auto` waits for a click on this release.
 
 ### Upgrade notes
