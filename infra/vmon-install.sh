@@ -60,7 +60,7 @@ log() { echo "vmon-install: $*" >&2; }
 
 [ "$#" -eq 1 ] || fail "usage: vmon-install <tag> (for example v0.4.0)" 2
 tag="$1"
-[ "${#tag}" -le 32 ] && [[ "$tag" =~ $TAG_PATTERN ]] || fail "the tag must look like v0.4.0, got: $tag" 2
+if [ "${#tag}" -gt 32 ] || ! [[ "$tag" =~ $TAG_PATTERN ]]; then fail "the tag must look like v0.4.0, got: $tag" 2; fi
 version="${tag#v}"
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -112,7 +112,7 @@ exec 9>"$parent/.$name-install.lock"
 flock -n 9 || fail "another vmon install is running"
 
 work=""
-# shellcheck disable=SC2329 # invoked by the EXIT trap
+# shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap (SC2317 before shellcheck 0.11, SC2329 from 0.11)
 cleanup() { [ -z "$work" ] || rm -rf "$work"; }
 trap cleanup EXIT
 work="$(mktemp -d "$parent/.$name-install.XXXXXX")"
@@ -216,7 +216,7 @@ src_vmon="$work/x/vmon-x86_64-unknown-linux-musl/vmon"
 src_agent="$work/x/vmon-assets-x86_64/vmon-agent-$arch"
 src_kernel="$work/x/vmon-assets-x86_64/vmon-kernel-$arch"
 for file in "$src_vmon" "$src_agent" "$src_kernel"; do
-	[ -f "$file" ] && [ ! -L "$file" ] || fail "the release lacks ${file#"$work/x/"}"
+	if [ ! -f "$file" ] || [ -L "$file" ]; then fail "the release lacks ${file#"$work/x/"}"; fi
 done
 
 new="$work/new"
