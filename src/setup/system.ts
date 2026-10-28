@@ -497,7 +497,7 @@ async function vmmUserStep(deps: SystemDeps): Promise<{ step: StepResult; user: 
 	if (found.code !== 0) {
 		// The comment is a passwd field, so it must not hold a `:` (useradd refuses one).
 		const added = await deps.runner(["useradd", "--system", "--gid", KVM_GROUP, "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", "--comment", "omp-cloud vibemon VMMs", VMM_USER]);
-		if (added.code !== 0) return failed(`useradd ${VMM_USER} failed: ${lastLine(added.stderr)}`, `sudo useradd --system --gid ${KVM_GROUP} --no-create-home --shell /usr/sbin/nologin ${VMM_USER}`);
+		if (added.code !== 0) return failed(`useradd ${VMM_USER} failed: ${lastLine(added.stderr)}`, `sudo useradd --system --gid ${KVM_GROUP} --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment 'omp-cloud vibemon VMMs' ${VMM_USER}, then omp-cloud setup again`);
 		created = true;
 		found = await deps.runner(["id", "-u", VMM_USER]);
 	}
