@@ -11,7 +11,8 @@ import { readVmonKey } from "./config";
 import type { HealthDeps, TemplateProbe } from "./health";
 import { type PreflightResult, preflight } from "./preflight";
 import { Reporter, type StepResult } from "./steps";
-import { NODE_ENV_FILE } from "./system";
+import { NODE_ENV_FILE, vmmUserCheck } from "./system";
+import { SYSTEM_UNIT_DIR, VMON_UNIT } from "./system-units";
 import { userUnitChecks } from "./units";
 
 export interface DoctorDeps {
@@ -199,6 +200,8 @@ export interface NodeDoctorDeps {
 	ip: string;
 	/** The text of `/etc/omp-cloud/node.env`; throws when it cannot be read. */
 	readNodeEnv: () => Promise<string>;
+	/** The text of the vmon unit; null when there is none. */
+	readVmonUnit: () => Promise<string | null>;
 }
 
 interface NodeServer {
@@ -344,6 +347,7 @@ export async function collectNodeDoctor(deps: NodeDoctorDeps): Promise<StepResul
 		steps.push({ id: "doctor.node.config", status: "failed", detail: `${NODE_ENV_FILE} cannot be read (${messageOf(error)})`, fix: JOIN_AGAIN });
 	}
 	for (const { id, unit } of NODE_UNITS) steps.push(...(await guarded(id, () => nodeUnitChecks(deps, id, unit))));
+	steps.push(...(await guarded("doctor.node.vmm-user", async () => vmmUserCheck("doctor.node.vmm-user", await deps.readVmonUnit(), "omp-cloud setup node --join <user@server>"))));
 	steps.push(...(await guarded("doctor.node.sync", () => nodeSyncChecks(deps))));
 	let route: ServerRoute = { kind: "none", detail: `${NODE_ENV_FILE} names no server` };
 	if (server !== null) {
@@ -370,6 +374,7 @@ export function nodeDoctorDeps(ctx: SetupContext): NodeDoctorDeps {
 		run: ctx.run,
 		ip: ctx.preflight.which("ip") ?? "ip",
 		readNodeEnv: () => ctx.preflight.readText(NODE_ENV_FILE),
+		readVmonUnit: () => ctx.preflight.readText(`${SYSTEM_UNIT_DIR}/${VMON_UNIT}`).catch(() => null),
 	};
 }
 

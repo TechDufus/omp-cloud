@@ -7,6 +7,7 @@ import { VMON_PIN } from "../vmon/pin";
 import { defaultServiceConfig } from "./config";
 import { parseSetupArgs, runSetup, type SetupArgs, setupMain } from "./index";
 import { packagesFor } from "./packages";
+import { renderVmonUnit } from "./system-units";
 import { NODE_ENV_FILE, type SystemReport } from "./system";
 import { ADMIN_TOKEN, rootReport, rig, type RigOptions, type TestRig, TEST_USER } from "./test-support";
 
@@ -133,8 +134,18 @@ describe("the plan", () => {
 		expect(out).toContain(`enable linger for ${TEST_USER}`);
 		expect(out).toContain(`as ${TEST_USER}:`);
 		expect(out).toContain("user units omp-auth-broker, omp-auth-gateway, omp-cloud");
+		expect(out).toContain("run vibemon's VMMs as the system user omp-cloud-vmm (group kvm) under their seccomp and Landlock filters, not as root");
+		expect(out).not.toContain("vmon restarts for it");
 		expect(testRig.asked).toEqual(["Continue? [Y/n]"]);
 		expect(out.indexOf("as root")).toBeLessThan(out.indexOf("setup system") === -1 ? Number.MAX_SAFE_INTEGER : out.indexOf("setup system"));
+	});
+
+	test("a vmon unit that runs without --vmm-user is named: vmon restarts for it; one with the flag is not", async () => {
+		const without = renderVmonUnit("172.20.0.0/16", { uid: 961, gid: 990 }).replace(" --vmm-user 961:990", "");
+		const missing = await run({ vmonUnit: without }, "--yes");
+		expect(missing.rig.out.join("")).toContain("not as root; vmon restarts for it, so a turn running now is re-run");
+		const present = await run({ vmonUnit: renderVmonUnit("172.20.0.0/16", { uid: 961, gid: 990 }) }, "--yes");
+		expect(present.rig.out.join("")).not.toContain("vmon restarts for it");
 	});
 
 	test("--yes does not ask; --no-linger and --no-wait show in it", async () => {
@@ -391,7 +402,7 @@ describe("the team key", () => {
 		expect(sudoCalls(again)).toHaveLength(1);
 	});
 
-	test("--migrate-team switches: the service stops first, the old key is kept as vmon.key.acme and paused threads are mentioned", async () => {
+	test("--migrate-team switches: the service stops first, the root part is told the old team, no key backup is kept and the plan says the old team is deleted", async () => {
 		await existingHost({ team: "acme", key: "e2b_acme_key" });
 		const testRig = await rig(dir, { host: { root: [rootReport({ key: "e2b_new_team_key", team: { slug: "omp-cloud", created: true } })] } });
 		expect(await runSetup(args("--yes", "--migrate-team"), testRig.ctx)).toBe(0);
@@ -400,13 +411,13 @@ describe("the team key", () => {
 		const root = lines.findIndex((line) => line.startsWith("sudo -- "));
 		expect(stop).toBeGreaterThanOrEqual(0);
 		expect(stop).toBeLessThan(root);
-		expect(lines[root]).toContain("--team omp-cloud --migrate-team");
+		expect(lines[root]).toContain("--team omp-cloud --migrate-team acme");
 		expect(await text(testRig.ctx.paths.vmonKey)).toBe("e2b_new_team_key");
-		expect(await text(`${testRig.ctx.paths.vmonKey}.acme`)).toBe("e2b_acme_key");
-		expect(await mode(`${testRig.ctx.paths.vmonKey}.acme`)).toBe(0o600);
+		expect(await stat(`${testRig.ctx.paths.vmonKey}.acme`).catch(() => null)).toBeNull();
 		expect(JSON.parse(await text(testRig.ctx.paths.serviceJson)).vmon.team).toBe("omp-cloud");
 		const out = testRig.out.join("");
 		expect(out).toContain("switch the team from acme to omp-cloud");
+		expect(out).toContain("delete the team acme");
 		expect(out).toContain("cold restores");
 	});
 
@@ -419,7 +430,6 @@ describe("the team key", () => {
 		expect(await runSetup(args("--yes", "--migrate-team", "--team", "beta"), again.ctx)).toBe(0);
 		expect(sudoCalls(again)).toHaveLength(1);
 		expect(sudoCalls(again)[0]).not.toContain("--migrate-team");
-		expect(await text(`${again.ctx.paths.vmonKey}.acme`)).toBe("e2b_acme_key");
 	});
 
 	test("--team that disagrees with the host's team is a usage error pointing at --migrate-team", async () => {

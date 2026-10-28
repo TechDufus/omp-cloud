@@ -14,11 +14,13 @@
  *  5  install: `curl -fsSL <host>/install.sh | OMP_CLOUD_DOWNLOAD_URL=<host> sh -s -- --yes --no-login` exits 0
  *  6  checks: `omp-cloud doctor` passes, system and user units enabled and active, linger, vmon answers 204, the VM template is ready
  *  7  real turn: the fake provider (compiled here, pushed in, bound to the VM's own 10.254.254.1) serves a scratch thread
- *     in a nested VM through the inner service until its turn is `done`
+ *     in a nested VM through the inner service until its turn is `done`; every `vmon vmm` process must then be owned by omp-cloud-vmm
  *  8  a second `omp-cloud setup --yes --no-login` changes nothing
  *  9  reboot persistence: a probe VM finds out whether a vmon guest survives `reboot`; if it does the install VM is
  *     rebooted and must come back whole, if not every unit is checked as enabled and wanted by multi-user.target (a real reboot is not run)
- * 10  `omp-cloud uninstall --purge --yes` leaves no units, /opt/vmon, /etc/vmon, config or data, and keeps the backups
+ * 10  `omp-cloud setup --yes --no-login --no-wait --json --migrate-team --team omp-cloud-moved` switches to the new team and
+ *     deletes the old one in vibemon (`system.team.old` changed, no `vmon.key.omp-cloud`, `vmon.team` in service.json updated)
+ * 11  `omp-cloud uninstall --purge --yes` leaves no units, /opt/vmon, /etc/vmon, config or data, no omp-cloud-vmm user, and keeps the backups
  *
  * `-- --no-nested` is for a host whose nested KVM kills the clean VM at the first guest (step 3 fails without it). The
  * runner is switched off in a seeded service.json (the service would build the template at start and
@@ -54,6 +56,8 @@ if (UNKNOWN_ARG !== undefined) {
 	process.exit(2);
 }
 const SYSTEM_UNITS = ["vmon", "omp-cloud-net"];
+/** The team step 10 migrates to. */
+const MOVED_TEAM = "omp-cloud-moved";
 const USER_UNITS = ["omp-auth-broker", "omp-auth-gateway", "omp-cloud", "omp-cloud-backup.timer"];
 
 type Json = Record<string, unknown>;
@@ -363,7 +367,24 @@ async function main(): Promise<void> {
 		});
 		if (finished.state !== "done") throw new Error(`turn 1 ended ${text(finished.state)}: ${text(finished.error)}`);
 		expectContains("the turn's reply", text(finished.reply), "DONE=");
-		return `fake provider answered ${answer}; thread ${threadId} turn 1 done in ${((performance.now() - started) / 1000).toFixed(0)} s`;
+
+		// The VMM runs as omp-cloud-vmm, not root (read from /proc: procps may be absent in the clean VM).
+		const scan = await sh(
+			`for d in /proc/[0-9]*; do [ -r "$d/cmdline" ] || continue; c=$(tr '\\0' '\\037' < "$d/cmdline" 2>/dev/null) || continue; o=$(stat -c %U "$d" 2>/dev/null) || continue; printf '%s\\t%s\\n' "$o" "$c"; done; true`,
+			{ root: true },
+		);
+		const vmms = scan.split("\n").flatMap(line => {
+			const tab = line.indexOf("\t");
+			if (tab < 0) return [];
+			const words = line.slice(tab + 1).split("\u001f");
+			const first = words[0] ?? "";
+			if (words[1] !== "vmm" || !(first === "vmon" || first.endsWith("/vmon"))) return [];
+			return [{ owner: line.slice(0, tab), command: words.join(" ").trim() }];
+		});
+		if (vmms.length === 0) throw new Error("no `vmon vmm` process is running after the turn");
+		const wrong = vmms.filter(entry => entry.owner !== "omp-cloud-vmm");
+		if (wrong.length > 0) throw new Error(`VMMs not owned by omp-cloud-vmm:\n${vmms.map(entry => `${entry.owner}: ${entry.command}`).join("\n")}`);
+		return `fake provider answered ${answer}; thread ${threadId} turn 1 done in ${((performance.now() - started) / 1000).toFixed(0)} s; ${vmms.length} VMM process(es) all owned by omp-cloud-vmm`;
 	}, shown => shown);
 
 	await report.step("8 a second setup changes nothing", async () => {
@@ -394,7 +415,22 @@ async function main(): Promise<void> {
 		return message;
 	}, shown => shown);
 
-	await report.step("10 uninstall --purge --yes leaves nothing but the backups", async () => {
+	await report.step("10 --migrate-team switches to a new team and deletes the old one", async () => {
+		const migrated = await exec(host(), `omp-cloud setup --yes --no-login --no-wait --json --migrate-team --team ${MOVED_TEAM}`, { timeoutMs: 15 * 60_000 });
+		if (migrated.exitCode !== 0) throw new Error(`setup --migrate-team exited ${migrated.exitCode}:\n${migrated.stderr}${migrated.stdout.slice(0, 600)}`);
+		const old = reportSteps(migrated.stdout).find(step => step.id === "system.team.old");
+		if (old === undefined) throw new Error(`the migrate report has no system.team.old step\n${migrated.stderr}`);
+		if (old.status !== "changed") throw new Error(`system.team.old is ${old.status}, not changed (${old.detail})`);
+		const teams = await sh("set -a; . /etc/vmon/env; exec /opt/vmon/vmon admin list-teams", { root: true });
+		expectContains("vmon's teams", teams, `\t${MOVED_TEAM}\t`);
+		if (teams.includes("\tomp-cloud\t")) throw new Error(`the old team omp-cloud is still in vmon's team list:\n${teams}`);
+		if ((await exec(host(), "test -e ~/.config/omp-cloud/vmon.key.omp-cloud")).exitCode === 0) throw new Error("setup --migrate-team left ~/.config/omp-cloud/vmon.key.omp-cloud");
+		const config = obj(JSON.parse(await sh("cat ~/.config/omp-cloud/service.json")), "service.json");
+		expectEqual("vmon.team in service.json", text(obj(config.vmon, "service.json vmon").team), MOVED_TEAM);
+		return `team omp-cloud deleted (${old.detail}); service.json now names ${MOVED_TEAM}`;
+	}, shown => shown);
+
+	await report.step("11 uninstall --purge --yes leaves nothing but the backups", async () => {
 		const backup = await exec(host(), "omp-cloud backup", { timeoutMs: 120_000 });
 		if (backup.exitCode !== 0) throw new Error(`omp-cloud backup exited ${backup.exitCode}: ${backup.stderr}${backup.stdout}`);
 		const archives = (await sh("ls ~/.local/share/omp-cloud/backups")).trim().split("\n").filter(name => name !== "");
@@ -416,6 +452,7 @@ async function main(): Promise<void> {
 		if (unexpected.length > 0) throw new Error(`uninstall --purge left data besides the backups: ${unexpected.join(", ")}`);
 		const afterwards = (await sh("ls ~/.local/share/omp-cloud/backups")).trim().split("\n");
 		expectEqual("backups kept", JSON.stringify(afterwards), JSON.stringify(archives));
+		expectEqual("the system user omp-cloud-vmm after uninstall", (await sh("getent passwd omp-cloud-vmm || true", { root: true })).trim(), "");
 		return `backups kept: ${afterwards.join(", ")}`;
 	}, shown => shown);
 }

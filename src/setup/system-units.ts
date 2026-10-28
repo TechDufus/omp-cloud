@@ -49,9 +49,28 @@ WantedBy=multi-user.target
 `;
 }
 
+/** The system user and group vibemon's VMMs run as. */
+export const VMM_USER = "omp-cloud-vmm";
+export const KVM_GROUP = "kvm";
+export const VMM_USER_PLAN = "run vibemon's VMMs as the system user omp-cloud-vmm (group kvm) under their seccomp and Landlock filters, not as root";
+
+export interface VmmUser {
+	uid: number;
+	gid: number;
+}
+
+/** `--vmm-user <uid>:<gid>` for a vmon unit; throws for an id that is not a positive integer (the VMMs must never run as root). */
+function vmmUserArgs(user: VmmUser): string[] {
+	for (const [name, id] of [["uid", user.uid], ["gid", user.gid]] as const) {
+		if (!Number.isInteger(id) || id <= 0) throw new Error(`the VMM ${name} must be a positive integer, not ${id}`);
+	}
+	return ["--vmm-user", `${user.uid}:${user.gid}`];
+}
+
 /**
- * vmon as the host runs it, with the host's own vCPU and memory defaults and the chosen TAP pool. `--vmm-user` is
- * deliberately absent (in vibemon 0.4.0 it breaks every VM launch). `KillMode=process` and `TimeoutStopSec=60` are what keep sandboxes alive over a restart.
+ * vmon as the host runs it, with the host's own vCPU and memory defaults and the chosen TAP pool. `--vmm-user` drops
+ * every VMM to `omp-cloud-vmm` with the `kvm` gid: VMMs open `/dev/kvm` after dropping supplementary groups (vibemon >= 0.4.1).
+ * `KillMode=process` and `TimeoutStopSec=60` are what keep sandboxes alive over a restart.
  *
  * vmon denies sandboxes every private address unless the node exempts it, and `--egress-internal-allow` is that
  * exemption: only the service address, which carries the gateway. The exemption covers every port of that address, not
@@ -62,14 +81,14 @@ WantedBy=multi-user.target
  * The cluster and gossip listeners are the same kind of listener: they bind loopback, or with `clusterAddress` (a server
  * that takes other vibemon machines) that one LAN address and never `0.0.0.0`.
  */
-export function renderVmonUnit(pool: string, clusterAddress: string | null = null): string {
+export function renderVmonUnit(pool: string, vmmUser: VmmUser, clusterAddress: string | null = null): string {
 	const host = clusterAddress === null ? LOCAL_CLUSTER_HOST : requirePlainIpv4(clusterAddress, "the cluster address");
 	const args = [
 		"serve", "--role", "node,driver", "--data-dir", "/var/lib/vmon",
 		"--listen", "127.0.0.1:3000", "--public-url", "http://127.0.0.1:3000", "--domain", "localhost",
 		"--cluster-listen", `${host}:7947`, "--gossip-listen", `${host}:7946`,
 		"--egress-internal-allow", `${SERVICE_IP}/32`, "--registry-mirror", "https://mirror.gcr.io",
-		"--net-pool", pool,
+		"--net-pool", pool, ...vmmUserArgs(vmmUser),
 	];
 	return `[Unit]
 Description=vmon (omp-cloud)
@@ -96,6 +115,12 @@ export function clusterListenOfUnit(unitText: string): string | null {
 	return match?.[1] ?? null;
 }
 
+/** The `<uid>:<gid>` a vmon unit text drops its VMMs to (`--vmm-user`); null when the text has no such flag. */
+export function vmmUserOfUnit(unitText: string): string | null {
+	const match = /--vmm-user[=\s]\s*(\d+:\d+)/.exec(unitText);
+	return match?.[1] ?? null;
+}
+
 /**
  * vmon on a node: the node role only (no listener of its own: it joins the server's gossip at `server`:7946), the cluster
  * and gossip listeners on every address because the other machines must reach them, and the same exemption for the
@@ -103,11 +128,11 @@ export function clusterListenOfUnit(unitText: string): string | null {
  * unit (not `Wants=`, which would start vmon even when the unit failed): without the unit's rules the node's VMs reach
  * every all-address listener of the server, so vmon stops when that unit fails or stops.
  */
-export function renderNodeVmonUnit(pool: string, server: string): string {
+export function renderNodeVmonUnit(pool: string, server: string, vmmUser: VmmUser): string {
 	const args = [
 		"serve", "--role", "node", "--data-dir", "/var/lib/vmon", "--join", `${server}:7946`,
 		"--egress-internal-allow", `${SERVICE_IP}/32`, "--registry-mirror", "https://mirror.gcr.io",
-		"--net-pool", pool,
+		"--net-pool", pool, ...vmmUserArgs(vmmUser),
 	];
 	requirePlainIpv4(server, "the server address");
 	return `[Unit]
@@ -234,6 +259,8 @@ export interface InstallUnitsOptions {
 	runner: CommandRunner;
 	/** The LAN address vmon listens on for other vibemon machines; null: loopback only (the default). */
 	clusterAddress?: string | null;
+	/** The uid and gid vmon drops its VMMs to. */
+	vmmUser: VmmUser;
 }
 
 export interface InstallUnitsOutcome {
@@ -245,7 +272,8 @@ export interface InstallUnitsOutcome {
 /**
  * Writes both units and enables both with `--now`. The pool of a unit file that already exists is kept; only a first install
  * chooses one from `ip route`. A running vmon whose unit used to listen for its cluster on another address than the one
- * wanted now (a server that starts or stops taking other machines) is restarted: the listeners are bound at start.
+ * wanted now (a server that starts or stops taking other machines) is restarted: the listeners are bound at start. So is a
+ * running vmon whose unit drops its VMMs to another user than `vmmUser` (or to none): the flag is read at start.
  */
 export async function installSystemUnits(options: InstallUnitsOptions): Promise<InstallUnitsOutcome> {
 	const { root, runner } = options;
@@ -264,7 +292,7 @@ export async function installSystemUnits(options: InstallUnitsOptions): Promise<
 
 	const before = { net: await unitState(runner, NET_UNIT), vmon: await unitState(runner, VMON_UNIT) };
 	const netWritten = await writeIfChanged(unitPath(NET_UNIT), renderNetUnit(), 0o644);
-	const vmonWritten = await writeIfChanged(unitPath(VMON_UNIT), renderVmonUnit(pool, clusterAddress), 0o644);
+	const vmonWritten = await writeIfChanged(unitPath(VMON_UNIT), renderVmonUnit(pool, options.vmmUser, clusterAddress), 0o644);
 
 	const reloaded = await runner(["systemctl", "daemon-reload"]);
 	if (reloaded.code !== 0) return { ...fail("system.unit.vmon", `systemctl daemon-reload failed: ${lastLine(reloaded.stderr)}`, "sudo systemctl daemon-reload"), netPool: pool };
@@ -284,7 +312,8 @@ export async function installSystemUnits(options: InstallUnitsOptions): Promise<
 	if (!netOk) return { steps, netPool: pool };
 
 	const rebound = before.vmon.active && oldVmon !== null && (clusterListenOfUnit(oldVmon) ?? LOCAL_CLUSTER_HOST) !== (clusterAddress ?? LOCAL_CLUSTER_HOST);
-	if (rebound) {
+	const regranted = before.vmon.active && oldVmon !== null && vmmUserOfUnit(oldVmon) !== `${options.vmmUser.uid}:${options.vmmUser.gid}`;
+	if (rebound || regranted) {
 		const restarted = await runner(["systemctl", "restart", VMON_UNIT], { timeoutMs: START_TIMEOUT_MS });
 		if (restarted.code !== 0) {
 			steps.push({ id: "system.unit.vmon", status: "failed", detail: `${VMON_UNIT} did not restart: ${lastLine(restarted.stderr)}`, fix: "journalctl -u vmon -n 50 --no-pager" });
@@ -296,9 +325,11 @@ export async function installSystemUnits(options: InstallUnitsOptions): Promise<
 		? clusterAddress === null
 			? `${VMON_UNIT} restarted to listen on ${LOCAL_CLUSTER_HOST} only`
 			: `${VMON_UNIT} restarted to listen for other vibemon machines on ${clusterAddress}`
-		: vmonWritten && before.vmon.active
-			? `${VMON_UNIT} updated; it takes effect at the next restart of vmon (net pool ${pool})`
-			: `${VMON_UNIT} enabled and active (net pool ${pool})`;
+		: regranted
+			? `${VMON_UNIT} restarted so its VMMs run as ${VMM_USER} (${options.vmmUser.uid}:${options.vmmUser.gid}) under their seccomp and Landlock filters`
+			: vmonWritten && before.vmon.active
+				? `${VMON_UNIT} updated; it takes effect at the next restart of vmon (net pool ${pool})`
+				: `${VMON_UNIT} enabled and active (net pool ${pool})`;
 	await started(VMON_UNIT, "system.unit.vmon", detail, vmonChanged);
 	return { steps, netPool: pool };
 }
@@ -334,7 +365,7 @@ export async function installNodeUnits(options: InstallNodeUnitsOptions): Promis
 		sync: await unitState(runner, SYNC_TIMER),
 	};
 	const netWritten = await writeIfChanged(unitPath(NODE_NET_UNIT), renderNodeNetUnit(options.route ? server : null), 0o644);
-	const vmonWritten = await writeIfChanged(unitPath(VMON_UNIT), renderNodeVmonUnit(pool, server), 0o644);
+	const vmonWritten = await writeIfChanged(unitPath(VMON_UNIT), renderNodeVmonUnit(pool, server, options.vmmUser), 0o644);
 	const syncWritten = [await writeIfChanged(unitPath(SYNC_UNIT), renderSyncUnit(), 0o644), await writeIfChanged(unitPath(SYNC_TIMER), renderSyncTimer(), 0o644)].some(Boolean);
 
 	const reloaded = await runner(["systemctl", "daemon-reload"]);
@@ -375,7 +406,7 @@ export async function installNodeUnits(options: InstallNodeUnitsOptions): Promis
  * `omp-cloud-node-net` and sync timer with its service), and a `ompsvc0` link that is left over. The vmon files under `/opt`
  * and `/var/lib` are not touched. The detail names the removed files as `A`, `A and B` or `A, B and C`.
  */
-export async function removeSystemUnits(options: InstallUnitsOptions): Promise<StepResult[]> {
+export async function removeSystemUnits(options: Pick<InstallUnitsOptions, "root" | "runner">): Promise<StepResult[]> {
 	const { root, runner } = options;
 	const candidates = [SYNC_TIMER, SYNC_UNIT, VMON_UNIT, NET_UNIT, NODE_NET_UNIT];
 	const names: string[] = [];

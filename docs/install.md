@@ -39,13 +39,13 @@ The device reaches the server on TCP 8443, which setup never opens: see [Firewal
 
 ## Requirements
 
-- **Linux x86_64 with `/dev/kvm`.** vibemon runs each cloud agent in a microVM. macOS, Windows and ARM machines cannot host the service (`install.sh` says so and stops); they can still use it as [another machine](#other-machines).
+- **Linux x86_64 with `/dev/kvm`.** vibemon runs each cloud agent in a microVM. macOS, Windows and ARM machines cannot host the service (`install.sh` says so and stops); they can still use it as [another machine](#other-machines). vibemon's VMMs run as the unprivileged system user `omp-cloud-vmm` in the group `kvm`, so `/dev/kvm` must be readable and writable by the group `kvm` (systemd-udev's default, `crw-rw---- root kvm`) or by everyone. Setup installs udev when `udevadm` is missing and never changes `/dev/kvm` itself.
 - **A regular user with sudo.** Run setup as that user, never as root (it refuses). It asks for sudo once; a password is fine. Without a terminal and without cached sudo it stops before changing anything and prints the exact command to run in a terminal.
 - **systemd** as PID 1, with a reachable user manager (`systemctl --user show-environment` works). A container usually has neither.
 - **Internet access** to GitHub (the release, vibemon), omp's build service (`build.stencil.so`, where the VM template installs omp from) and Docker's registry (`registry-1.docker.io`, the template's base image). The preflight checks that these three answer and only warns when one does not, because a proxy or mirror may still serve them; an unreachable host shows up later as a failed download. Installing a missing omp also needs `omp.sh`.
 - **Disk and RAM.** At least 30 GiB free under `/var/lib` (VM templates, snapshots and every thread's VM) and 8 GiB of RAM or more, shared by the sandboxes. Both are warnings, not blockers.
 - **omp** on the host: Tern's managed install first, else the first `omp` on `PATH` (or in `~/.local/bin`). A missing omp is installed with omp's own installer (`curl -fsSL https://omp.sh/install | sh`, as your user, after you agree to the plan). An omp older than the one this release is built against (18.12.3) fails the check with `omp update` as the fix.
-- **Tools** setup installs from your distribution's packages (apt, dnf or pacman) when missing: `ip`, `iptables`, `iptables-restore`, `ip6tables-restore`, `mkfs.ext4`, `e2fsck`, `resize2fs`, `curl`, `tar`, `sha256sum`, `flock`, `timeout`, `git`.
+- **Tools** setup installs from your distribution's packages (apt, dnf or pacman) when missing: `ip`, `iptables`, `iptables-restore`, `ip6tables-restore`, `mkfs.ext4`, `e2fsck`, `resize2fs`, `curl`, `tar`, `sha256sum`, `flock`, `timeout`, `git`, `udevadm` (udev, which creates the group `kvm` and gives it `/dev/kvm`).
 - **Free ports** 3000, 7946, 7947 (vibemon), 4000 (gateway), 8765 (broker), 8080, 8081 and 8443 (the service). A port already held by omp-cloud's own units passes; anything else listening there is reported. `10.254.254.1` must be free too: setup puts it on a dummy device, `ompsvc0`, which is how sandboxes reach the host.
 
 **Inside a VM**, nested virtualization has to work. Check on the host you will run setup on:
@@ -69,7 +69,8 @@ Setup configures only the machine it runs on. It checks first (read-only), print
    - install the vibemon install helper `/usr/local/libexec/omp-cloud/vmon-install` and a sudoers rule, `/etc/sudoers.d/omp-cloud`, that lets you run only that helper without a password (the updater uses it; it never covers the `omp-cloud` binary);
    - install vibemon at the pinned version in `/opt/vmon` and create `/etc/vmon/env` (vibemon's secrets) once;
    - add the service network (`ompsvc0` at `10.254.254.1`) and the system units `omp-cloud-net` and `vmon`, which start at boot (vibemon's VM network pool is `172.20.0.0/16`, or the first free of `172.29`, `172.30`, `172.31`);
-   - make sure the vibemon team `omp-cloud` exists with its limits;
+   - create the system user `omp-cloud-vmm` (group `kvm`, no home, no login shell) and run vibemon's VMMs as it, under their seccomp and Landlock filters, not as root (`vmon serve --vmm-user`). A running vmon whose unit lacks that restarts once, so a turn running then is re-run;
+   - make sure the vibemon team `omp-cloud` exists (`vmon admin create-team --if-missing`) with its limits;
    - enable linger for your user (`loginctl enable-linger`), so your services start at boot without a login. Setup records that it did, so uninstall undoes only what setup enabled.
 3. **As your user** (a missing omp is installed first, before the root part):
    - write `~/.config/omp-cloud/` (`service.json`, the owner token `service.token`, the team key `vmon.key`, the vibemon admin token `vmon-admin.token` (0600; the service reads the cluster's capacity with it), a TLS identity for [paired devices](pairing.md)): an existing token and TLS identity are kept, the team key is replaced only when vibemon no longer knows it, and an existing `service.json` is brought up to date in place;
@@ -97,7 +98,7 @@ Pass flags after `--` through the installer, for example `curl … | sh -s -- --
 | `--no-wait` | Do not wait for the VM template; it builds in the background |
 | `--team <slug>` | The vibemon team (default `omp-cloud`): lowercase letters, digits and hyphens, at most 63 characters, not `system`. A host keeps the team it has: another `--team` is refused (exit 2) unless `--migrate-team` is given |
 | `--max-sandboxes <n>` | The team's concurrent-sandbox limit, 1 to 1000 |
-| `--migrate-team` | Switch the host from its recorded team (`vmon.team` in `service.json`) to `--team` (default `omp-cloud`). Paused threads then come back as cold restores and the VM template rebuilds; the old key is kept as `vmon.key.<old slug>` |
+| `--migrate-team` | Switch the host from its recorded team (`vmon.team` in `service.json`) to `--team` (default `omp-cloud`) and delete the old team in vibemon with its sandboxes, templates (environment snapshots included) and keys. Paused threads then come back as cold restores and the VM template rebuilds. When the delete fails the switch still completes: the step `system.team.old` is skipped and its fix deletes the old team by hand |
 | `--cluster-address <ip>` | Let other vibemon machines join this server ([More vibemon machines](#more-vibemon-machines)): vmon listens for them on that one private LAN address of this machine (10/8, 172.16/12 or 192.168/16, never `0.0.0.0`) and restarts once, so a turn running then is re-run. A host keeps its mode: a rerun without a flag keeps the recorded address |
 | `--no-cluster` | Stop listening for other vibemon machines (vmon restarts; machines that joined lose contact, and threads whose VMs ran there are restored on this server). Not together with `--cluster-address` |
 | `--checkout` | Developer mode, for a git checkout (below) |
@@ -105,7 +106,7 @@ Pass flags after `--` through the installer, for example `curl … | sh -s -- --
 
 The installer reads two environment variables: `OMP_CLOUD_VERSION` (a release such as `0.5.1`; default the latest) and `OMP_CLOUD_DOWNLOAD_URL` (the releases base URL, default `https://github.com/TechDufus/omp-cloud/releases`). It stages the download under `$TMPDIR` when set, else `$XDG_CACHE_HOME` or `~/.cache`, not `/tmp`, which is often `noexec`; if the smoke test says permission denied, set `TMPDIR` to a directory that allows executables.
 
-The team's limits are set on every setup run: `--max-sandboxes` concurrent sandboxes (default 32), 4 concurrent builds, and, for each VM (not for the team as a whole), at most 8 vCPUs, 8192 MB of memory and 20480 MB of disk. Each run of a sandbox lasts at most 24 hours (the cap restarts when a paused sandbox resumes). vibemon cannot delete or rename teams, so a team left behind stays.
+The team's limits are set on every setup run: `--max-sandboxes` concurrent sandboxes (default 32), 4 concurrent builds, and, for each VM (not for the team as a whole), at most 8 vCPUs, 8192 MB of memory and 20480 MB of disk. Each run of a sandbox lasts at most 24 hours (the cap restarts when a paused sandbox resumes). vibemon cannot rename a team; only `--migrate-team` deletes one.
 
 ## Login
 
@@ -137,7 +138,7 @@ One server can run its VMs on more than one machine. The extra machines join the
    curl -fsSL https://omp-cloud.techdufus.com/install.sh | sh -s -- node --join you@192.168.1.20
    ```
 
-   `omp-cloud setup node --join <user@server>` (what the line runs) asks the server for its join information over ssh, prints its plan and asks `Continue? [Y/n]`, then does one `sudo` for the root part: vibemon at the server's version, `/etc/vmon/env` with the cluster secret, `/etc/omp-cloud/node.env` (the server's address and certificate pin, no secret), and the system units `vmon` (role node), `omp-cloud-node-net` and the `omp-cloud-vmon-sync` timer. It ends by asking the server whether it sees the machine (`node.member`) and whether `10.254.254.1:4000` answers from here (`node.gateway`).
+   `omp-cloud setup node --join <user@server>` (what the line runs) asks the server for its join information over ssh, prints its plan and asks `Continue? [Y/n]`, then does one `sudo` for the root part: vibemon at the server's version, `/etc/vmon/env` with the cluster secret, `/etc/omp-cloud/node.env` (the server's address and certificate pin, no secret), the system user `omp-cloud-vmm` that the node's VMMs run as (as on the server), and the system units `vmon` (role node), `omp-cloud-node-net` and the `omp-cloud-vmon-sync` timer. It ends by asking the server whether it sees the machine (`node.member`) and whether `10.254.254.1:4000` answers from here (`node.gateway`).
 
 **Network requirements.** Setup never opens a firewall port, so allow:
 
@@ -148,7 +149,7 @@ A node on the server's subnet gets a host route for `10.254.254.1` through the s
 
 **Versions.** A node follows the server's vibemon: `omp-cloud-vmon-sync.timer` checks the server's `vmon` version every minute and installs it through the root helper, so a server update that moves vibemon moves every node within a few minutes. A failed install is not retried for an hour. A node never downgrades vibemon: if the server rolls back, `omp-cloud doctor` on the server names the machines that are ahead, and the fix is `omp-cloud uninstall --purge` on the node, then joining again.
 
-**Checking and removing.** `omp-cloud doctor` on the node checks its units, route, gateway and version against the server; on the server it lists a machine that is not alive or runs another vibemon version (`doctor.cluster`). `omp-cloud uninstall [--purge]` on a node removes its units, scripts and server record; VMs running there are lost, and the server restores their threads on its other machines. `--no-cluster` on the server stops it taking machines.
+**Checking and removing.** `omp-cloud doctor` on the node checks its units, that its VMMs run as `omp-cloud-vmm` (`doctor.node.vmm-user`), its route, gateway and version against the server; on the server it lists a machine that is not alive or runs another vibemon version (`doctor.cluster`). `omp-cloud uninstall [--purge]` on a node removes its units, scripts and server record (`--purge` also the system user `omp-cloud-vmm`); VMs running there are lost, and the server restores their threads on its other machines. `--no-cluster` on the server stops it taking machines.
 
 ## Doctor
 
@@ -157,7 +158,7 @@ omp-cloud doctor          # the whole stack as one table, a fix beside each fail
 omp-cloud doctor --json   # {ok, steps} on stdout
 ```
 
-It runs the preflight, the system units and the vibemon health route, the helper and its sudoers rule, linger, the user units, the service (healthy and at this binary's version), the broker, the gateway, the VM template, the plugin and the providers the cloud serves. The plugin checks are omp and its version, installed or linked, that omp loads it (`plugin.loads`), `config.yml`. `plugin.loads` runs once the plugin is installed: it starts the omp of this host in RPC mode, from an empty directory, with no prompt and no model call, and passes when omp lists the real `/cloud` command. When the plugin fell back (the `/cloud` that says `omp-cloud could not load:`) or omp lists no `/cloud` at all it fails with the error and a fix: update omp when it is older than 18.12.3, otherwise update omp-cloud (`omp-cloud update`) and rerun `omp-cloud setup`, and report the error if it persists. It is skipped, not failed, when omp cannot be asked in time or is not installed. Exit code 1 when anything fails. A template still building and linger off show as skipped, not failed.
+It runs the preflight, the system units and the vibemon health route, that vibemon's VMMs run as `omp-cloud-vmm` (`system.check.vmm-user`; an install from before vibemon v0.4.1 fails it until `omp-cloud setup` runs again), the helper and its sudoers rule, linger, the user units, the service (healthy and at this binary's version), the broker, the gateway, the VM template, the plugin and the providers the cloud serves. The plugin checks are omp and its version, installed or linked, that omp loads it (`plugin.loads`), `config.yml`. `plugin.loads` runs once the plugin is installed: it starts the omp of this host in RPC mode, from an empty directory, with no prompt and no model call, and passes when omp lists the real `/cloud` command. When the plugin fell back (the `/cloud` that says `omp-cloud could not load:`) or omp lists no `/cloud` at all it fails with the error and a fix: update omp when it is older than 18.12.3, otherwise update omp-cloud (`omp-cloud update`) and rerun `omp-cloud setup`, and report the error if it persists. It is skipped, not failed, when omp cannot be asked in time or is not installed. Exit code 1 when anything fails. A template still building and linger off show as skipped, not failed.
 
 ## Uninstall
 
@@ -168,7 +169,7 @@ omp-cloud uninstall --purge    # also delete the data and vibemon
 
 It prints what it will do and keep, asks `Continue? [y/N]` (`--yes` skips it) and asks for sudo once. Uninstall stops and removes the user units, pauses the team's sandboxes, removes the plugin and the `~/.local/bin/omp-cloud` link, then (as root) removes the system units `omp-cloud-net` and `vmon`, the vibemon helper, the sudoers rule and linger when setup enabled it. It keeps `~/.config/omp-cloud`, the auth home, the service data (threads, database), the app directory and vibemon with its VMs, so a later `omp-cloud setup` picks up where you left off.
 
-`--purge` additionally kills the sandboxes and deletes vibemon (`/opt/vmon`, `/opt/vmon.prev`, `/var/lib/vmon` with every VM and template, `/etc/vmon`), `/etc/omp-cloud`, `~/.config/omp-cloud` (service config, owner token, team key, the TLS identity: paired devices must pair again), the auth home (the broker's vault: every model login is lost), `~/.local/share/omp-cloud/service` and the app directory. **Backups are always kept**, in `~/.local/share/omp-cloud/backups`; it prints how many remain.
+`--purge` additionally kills the sandboxes and deletes vibemon (`/opt/vmon`, `/opt/vmon.prev`, `/var/lib/vmon` with every VM and template, `/etc/vmon`), `/etc/omp-cloud`, the system user `omp-cloud-vmm`, `~/.config/omp-cloud` (service config, owner token, team key, the TLS identity: paired devices must pair again), the auth home (the broker's vault: every model login is lost), `~/.local/share/omp-cloud/service` and the app directory. **Backups are always kept**, in `~/.local/share/omp-cloud/backups`; it prints how many remain.
 
 Run it as your user from the installed binary (root is refused). In a checkout, `mise run infra:down` is `omp-cloud uninstall --checkout`.
 

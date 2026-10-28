@@ -6,6 +6,27 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 ## Unreleased
 
+### Upgrade notes
+
+- **vibemon v0.4.1.** omp-cloud now pins vibemon v0.4.1; an update moves the server's vibemon through the root helper (nodes follow within minutes) and the VM template rebuilds once for the new tag.
+- **Rerun `omp-cloud setup` once, and `omp-cloud setup node --join <user@server>` on each node.** It creates the system user `omp-cloud-vmm` and restarts vmon with `--vmm-user`, so a turn running then is re-run. Until then `omp-cloud doctor` fails `system.check.vmm-user` (`doctor.node.vmm-user` on a node), because the updater moves only the vibemon tag.
+- **Threads paused before that rerun come back as cold restores.** A sandbox paused while the VMMs ran as root cannot resume under `omp-cloud-vmm` (vmon logs `Permission denied` on its snapshot), so the thread's next message retries for about 4 minutes and then restores the thread on a new VM from its last result and conversation.
+
+### Changed
+
+- **`--migrate-team` deletes the old team.** Setup now deletes the team it leaves in vibemon (`delete-team --force`: its sandboxes, templates, environment snapshots and keys) and no longer keeps `vmon.key.<old slug>`; the plan says so before you confirm. A failed delete is reported as skipped (`system.team.old`) with the command that finishes it, and the switch to the new team still completes.
+- **The team is created with `create-team --if-missing`.** Setup ensures its vibemon team in one idempotent call, retried while vmon starts, instead of listing teams first; the limits are still set on every run.
+- **Setup installs udev when `udevadm` is missing.** udev creates the group `kvm` and gives it `/dev/kvm`, which the VMMs need now that they no longer run as root; setup never changes `/dev/kvm` itself and fails `system.vmm-user` with a fix when the group cannot read and write it.
+
+### Fixed
+
+- **vibemon fixes from v0.4.1.** A paused sandbox reads as paused on a machine that did not build its template, a snapshot template keeps its start command, and envd no longer leaks pidfds.
+
+### Security
+
+- **vibemon's VMMs no longer run as root.** vmon starts every VMM with `--vmm-user`, so it drops to the system user `omp-cloud-vmm` (group `kvm`) before opening `/dev/kvm` and runs under vibemon's seccomp and Landlock filters. `omp-cloud uninstall --purge` removes the user.
+- **vibemon dependency upgrades.** vibemon v0.4.1 carries the upstream fixes for its RustSec advisories.
+
 ## 0.8.0 (2026-10-24)
 
 You are the owner on every machine: a paired device has full or threads-only access, the cloud has a name you see everywhere, and updates, logins and the capacity of the whole vibemon cluster are visible from omp and the dashboard. More vibemon machines can join the server's cluster with `omp-cloud setup node --join`. This is Service API 6, with database migration 17, so `update.mode: auto` waits for a click on this release.

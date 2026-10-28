@@ -8,18 +8,23 @@ import { parseSystemArgs, parseSystemReport, runSystem, SETUP_RECORD, SUDOERS_FI
 import type { SystemDeps, SystemReport } from "./system";
 import type { FakeRunner } from "./system-fakes";
 import { fakeRunner, putFile } from "./system-fakes";
+import { renderVmonUnit } from "./system-units";
 
 const HELPER = "/usr/local/libexec/omp-cloud/vmon-install";
 const KEY = `e2b_${"ab12".repeat(10)}`;
 const OTHER_KEY = `e2b_${"cd34".repeat(10)}`;
-const COUNTS = "sandboxes=32 builds=4 vcpus=8 memory_mb=8192 disk_mb=20480 hours=24";
 const CREATED = `team    omp-cloud (9f1d)\nslug    omp-cloud\napi key ${KEY}\n`;
+const EXISTING = "team    omp-cloud (9f1d)\nslug    omp-cloud\n";
+const DELETED = "deleted team acme (0b3c)\nkilled sandboxes=1 cancelled builds=0\nremoved templates=2 volumes=0 secrets=0 webhooks=0 api keys=1\n";
 const HELPER_OK = 'downloading\n{"ok": true, "version": "v0.4.0"}\n';
 
 let root: string;
 
 beforeEach(async () => {
 	root = await mkdtemp(join(tmpdir(), "omp-cloud-system-"));
+	// The umask masks the mode writeFile gets: /dev/kvm must be read-write for everyone unless a test says otherwise.
+	await putFile(root, "/dev/kvm", "", 0o666);
+	await chmod(join(root, "/dev/kvm"), 0o666);
 });
 
 afterEach(async () => {
@@ -43,7 +48,14 @@ interface HostOptions {
 	euid?: number;
 	which?: (name: string) => string | null;
 	helperScript?: string;
-	teams?: string;
+	/** Slugs of teams that already exist in vmon. */
+	teams?: string[];
+	/** The system user omp-cloud-vmm exists before the run. */
+	vmmUserExists?: boolean;
+	/** Its uid as `id -u` prints it. */
+	vmmUid?: string;
+	/** What `getent group kvm` prints; "" for no such group. */
+	kvmGroup?: string;
 }
 
 /** A fresh host whose every command works: no units, vmon missing (the helper installs it), the team not yet created. */
@@ -51,17 +63,31 @@ function host(options: HostOptions = {}): Host {
 	const human: string[] = [];
 	const stdout: string[] = [];
 	const secrets: string[] = [];
+	let vmmUserExists = options.vmmUserExists === true;
 	const runner = fakeRunner((argv) => {
 		const custom = options.respond?.(argv);
 		if (custom !== undefined) return custom;
+		if (argv[0] === "getent") return options.kvmGroup === "" ? { code: 2 } : { stdout: options.kvmGroup ?? "kvm:x:990:\n" };
+		if (argv[0] === "id" && argv[2] === "omp-cloud-vmm") return vmmUserExists ? { stdout: `${options.vmmUid ?? "961"}\n` } : { code: 1 };
+		if (argv[0] === "useradd") {
+			vmmUserExists = true;
+			return {};
+		}
+		if (argv[0] === "userdel") {
+			vmmUserExists = false;
+			return {};
+		}
 		const verb = argv[0] === "/opt/vmon/vmon" ? argv[4] : argv[1];
 		if (argv[0] === "ip") return { stdout: "default via 192.168.1.1 dev eth0\n192.168.1.0/24 dev eth0 scope link\n" };
 		if (argv[0] === HELPER) return { stdout: HELPER_OK };
 		if (argv[0] === "/opt/vmon/vmon" && argv[1] === "--version") return { stdout: "vmon 0.4.0\n" };
 		if (argv[0] === "/opt/vmon/vmon") {
-			if (verb === "list-teams") return { stdout: options.teams ?? "" };
-			if (verb === "create-team") return { stdout: CREATED };
+			if (verb === "create-team") {
+				const slug = argv[5] ?? "";
+				return { stdout: (options.teams ?? []).includes(slug) ? EXISTING : CREATED };
+			}
 			if (verb === "create-api-key") return { stdout: `${OTHER_KEY}\n` };
+			if (verb === "delete-team") return { stdout: DELETED };
 			return { stdout: "team line\n" };
 		}
 		if (verb === "is-enabled") return { code: 1 };
@@ -98,11 +124,11 @@ describe("parseSystemArgs", () => {
 	test("takes every documented flag, with defaults for the rest", () => {
 		expect(parseSystemArgs(["--user", "alice"])).toEqual({
 			ok: true,
-			args: { user: "alice", team: "omp-cloud", maxSandboxes: 32, packages: [], mintKey: false, noLinger: false, migrateTeam: false, uninstall: false, purge: false, clusterAddress: null, node: null },
+			args: { user: "alice", team: "omp-cloud", maxSandboxes: 32, packages: [], mintKey: false, noLinger: false, migrateFrom: null, uninstall: false, purge: false, clusterAddress: null, node: null },
 		});
-		expect(parseSystemArgs(["--user=alice", "--team", "my-team", "--max-sandboxes=1000", "--packages", "curl,git,curl", "--mint-key", "--no-linger", "--migrate-team"])).toEqual({
+		expect(parseSystemArgs(["--user=alice", "--team", "my-team", "--max-sandboxes=1000", "--packages", "curl,git,curl", "--mint-key", "--no-linger", "--migrate-team", "acme"])).toEqual({
 			ok: true,
-			args: { user: "alice", team: "my-team", maxSandboxes: 1000, packages: ["curl", "git"], mintKey: true, noLinger: true, migrateTeam: true, uninstall: false, purge: false, clusterAddress: null, node: null },
+			args: { user: "alice", team: "my-team", maxSandboxes: 1000, packages: ["curl", "git"], mintKey: true, noLinger: true, migrateFrom: "acme", uninstall: false, purge: false, clusterAddress: null, node: null },
 		});
 		expect(parseSystemArgs(["--uninstall", "--purge"])).toMatchObject({ ok: true, args: { uninstall: true, purge: true } });
 		expect(parseSystemArgs(["--uninstall", "--user", "alice"])).toMatchObject({ ok: true, args: { user: "alice", uninstall: true } });
@@ -142,6 +168,13 @@ describe("parseSystemArgs", () => {
 		["--uninstall with --team", ["--uninstall", "--team", "x"]],
 		["--uninstall with --packages", ["--uninstall", "--packages", "curl"]],
 		["--uninstall with --no-linger", ["--uninstall", "--no-linger"]],
+		["--migrate-team without a value", [...ARGS, "--migrate-team"]],
+		["--migrate-team followed by a flag", [...ARGS, "--migrate-team", "--mint-key"]],
+		["--migrate-team of the reserved team system", [...ARGS, "--migrate-team", "system"]],
+		["--migrate-team of the --team value", [...ARGS, "--team", "acme", "--migrate-team", "acme"]],
+		["--migrate-team of the default team when --team is absent", [...ARGS, "--migrate-team", "omp-cloud"]],
+		["--migrate-team with a capital", [...ARGS, "--migrate-team", "Acme"]],
+		["--uninstall with --migrate-team", ["--uninstall", "--migrate-team", "acme"]],
 	];
 	test.each(refused)("refuses %s", (_name, argv) => {
 		expect(parseSystemArgs(argv).ok).toBe(false);
@@ -155,7 +188,7 @@ describe("runSystem: refusals", () => {
 		expect(h.runner.calls).toEqual([]);
 		expect(h.stdout).toHaveLength(1);
 		expect(h.report()).toMatchObject({ ok: false, steps: [{ id: "system.arguments", status: "failed" }] });
-		expect(await readdir(root)).toEqual([]);
+		expect(await readdir(root)).toEqual(["dev"]);
 	});
 
 	test("not root: exit 1, nothing runs, nothing is written", async () => {
@@ -163,7 +196,7 @@ describe("runSystem: refusals", () => {
 		expect(await runSystem(ARGS, h.deps)).toBe(1);
 		expect(h.runner.calls).toEqual([]);
 		expect(h.report()).toMatchObject({ ok: false, steps: [{ id: "system.root", status: "failed" }] });
-		expect(await readdir(root)).toEqual([]);
+		expect(await readdir(root)).toEqual(["dev"]);
 		const uninstall = host({ euid: 1000 });
 		expect(await runSystem(["--uninstall"], uninstall.deps)).toBe(1);
 		expect(uninstall.runner.calls).toEqual([]);
@@ -362,7 +395,7 @@ describe("runSystem: /etc/vmon/env", () => {
 
 	test("an existing file with its own content is kept, and its mode is repaired", async () => {
 		await putFile(root, "/etc/vmon/env", "VMON_CLUSTER_SECRET=mine\nVMON_ADMIN_TOKEN=mine2\n", 0o644);
-		const h = host({ teams: "" });
+		const h = host();
 		await runSystem(ARGS, h.deps);
 		expect(await readFile(join(root, "/etc/vmon/env"), "utf8")).toBe("VMON_CLUSTER_SECRET=mine\nVMON_ADMIN_TOKEN=mine2\n");
 		expect(await modeOf("/etc/vmon/env")).toBe(0o600);
@@ -405,7 +438,7 @@ describe("runSystem: units, health and the team", () => {
 		const h = host();
 		await runSystem([...ARGS, "--packages", "curl"], h.deps);
 		const ids = h.report().steps.map((step) => step.id);
-		const order = ["system.packages", "system.user", "system.helper", "system.sudoers", "system.vmon", "system.env", "system.unit.omp-cloud-net", "system.unit.vmon", "system.health", "system.team", "system.team.key", "system.team.limits", "system.linger"];
+		const order = ["system.packages", "system.user", "system.helper", "system.sudoers", "system.vmon", "system.env", "system.vmm-user", "system.unit.omp-cloud-net", "system.unit.vmon", "system.health", "system.team", "system.team.key", "system.team.limits", "system.linger"];
 		expect(ids).toEqual(order);
 	});
 
@@ -436,35 +469,77 @@ describe("runSystem: units, health and the team", () => {
 		expect(report.team).toEqual({ slug: "omp-cloud", created: true });
 		expect(report.key).toBe(KEY);
 		const create = h.runner.lines().find((line) => line.includes(" create-team "));
-		expect(create).toContain("create-team omp-cloud --max-concurrent-sandboxes 32 --max-concurrent-builds 4 --max-vcpus 8 --max-memory-mb 8192 --max-disk-mb 20480 --max-length-hours 24");
+		expect(create).toContain("create-team omp-cloud --if-missing --max-concurrent-sandboxes 32 --max-concurrent-builds 4 --max-vcpus 8 --max-memory-mb 8192 --max-disk-mb 20480 --max-length-hours 24");
 		expect(h.human.join("")).not.toContain(KEY);
 		expect(JSON.stringify(report.steps)).not.toContain("e2b_");
 	});
 
-	test("an existing team is not duplicated, gets no key and has its limits re-applied", async () => {
-		const h = host({ teams: `9f1d\tomp-cloud\tomp-cloud\t${COUNTS}\n` });
+	test("an existing team is not recreated, gets no key and has its limits re-applied", async () => {
+		const h = host({ teams: ["omp-cloud"] });
 		await runSystem([...ARGS, "--max-sandboxes", "5"], h.deps);
 		const report = h.report();
 		expect(report.team).toEqual({ slug: "omp-cloud", created: false });
 		expect(report).not.toHaveProperty("key");
-		expect(h.runner.lines().some((line) => line.includes(" create-team "))).toBe(false);
+		expect(h.runner.lines().find((line) => line.includes(" create-team "))).toContain("create-team omp-cloud --if-missing --max-concurrent-sandboxes 5");
+		expect(h.runner.lines().some((line) => line.includes(" create-api-key "))).toBe(false);
 		expect(h.runner.lines().find((line) => line.includes(" set-limits "))).toContain("set-limits omp-cloud --max-concurrent-sandboxes 5");
 	});
 
 	test("--mint-key mints a key for the existing team", async () => {
-		const h = host({ teams: `9f1d\tomp-cloud\tomp-cloud\t${COUNTS}\n` });
+		const h = host({ teams: ["omp-cloud"] });
 		await runSystem([...ARGS, "--mint-key"], h.deps);
 		expect(h.report().key).toBe(OTHER_KEY);
 		expect(h.report().team?.created).toBe(false);
 	});
 
-	test("--migrate-team creates the standard team (or mints for it) and reports a key", async () => {
-		const created = host({ teams: `0b3c\tacme\tacme\t${COUNTS}\n` });
-		await runSystem([...ARGS, "--migrate-team", "--team", "omp-cloud"], created.deps);
-		expect(created.report()).toMatchObject({ team: { slug: "omp-cloud", created: true }, key: KEY });
-		const existing = host({ teams: `9f1d\tomp-cloud\tomp-cloud\t${COUNTS}\n` });
-		await runSystem([...ARGS, "--migrate-team"], existing.deps);
-		expect(existing.report()).toMatchObject({ team: { slug: "omp-cloud", created: false }, key: OTHER_KEY });
+	test("--migrate-team acme creates the new team with a key, then deletes acme before linger", async () => {
+		const h = host();
+		expect(await runSystem([...ARGS, "--migrate-team", "acme", "--team", "omp-cloud"], h.deps)).toBe(0);
+		const report = h.report();
+		expect(report).toMatchObject({ ok: true, team: { slug: "omp-cloud", created: true }, key: KEY });
+		const verbs = h.runner.calls.filter((call) => call.argv[1] === "admin" || call.argv[0] === "loginctl").map((call) => call.argv.slice(4).join(" ").replace(/ --max-.*$/, "") || call.argv[0]);
+		expect(verbs).toEqual(["create-team omp-cloud --if-missing", "set-limits omp-cloud", "delete-team acme --force", "loginctl"]);
+		expect(report.steps.find((step) => step.id === "system.team.old")).toMatchObject({ status: "changed", detail: expect.stringContaining("deleted the old vmon team acme") });
+		expect(JSON.stringify(report.steps)).not.toContain("e2b_");
+	});
+
+	test("--migrate-team mints a key for the target team when it already exists, then deletes the old one", async () => {
+		const h = host({ teams: ["omp-cloud"] });
+		await runSystem([...ARGS, "--migrate-team", "acme"], h.deps);
+		expect(h.report()).toMatchObject({ ok: true, team: { slug: "omp-cloud", created: false }, key: OTHER_KEY });
+		expect(h.runner.lines().filter((line) => line.includes(" admin ")).map((line) => line.split(" ")[5])).toEqual(["omp-cloud", "omp-cloud", "omp-cloud", "acme"]);
+		expect(h.runner.lines().some((line) => line.includes(" create-api-key omp-cloud"))).toBe(true);
+	});
+
+	test("a failing delete-team keeps the old team: skipped with a fix that has no secret, and the report stays ok", async () => {
+		const h = host({ respond: (argv) => (argv[4] === "delete-team" ? { code: 1, stderr: "vmon: error: build cancel timed out\n" } : undefined) });
+		expect(await runSystem([...ARGS, "--migrate-team", "acme"], h.deps)).toBe(0);
+		const report = h.report();
+		expect(report.ok).toBe(true);
+		const old = report.steps.find((step) => step.id === "system.team.old");
+		expect(old).toMatchObject({ status: "skipped", detail: expect.stringContaining("kept the old vmon team acme") });
+		expect(old?.fix).toContain("delete-team acme --force");
+		expect(`${old?.detail}${old?.fix}`).not.toContain(h.secrets[0] ?? "no secret");
+		expect(report.team).toEqual({ slug: "omp-cloud", created: true });
+	});
+
+	test("--migrate-team of a team that is already gone is ok", async () => {
+		const h = host({ respond: (argv) => (argv[4] === "delete-team" ? { code: 1, stderr: "vmon: error: team acme not found\n" } : undefined) });
+		expect(await runSystem([...ARGS, "--migrate-team", "acme"], h.deps)).toBe(0);
+		expect(h.report().steps.find((step) => step.id === "system.team.old")).toMatchObject({ status: "ok" });
+	});
+
+	test("a failed team step never deletes the old team", async () => {
+		const h = host({ respond: (argv) => (argv[4] === "create-team" ? { code: 1, stderr: "vmon: error: boom\n" } : undefined) });
+		expect(await runSystem([...ARGS, "--migrate-team", "acme"], h.deps)).toBe(1);
+		expect(h.runner.lines().some((line) => line.includes(" delete-team "))).toBe(false);
+	});
+
+	test("without --migrate-team nothing is deleted", async () => {
+		const h = host();
+		await runSystem(ARGS, h.deps);
+		expect(h.runner.lines().some((line) => line.includes(" delete-team "))).toBe(false);
+		expect(h.report().steps.some((step) => step.id === "system.team.old")).toBe(false);
 	});
 
 	test("--team picks another slug", async () => {
@@ -489,6 +564,98 @@ describe("runSystem: units, health and the team", () => {
 		const h = host({ respond: (argv) => (argv[4] === "set-limits" ? { code: 1, stderr: "vmon: error: bad" } : undefined) });
 		expect(await runSystem(ARGS, h.deps)).toBe(1);
 		expect(h.report()).toMatchObject({ ok: false, key: KEY });
+	});
+});
+
+describe("runSystem: the VMM user", () => {
+	const vmonUnit = () => readFile(join(root, "/etc/systemd/system/vmon.service"), "utf8");
+	const USERADD = ["useradd", "--system", "--gid", "kvm", "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", "--comment", "omp-cloud vibemon VMMs", "omp-cloud-vmm"];
+	const step = (h: Host) => h.report().steps.find((candidate) => candidate.id === "system.vmm-user");
+
+	test("a fresh host gets the user in the group kvm, and the unit drops the VMMs to its uid and the group's gid", async () => {
+		const h = host();
+		expect(await runSystem(ARGS, h.deps)).toBe(0);
+		expect(h.runner.calls.find((call) => call.argv[0] === "useradd")?.argv).toEqual(USERADD);
+		expect(await vmonUnit()).toContain("--net-pool 172.20.0.0/16 --vmm-user 961:990");
+		expect(step(h)).toEqual({ id: "system.vmm-user", status: "changed", detail: "created the system user omp-cloud-vmm: vibemon's VMMs run as 961:990 (group kvm)" });
+	});
+
+	test("an existing user is kept: no useradd, ok", async () => {
+		const h = host({ vmmUserExists: true, vmmUid: "444" });
+		expect(await runSystem(ARGS, h.deps)).toBe(0);
+		expect(h.runner.lines().some((line) => line.startsWith("useradd"))).toBe(false);
+		expect(step(h)).toEqual({ id: "system.vmm-user", status: "ok", detail: "vibemon's VMMs run as omp-cloud-vmm (444:990, group kvm)" });
+		expect(await vmonUnit()).toContain("--vmm-user 444:990");
+	});
+
+	test("a host without the group kvm fails before any user or unit exists", async () => {
+		const h = host({ kvmGroup: "" });
+		expect(await runSystem(ARGS, h.deps)).toBe(1);
+		expect(h.report().steps.at(-1)).toMatchObject({
+			id: "system.vmm-user",
+			status: "failed",
+			detail: "this host has no kvm group, which vibemon's VMMs need to open /dev/kvm without root",
+			fix: "give /dev/kvm to the group kvm with read and write for it (the systemd-udev default), then run omp-cloud setup again",
+		});
+		expect(h.runner.lines().some((line) => line.startsWith("useradd"))).toBe(false);
+		expect(await exists("/etc/systemd/system/vmon.service")).toBe(false);
+	});
+
+	test("a group entry without a numeric gid is no kvm group", async () => {
+		for (const kvmGroup of ["kvm:x::\n", "kvm:x:abc:\n", "kvm:x:0:\n", "\n"]) {
+			const h = host({ kvmGroup });
+			expect(await runSystem(ARGS, h.deps)).toBe(1);
+			expect(step(h)).toMatchObject({ status: "failed", detail: expect.stringContaining("no kvm group") });
+		}
+	});
+
+	test("a /dev/kvm that the kvm group cannot read and write is a failed step, and setup never changes its mode", async () => {
+		for (const mode of [0o600, 0o640, 0o660, 0o644]) {
+			await chmod(join(root, "/dev/kvm"), mode);
+			// the group of the file is the test user's own group, never gid 990
+			const h = host();
+			expect(await runSystem(ARGS, h.deps)).toBe(1);
+			expect(step(h)).toMatchObject({ status: "failed", detail: expect.stringContaining(`does not let the kvm group read and write it`), fix: "give /dev/kvm to the group kvm with read and write for it (the systemd-udev default), then run omp-cloud setup again" });
+			expect(step(h)?.detail).toContain(`mode ${mode.toString(8)}`);
+			expect(await modeOf("/dev/kvm")).toBe(mode);
+			expect(h.runner.lines().some((line) => line.startsWith("useradd"))).toBe(false);
+		}
+	});
+
+	test("read-write for the group kvm is enough, whatever the others get", async () => {
+		await chmod(join(root, "/dev/kvm"), 0o660);
+		const h = host({ kvmGroup: `kvm:x:${process.getgid?.() ?? 0}:\n` });
+		expect(await runSystem(ARGS, h.deps)).toBe(0);
+		expect(step(h)).toMatchObject({ status: "changed" });
+	});
+
+	test("a missing /dev/kvm is a failed step", async () => {
+		await rm(join(root, "/dev/kvm"));
+		const h = host();
+		expect(await runSystem(ARGS, h.deps)).toBe(1);
+		expect(step(h)).toMatchObject({ status: "failed", detail: "/dev/kvm is missing" });
+	});
+
+	test("a user that cannot be created fails with useradd's last stderr line", async () => {
+		const h = host({ respond: (argv) => (argv[0] === "useradd" ? { code: 9, stderr: "useradd: group kvm does not exist\n" } : undefined) });
+		expect(await runSystem(ARGS, h.deps)).toBe(1);
+		expect(step(h)).toMatchObject({ status: "failed", detail: "useradd omp-cloud-vmm failed: useradd: group kvm does not exist" });
+		expect(await exists("/etc/systemd/system/vmon.service")).toBe(false);
+	});
+
+	test("a user whose uid is 0 is refused: the VMMs must not run as root", async () => {
+		const h = host({ vmmUserExists: true, vmmUid: "0" });
+		expect(await runSystem(ARGS, h.deps)).toBe(1);
+		expect(step(h)).toMatchObject({ status: "failed", detail: "omp-cloud-vmm has uid 0: vibemon's VMMs must not run as root", fix: "sudo userdel omp-cloud-vmm, then omp-cloud setup again" });
+		expect(await exists("/etc/systemd/system/vmon.service")).toBe(false);
+	});
+
+	test("a running vmon whose unit lacks --vmm-user is restarted, and the step says why", async () => {
+		await putFile(root, "/etc/systemd/system/vmon.service", renderVmonUnit("172.20.0.0/16", { uid: 961, gid: 990 }).replace(" --vmm-user 961:990", ""));
+		const h = host({ vmmUserExists: true, respond: (argv) => (argv[1] === "is-active" || argv[1] === "is-enabled" ? { code: 0 } : undefined) });
+		expect(await runSystem(ARGS, h.deps)).toBe(0);
+		expect(h.runner.lines()).toContain("systemctl restart vmon.service");
+		expect(h.report().steps.find((candidate) => candidate.id === "system.unit.vmon")?.detail).toContain("so its VMMs run as omp-cloud-vmm (961:990)");
 	});
 });
 
@@ -601,6 +768,35 @@ describe("runSystem: uninstall", () => {
 		expect(await exists(SUDOERS_FILE)).toBe(true);
 		expect(await exists(HELPER)).toBe(true);
 	});
+
+	test("--purge removes the system user omp-cloud-vmm with userdel --force; a plain uninstall keeps it", async () => {
+		await installed();
+		const plain = host({ vmmUserExists: true });
+		expect(await runSystem(["--uninstall"], plain.deps)).toBe(0);
+		expect(plain.runner.lines().some((line) => line.startsWith("userdel"))).toBe(false);
+		expect(plain.report().steps.some((candidate) => candidate.id === "system.uninstall.vmm-user")).toBe(false);
+
+		const purge = host({ vmmUserExists: true });
+		expect(await runSystem(["--uninstall", "--purge"], purge.deps)).toBe(0);
+		expect(purge.runner.lines()).toContain("userdel --force omp-cloud-vmm");
+		expect(purge.report().steps.at(-1)).toEqual({ id: "system.uninstall.vmm-user", status: "changed", detail: "removed the system user omp-cloud-vmm" });
+	});
+
+	test("--purge on a host without the user runs no userdel and reports no step for it", async () => {
+		await installed();
+		const h = host();
+		expect(await runSystem(["--uninstall", "--purge"], h.deps)).toBe(0);
+		expect(h.runner.lines().some((line) => line.startsWith("userdel"))).toBe(false);
+		expect(h.report().steps.some((candidate) => candidate.id === "system.uninstall.vmm-user")).toBe(false);
+	});
+
+	test("a userdel that fails is a failed step with the command to run", async () => {
+		await installed();
+		const h = host({ vmmUserExists: true, respond: (argv) => (argv[0] === "userdel" ? { code: 8, stderr: "userdel: user omp-cloud-vmm is currently used by process 41\n" } : undefined) });
+		expect(await runSystem(["--uninstall", "--purge"], h.deps)).toBe(1);
+		expect(h.report().steps.at(-1)).toMatchObject({ id: "system.uninstall.vmm-user", status: "failed", fix: "sudo userdel --force omp-cloud-vmm" });
+		expect(h.report().steps.at(-1)?.detail).toContain("currently used by process 41");
+	});
 });
 
 describe("the report", () => {
@@ -630,11 +826,11 @@ describe("the report", () => {
 
 	test("an existing env file's admin token is reported; a file without one reports none", async () => {
 		await putFile(root, "/etc/vmon/env", "VMON_CLUSTER_SECRET=mine\nexport VMON_ADMIN_TOKEN='kept-token'\n", 0o600);
-		const kept = host({ teams: "" });
+		const kept = host();
 		await runSystem(ARGS, kept.deps);
 		expect(kept.report().adminToken).toBe("kept-token");
 		await putFile(root, "/etc/vmon/env", "VMON_CLUSTER_SECRET=mine\n", 0o600);
-		const none = host({ teams: "" });
+		const none = host();
 		await runSystem(ARGS, none.deps);
 		expect(none.report()).not.toHaveProperty("adminToken");
 	});
@@ -644,7 +840,8 @@ describe("the report", () => {
 		await putFile(root, "/var/lib/systemd/linger/alice", "");
 		await putFile(root, "/opt/vmon/vmon", "#!/bin/sh\n", 0o755);
 		const again = host({
-			teams: `9f1d\tomp-cloud\tomp-cloud\t${COUNTS}\n`,
+			vmmUserExists: true,
+			teams: ["omp-cloud"],
 			respond: (argv) => (argv[1] === "is-enabled" || argv[1] === "is-active" ? { code: 0 } : undefined),
 		});
 		expect(await runSystem(ARGS, again.deps)).toBe(0);
@@ -692,6 +889,7 @@ describe("systemChecks", () => {
 
 	test("a healthy host is all ok", async () => {
 		await putFile(root, "/var/lib/systemd/linger/alice", "");
+		await putFile(root, "/etc/systemd/system/vmon.service", renderVmonUnit("172.20.0.0/16", { uid: 961, gid: 990 }));
 		const runner = fakeRunner(healthy);
 		const steps = await systemChecks(runner.run, { root, user: "alice" });
 		expect(steps.map((step) => [step.id, step.status])).toEqual([
@@ -699,10 +897,24 @@ describe("systemChecks", () => {
 			["system.check.vmon", "ok"],
 			["system.check.link", "ok"],
 			["system.check.health", "ok"],
+			["system.check.vmm-user", "ok"],
 			["system.check.helper", "ok"],
 			["system.check.linger", "ok"],
 		]);
 		expect(runner.lines()).toContain(`sudo -n -l ${HELPER}`);
+	});
+
+	test("a vmon unit without --vmm-user fails with the setup fix; no unit file means no row", async () => {
+		await putFile(root, "/etc/systemd/system/vmon.service", renderVmonUnit("172.20.0.0/16", { uid: 961, gid: 990 }).replace(" --vmm-user 961:990", ""));
+		const steps = await systemChecks(fakeRunner(healthy).run, { root, user: "alice" });
+		expect(steps.find((candidate) => candidate.id === "system.check.vmm-user")).toEqual({
+			id: "system.check.vmm-user",
+			status: "failed",
+			detail: "vibemon's VMMs run as root without their seccomp and Landlock filters (the vmon unit has no --vmm-user)",
+			fix: "omp-cloud setup",
+		});
+		await rm(join(root, "/etc/systemd/system/vmon.service"));
+		expect((await systemChecks(fakeRunner(healthy).run, { root, user: "alice" })).some((candidate) => candidate.id === "system.check.vmm-user")).toBe(false);
 	});
 
 	test("every failure has a fix; linger off is skipped, not failed", async () => {
@@ -774,7 +986,7 @@ describe("parseSystemArgs: cluster address and node flags", () => {
 		["--max-sandboxes", "3"],
 		["--mint-key"],
 		["--no-linger"],
-		["--migrate-team"],
+		["--migrate-team", "acme"],
 		["--cluster-address", LAN],
 	] satisfies string[][])("--node refuses %s", (...extra: string[]) => {
 		expect(parseSystemArgs([...NODE_FLAGS, ...extra])).toEqual({ ok: false, error: `${extra[0]} cannot be combined with --node` });
@@ -905,6 +1117,7 @@ describe("runSystem: node mode", () => {
 			"system.vmon",
 			"system.env",
 			"system.node.conf",
+			"system.vmm-user",
 			"system.unit.omp-cloud-node-net",
 			"system.unit.vmon",
 			"system.unit.omp-cloud-vmon-sync",
@@ -927,7 +1140,7 @@ describe("runSystem: node mode", () => {
 		expect(await modeOf("/etc/omp-cloud/node.env")).toBe(0o644);
 		expect(await file("/etc/omp-cloud/node.env")).not.toContain(SECRET);
 		const vmon = await file("/etc/systemd/system/vmon.service");
-		expect(vmon).toContain(`ExecStart=/opt/vmon/vmon serve --role node --data-dir /var/lib/vmon --join ${LAN}:7946 --egress-internal-allow 10.254.254.1/32 --registry-mirror https://mirror.gcr.io --net-pool 172.20.0.0/16`);
+		expect(vmon).toContain(`ExecStart=/opt/vmon/vmon serve --role node --data-dir /var/lib/vmon --join ${LAN}:7946 --egress-internal-allow 10.254.254.1/32 --registry-mirror https://mirror.gcr.io --net-pool 172.20.0.0/16 --vmm-user 961:990`);
 		expect(vmon).not.toContain("--listen");
 		for (const unit of ["omp-cloud-node-net.service", "omp-cloud-vmon-sync.service", "omp-cloud-vmon-sync.timer"]) expect(await exists(`/etc/systemd/system/${unit}`)).toBe(true);
 		expect(h.runner.lines()).toContain("systemctl enable --now omp-cloud-node-net.service");
@@ -1015,7 +1228,7 @@ describe("runSystem: node mode", () => {
 	test("a rerun changes nothing and restarts nothing", async () => {
 		await runSystem(nodeArgs(), host({ respond: active }).deps);
 		await putFile(root, "/opt/vmon/vmon", "#!/bin/sh\n", 0o755);
-		const again = host({ respond: (argv) => (argv[1] === "is-active" || argv[1] === "is-enabled" ? { code: 0 } : undefined) });
+		const again = host({ vmmUserExists: true, respond: (argv) => (argv[1] === "is-active" || argv[1] === "is-enabled" ? { code: 0 } : undefined) });
 		expect(await runSystem(nodeArgs(), again.deps)).toBe(0);
 		expect(again.report().steps.filter((step) => step.status === "changed")).toEqual([]);
 		expect(again.runner.lines().some((line) => line.includes("restart"))).toBe(false);

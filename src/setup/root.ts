@@ -30,7 +30,8 @@ export interface RootRequest {
 	packages: readonly string[];
 	mintKey?: boolean;
 	noLinger?: boolean;
-	migrateTeam?: boolean;
+	/** The slug of the team to leave and delete (`--migrate-team <slug>`); absent: no migration. */
+	migrateFrom?: string;
 	/** The LAN address vmon listens on for other vibemon machines; absent: this server is alone. */
 	clusterAddress?: string;
 }
@@ -45,7 +46,7 @@ export function rootArgs(request: RootRequest): string[] {
 		...(request.packages.length === 0 ? [] : ["--packages", request.packages.join(",")]),
 		...(request.mintKey === true ? ["--mint-key"] : []),
 		...(request.noLinger === true ? ["--no-linger"] : []),
-		...(request.migrateTeam === true ? ["--migrate-team"] : []),
+		...(request.migrateFrom === undefined ? [] : ["--migrate-team", request.migrateFrom]),
 		...(request.clusterAddress === undefined ? [] : ["--cluster-address", request.clusterAddress]),
 	];
 }

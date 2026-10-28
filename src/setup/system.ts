@@ -16,8 +16,8 @@ import { isPrivateLan, isUnicastHost } from "./ipv4";
 import { detectPackageManager, installPackages, PACKAGE_NAMES, packageSet } from "./packages";
 import type { StepResult } from "./steps";
 import { Reporter } from "./steps";
-import { installNodeUnits, installSystemUnits, NET_UNIT, readText, removeSystemUnits, SERVICE_IP, SERVICE_LINK, SYSTEM_UNIT_DIR, VMON_UNIT, writeIfChanged } from "./system-units";
-import { DEFAULT_MAX_SANDBOXES, DEFAULT_TEAM, ensureTeam, envValueOf, RESERVED_TEAM, TEAM_PATTERN } from "./vmon-team";
+import { installNodeUnits, installSystemUnits, KVM_GROUP, NET_UNIT, readText, removeSystemUnits, SERVICE_IP, SERVICE_LINK, SYSTEM_UNIT_DIR, VMM_USER, type VmmUser, vmmUserOfUnit, VMON_UNIT, writeIfChanged } from "./system-units";
+import { DEFAULT_MAX_SANDBOXES, DEFAULT_TEAM, deleteTeam, ensureTeam, envValueOf, RESERVED_TEAM, TEAM_PATTERN } from "./vmon-team";
 
 export const SUDOERS_FILE = "/etc/sudoers.d/omp-cloud";
 export const SETUP_RECORD = "/etc/omp-cloud/setup.json";
@@ -69,7 +69,8 @@ export interface SystemArgs {
 	packages: string[];
 	mintKey: boolean;
 	noLinger: boolean;
-	migrateTeam: boolean;
+	/** The slug of the old team to delete after switching to `team` (`--migrate-team <slug>`); null: no migration. */
+	migrateFrom: string | null;
 	uninstall: boolean;
 	purge: boolean;
 	/** The LAN address vmon listens on for other vibemon machines; null: this server is alone. */
@@ -80,8 +81,8 @@ export interface SystemArgs {
 
 export type ParsedSystemArgs = { ok: true; args: SystemArgs } | { ok: false; error: string };
 
-const VALUE_FLAGS = ["--user", "--team", "--max-sandboxes", "--packages", "--cluster-address", "--vmon", "--server", "--remote-port", "--pin", "--secret-file"];
-const SWITCH_FLAGS = ["--mint-key", "--no-linger", "--migrate-team", "--uninstall", "--purge", "--node", "--route"];
+const VALUE_FLAGS = ["--user", "--team", "--max-sandboxes", "--packages", "--cluster-address", "--migrate-team", "--vmon", "--server", "--remote-port", "--pin", "--secret-file"];
+const SWITCH_FLAGS = ["--mint-key", "--no-linger", "--uninstall", "--purge", "--node", "--route"];
 /** Flags that only make sense when setting up. */
 const SETUP_ONLY = ["--team", "--max-sandboxes", "--packages", "--mint-key", "--no-linger", "--migrate-team", "--cluster-address", "--node", "--vmon", "--server", "--remote-port", "--pin", "--secret-file", "--route"];
 /** Flags that only make sense with `--node`. */
@@ -133,6 +134,11 @@ export function parseSystemArgs(argv: readonly string[]): ParsedSystemArgs {
 	const team = values.get("--team") ?? DEFAULT_TEAM;
 	if (!TEAM_PATTERN.test(team) || team === RESERVED_TEAM) return { ok: false, error: `--team ${JSON.stringify(team)} is not a team slug (^[a-z0-9][a-z0-9-]{0,62}$, not ${RESERVED_TEAM})` };
 
+	const migrateFrom = values.get("--migrate-team") ?? null;
+	if (migrateFrom !== null && (!TEAM_PATTERN.test(migrateFrom) || migrateFrom === RESERVED_TEAM || migrateFrom === team)) {
+		return { ok: false, error: `--migrate-team ${JSON.stringify(migrateFrom)} is not the slug of the team to leave (^[a-z0-9][a-z0-9-]{0,62}$, not ${RESERVED_TEAM}, not --team)` };
+	}
+
 	const sandboxes = values.get("--max-sandboxes");
 	const maxSandboxes = sandboxes === undefined ? DEFAULT_MAX_SANDBOXES : /^\d{1,4}$/.test(sandboxes) ? Number(sandboxes) : 0;
 	if (maxSandboxes < 1 || maxSandboxes > 1000) return { ok: false, error: `--max-sandboxes ${JSON.stringify(sandboxes)} is not a number from 1 to 1000` };
@@ -172,7 +178,7 @@ export function parseSystemArgs(argv: readonly string[]): ParsedSystemArgs {
 			packages,
 			mintKey: switches.has("--mint-key"),
 			noLinger: switches.has("--no-linger"),
-			migrateTeam: switches.has("--migrate-team"),
+			migrateFrom,
 			uninstall,
 			purge: switches.has("--purge"),
 			clusterAddress,
@@ -346,9 +352,11 @@ async function setUp(args: SystemArgs, deps: SystemDeps, state: RunState): Promi
 		() => vmonStep(deps, deps.pin),
 		() => envStep(deps),
 		async () => {
-			const units = await installSystemUnits({ root: deps.root, runner: deps.runner, clusterAddress: args.clusterAddress });
+			const vmm = await vmmUserStep(deps);
+			if (vmm.user === null) return vmm.step;
+			const units = await installSystemUnits({ root: deps.root, runner: deps.runner, clusterAddress: args.clusterAddress, vmmUser: vmm.user });
 			state.netPool = units.netPool;
-			return units.steps;
+			return [vmm.step, ...units.steps];
 		},
 		() => healthStep(deps),
 		async () => {
@@ -359,10 +367,11 @@ async function setUp(args: SystemArgs, deps: SystemDeps, state: RunState): Promi
 			if (adminToken !== null && SECRET_PATTERN.test(adminToken)) state.adminToken = adminToken;
 			if (args.clusterAddress !== null && SECRET_PATTERN.test(secret)) state.clusterSecret = secret;
 			const clusterUrl = `http://${args.clusterAddress ?? "127.0.0.1"}:7947`;
-			const outcome = await ensureTeam({ runner: deps.runner, secret, slug: args.team, maxSandboxes: args.maxSandboxes, mintKey: args.mintKey || args.migrateTeam, sleep: deps.sleep, clusterUrl });
+			const outcome = await ensureTeam({ runner: deps.runner, secret, slug: args.team, maxSandboxes: args.maxSandboxes, mintKey: args.mintKey || args.migrateFrom !== null, sleep: deps.sleep, clusterUrl });
 			state.team = outcome.team;
 			if (outcome.key !== undefined) state.key = outcome.key;
-			return outcome.steps;
+			if (args.migrateFrom === null || outcome.steps.some((step) => step.status === "failed")) return outcome.steps;
+			return [...outcome.steps, await deleteTeam({ runner: deps.runner, secret, slug: args.migrateFrom, clusterUrl })];
 		},
 		async () => {
 			const linger = await lingerStep(user, args.noLinger, deps);
@@ -383,9 +392,11 @@ async function setUpNode(args: SystemArgs, node: NodeArgs, deps: SystemDeps, sta
 		() => nodeEnvStep(node, deps),
 		() => nodeConfStep(node, deps),
 		async () => {
-			const units = await installNodeUnits({ root: deps.root, runner: deps.runner, server: node.server, route: node.route });
+			const vmm = await vmmUserStep(deps);
+			if (vmm.user === null) return vmm.step;
+			const units = await installNodeUnits({ root: deps.root, runner: deps.runner, server: node.server, route: node.route, vmmUser: vmm.user });
 			state.netPool = units.netPool;
-			return units.steps;
+			return [vmm.step, ...units.steps];
 		},
 		() => nodeHealthStep(deps),
 	]);
@@ -461,6 +472,40 @@ async function sudoersStep(user: string, deps: SystemDeps): Promise<StepResult> 
 	}
 	await rename(staging, path);
 	return { id: "system.sudoers", status: "changed", detail: `${SUDOERS_FILE} lets ${user} run the vibemon helper` };
+}
+
+/**
+ * The unprivileged system user vibemon's VMMs run as (`vmon serve --vmm-user <uid>:<gid>`), with the gid of the group `kvm`.
+ * The VMM drops its supplementary groups and then opens `/dev/kvm`, so that device must be read-write for that group (or for
+ * everyone); setup never changes its mode itself, it only checks. Every failure here is a failed step: starting vmon without
+ * the user would run the VMMs as root.
+ */
+async function vmmUserStep(deps: SystemDeps): Promise<{ step: StepResult; user: VmmUser | null }> {
+	const failed = (detail: string, fix: string): { step: StepResult; user: null } => ({ step: { id: "system.vmm-user", status: "failed", detail, fix }, user: null });
+	const kvmFix = "give /dev/kvm to the group kvm with read and write for it (the systemd-udev default), then run omp-cloud setup again";
+	const group = await deps.runner(["getent", "group", KVM_GROUP]);
+	const gid = Number(group.code === 0 ? group.stdout.trim().split(":")[2] : Number.NaN);
+	if (!Number.isInteger(gid) || gid <= 0) return failed("this host has no kvm group, which vibemon's VMMs need to open /dev/kvm without root", kvmFix);
+	const device = await stat(join(deps.root, "/dev/kvm")).catch(() => null);
+	if (device === null) return failed("/dev/kvm is missing", "enable hardware virtualization in the BIOS, or nested virtualization in the VM settings of this machine");
+	const mode = device.mode & 0o777;
+	if ((mode & 0o006) !== 0o006 && !(device.gid === gid && (mode & 0o060) === 0o060)) {
+		return failed(`/dev/kvm (group ${device.gid}, mode ${mode.toString(8)}) does not let the kvm group read and write it`, kvmFix);
+	}
+	let created = false;
+	let found = await deps.runner(["id", "-u", VMM_USER]);
+	if (found.code !== 0) {
+		// The comment is a passwd field, so it must not hold a `:` (useradd refuses one).
+		const added = await deps.runner(["useradd", "--system", "--gid", KVM_GROUP, "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", "--comment", "omp-cloud vibemon VMMs", VMM_USER]);
+		if (added.code !== 0) return failed(`useradd ${VMM_USER} failed: ${lastLine(added.stderr)}`, `sudo useradd --system --gid ${KVM_GROUP} --no-create-home --shell /usr/sbin/nologin ${VMM_USER}`);
+		created = true;
+		found = await deps.runner(["id", "-u", VMM_USER]);
+	}
+	const raw = found.stdout.trim();
+	const uid = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+	if (found.code !== 0 || !Number.isInteger(uid) || uid <= 0) return failed(`${VMM_USER} has uid ${raw === "" ? lastLine(found.stderr) : raw}: vibemon's VMMs must not run as root`, `sudo userdel ${VMM_USER}, then omp-cloud setup again`);
+	const detail = `vibemon's VMMs run as ${created ? `${uid}:${gid} (group ${KVM_GROUP})` : `${VMM_USER} (${uid}:${gid}, group ${KVM_GROUP})`}`;
+	return { step: { id: "system.vmm-user", status: created ? "changed" : "ok", detail: created ? `created the system user ${VMM_USER}: ${detail}` : detail }, user: { uid, gid } };
 }
 
 /** vibemon at `tag` (the pin on a server, the server's version on a node), through the helper (download, checksum, swap, rollback). */
@@ -609,10 +654,28 @@ async function uninstall(args: SystemArgs, deps: SystemDeps, state: RunState): P
 		const parent = join(deps.root, "/opt");
 		for (const name of await readdir(parent).catch(() => [])) if (name.startsWith(".vmon-install.")) await rm(join(parent, name), { recursive: true, force: true });
 		deps.reporter.report({ id: "system.uninstall.purge", status: "changed", detail: `removed ${removed.join(", ")}` });
+		// --force: a node's purge leaves its VMM processes running, and userdel refuses a user that still has processes.
+		if ((await deps.runner(["id", "-u", VMM_USER])).code === 0) {
+			const removedUser = await deps.runner(["userdel", "--force", VMM_USER]);
+			deps.reporter.report(removedUser.code === 0
+				? { id: "system.uninstall.vmm-user", status: "changed", detail: `removed the system user ${VMM_USER}` }
+				: { id: "system.uninstall.vmm-user", status: "failed", detail: `userdel ${VMM_USER} failed: ${lastLine(removedUser.stderr)}`, fix: `sudo userdel --force ${VMM_USER}` });
+		}
 	} else if (args.purge) {
 		deps.reporter.report({ id: "system.uninstall.purge", status: "skipped", detail: `kept ${dirname(SETUP_RECORD)} (the linger record) and the vmon files: linger could not be undone` });
 	}
 	state.linger = user === undefined ? false : await lingerOn(deps.root, user);
+}
+
+/**
+ * The doctor row for the vmon unit's `--vmm-user`: ok when the unit drops its VMMs to a user, failed when it does not (the
+ * VMMs then run as root without their seccomp and Landlock filters). No unit text, no row.
+ */
+export function vmmUserCheck(id: string, unitText: string | null, fix: string): StepResult[] {
+	if (unitText === null) return [];
+	const user = vmmUserOfUnit(unitText);
+	if (user !== null) return [{ id, status: "ok", detail: `vibemon's VMMs run as ${VMM_USER} (${user}) under their seccomp and Landlock filters` }];
+	return [{ id, status: "failed", detail: "vibemon's VMMs run as root without their seccomp and Landlock filters (the vmon unit has no --vmm-user)", fix }];
 }
 
 /** Undoes linger only when setup enabled it. */
@@ -661,6 +724,7 @@ export async function systemChecks(runner: CommandRunner, options: SystemChecksO
 	const health = await run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "3", VMON_HEALTH_URL]);
 	if (health.code === 0 && health.stdout.trim() === "204") steps.push({ id: "system.check.health", status: "ok", detail: "vmon is healthy" });
 	else steps.push({ id: "system.check.health", status: "failed", detail: "vmon does not answer its health route", fix: "journalctl -u vmon -n 50 --no-pager" });
+	steps.push(...vmmUserCheck("system.check.vmm-user", await readText(join(root, SYSTEM_UNIT_DIR, VMON_UNIT)), fix));
 	const rule = await run(["sudo", "-n", "-l", VMON_HELPER_PATH]);
 	if (rule.code === 0) steps.push({ id: "system.check.helper", status: "ok", detail: `sudo lets ${user} run ${VMON_HELPER_PATH} without a password` });
 	else steps.push({ id: "system.check.helper", status: "failed", detail: "the vibemon helper cannot be run through sudo -n: updates of vibemon cannot be applied", fix });
