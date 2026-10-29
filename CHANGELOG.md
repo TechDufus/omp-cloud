@@ -6,6 +6,8 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 ## Unreleased
 
+omp-cloud moves to vibemon v0.4.1: vibemon's VMMs no longer run as root, setup creates its team idempotently, and `--migrate-team` deletes the team it leaves. Rerun `omp-cloud setup` once after updating. This release moves vibemon, so `update.mode: auto` waits for a click.
+
 ### Upgrade notes
 
 - **vibemon v0.4.1.** omp-cloud now pins vibemon v0.4.1; an update moves the server's vibemon through the root helper (nodes follow within minutes) and the VM template rebuilds once for the new tag.
