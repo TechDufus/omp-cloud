@@ -19,6 +19,12 @@ describe("packagesFor", () => {
 		expect(packagesFor("pacman", ["git", "curl", "tar"])).toEqual(["curl", "git", "tar"]);
 	});
 
+	test("udevadm comes from the package that makes /dev/kvm group kvm: udev, systemd-udev, systemd", () => {
+		expect(packagesFor("apt", ["udevadm"])).toEqual(["udev"]);
+		expect(packagesFor("dnf", ["udevadm"])).toEqual(["systemd-udev"]);
+		expect(packagesFor("pacman", ["udevadm"])).toEqual(["systemd"]);
+	});
+
 	test("every preflight tool has a package on every manager", () => {
 		for (const manager of ["apt", "dnf", "pacman"] as const) expect(packagesFor(manager, PREFLIGHT_TOOLS).every((name) => PACKAGE_NAMES.has(name))).toBe(true);
 	});

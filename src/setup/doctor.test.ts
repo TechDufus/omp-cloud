@@ -4,6 +4,7 @@ import { collectDoctor, collectNodeDoctor, type DoctorDeps, formatDoctor, type N
 import type { HealthDeps, TemplateProbe } from "./health";
 import type { PreflightResult } from "./preflight";
 import type { StepResult } from "./steps";
+import { renderNodeVmonUnit } from "./system-units";
 import { VmonAdminRefused, VmonAdminUnavailable } from "../vmon/admin";
 import type { ClusterNode } from "../vmon/admin";
 import type { CommandResult } from "../update/system";
@@ -406,8 +407,10 @@ const RESTRICTION_LINE = "curl -s -m 3 -o /dev/null http://10.254.254.1:8443/";
 const ON_LINK = "192.168.1.20 dev eth0 src 192.168.1.5 uid 1000\n";
 const ROUTED_SERVICE_IP = "10.254.254.1 via 192.168.1.20 dev eth0 src 192.168.1.5 uid 1000\n";
 
-/** A healthy node, with `answers` (a command line to its result, or a failure to start) laid over the answers of a machine that is right. */
-function nodeDeps(answers: Record<string, Partial<CommandResult> | Error> = {}, env: string | Error = NODE_ENV): { deps: NodeDoctorDeps; lines: string[] } {
+const NODE_UNIT = renderNodeVmonUnit("172.20.0.0/16", "192.168.1.10", { uid: 961, gid: 990 });
+
+/** A healthy node, with `answers` (a command line to its result, or a failure to start) laid over the answers of a machine that is right. `unit` is the text of its vmon unit; null: no unit file. */
+function nodeDeps(answers: Record<string, Partial<CommandResult> | Error> = {}, env: string | Error = NODE_ENV, unit: string | null = NODE_UNIT): { deps: NodeDoctorDeps; lines: string[] } {
 	const healthy: Record<string, Partial<CommandResult>> = {
 		"systemctl is-failed omp-cloud-vmon-sync.service": { code: 1, stdout: "active\n" },
 		"ip route get 192.168.1.20": { stdout: ON_LINK },
@@ -433,6 +436,7 @@ function nodeDeps(answers: Record<string, Partial<CommandResult> | Error> = {}, 
 			if (env instanceof Error) throw env;
 			return env;
 		},
+		readVmonUnit: async () => unit,
 	};
 	return { deps, lines };
 }
@@ -447,6 +451,7 @@ describe("collectNodeDoctor", () => {
 			"ok doctor.node.vmon",
 			"ok doctor.node.net",
 			"ok doctor.node.timer",
+			"ok doctor.node.vmm-user",
 			"ok doctor.node.sync",
 			"ok doctor.node.route",
 			"ok doctor.node.gateway",
@@ -476,6 +481,26 @@ describe("collectNodeDoctor", () => {
 		expect(byId(steps, "doctor.node.vmon")).toEqual({ id: "doctor.node.vmon", status: "failed", detail: "vmon is not running (failed)", fix: "sudo systemctl enable --now vmon; journalctl -u vmon -n 20" });
 		expect(byId(steps, "doctor.node.net")).toMatchObject({ status: "failed", detail: "omp-cloud-node-net is not enabled", fix: "sudo systemctl enable --now omp-cloud-node-net; journalctl -u omp-cloud-node-net -n 20" });
 		expect(byId(steps, "doctor.node.timer").status).toBe("ok");
+	});
+
+	test("a vmon unit that drops its VMMs to omp-cloud-vmm is ok", async () => {
+		const { deps } = nodeDeps();
+		expect(byId(await collectNodeDoctor(deps), "doctor.node.vmm-user")).toEqual({
+			id: "doctor.node.vmm-user",
+			status: "ok",
+			detail: "vibemon's VMMs run as omp-cloud-vmm (961:990) under their seccomp and Landlock filters",
+		});
+	});
+
+	test("a vmon unit without --vmm-user fails with the setup fix, and a node with no unit file has no row", async () => {
+		const { deps } = nodeDeps({}, NODE_ENV, NODE_UNIT.replace(" --vmm-user 961:990", ""));
+		expect(byId(await collectNodeDoctor(deps), "doctor.node.vmm-user")).toEqual({
+			id: "doctor.node.vmm-user",
+			status: "failed",
+			detail: "vibemon's VMMs run as root without their seccomp and Landlock filters (the vmon unit has no --vmm-user)",
+			fix: "omp-cloud setup node --join <user@server>",
+		});
+		expect(ids(await collectNodeDoctor(nodeDeps({}, NODE_ENV, null).deps))).not.toContain("doctor.node.vmm-user");
 	});
 
 	test("a failed sync service names the sync command and the journal", async () => {

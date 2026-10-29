@@ -2,12 +2,13 @@
  * `omp-cloud setup`: preflight, the plan, one sudo for the root part, the user part (config, TLS, units), the plugin, the
  * health waits, the model login and the doctor table. Idempotent: a rerun reports what is already right and repairs drift.
  */
+import { join } from "node:path";
 import { type Config, loadConfig, TEAM_SLUG } from "../config";
 import type { HostOmp } from "../omp-version";
 import { healthBase } from "../update/real";
 import { Units } from "../update/system";
 import { VMON_PIN } from "../vmon/pin";
-import { DEFAULT_TEAM, ensureAdminToken, ensureClusterSecret, ensureDirs, ensureGatewayClients, ensureServiceConfig, readVmonKey, recordedClusterAddress, recordedTeam, writeFileAtomic, writeVmonKey } from "./config";
+import { DEFAULT_TEAM, ensureAdminToken, ensureClusterSecret, ensureDirs, ensureGatewayClients, ensureServiceConfig, readVmonKey, recordedClusterAddress, recordedTeam, writeVmonKey } from "./config";
 import { findOmp, realContext, type SetupContext } from "./context";
 import { collectDoctor, doctorDeps, formatDoctor } from "./doctor";
 import { checkVmonKey, waitGateway, waitService, waitTemplate } from "./health";
@@ -18,6 +19,7 @@ import { type PreflightResult, preflight } from "./preflight";
 import { type RootRequest, rootArgs, runRootPart, sudoCommand, sudoReady } from "./root";
 import { Reporter, type StepResult } from "./steps";
 import { NODE_ENV_FILE, type SystemReport } from "./system";
+import { SYSTEM_UNIT_DIR, VMM_USER_PLAN, vmmUserOfUnit, VMON_UNIT } from "./system-units";
 import { ensureTls } from "./tls";
 import { installUserUnits, type UnitMode, unitSearchPath } from "./units";
 
@@ -110,6 +112,8 @@ export interface PlanInput {
 	/** The LAN address vibemon will listen on for other machines after this run, and what service.json records now; null: none. */
 	clusterAddress?: string | null;
 	clusterWas?: string | null;
+	/** vmon is running from a unit that has no `--vmm-user`: adding it restarts vmon. */
+	vmmUserMissing: boolean;
 }
 
 export function buildPlan(input: PlanInput): string[] {
@@ -120,6 +124,7 @@ export function buildPlan(input: PlanInput): string[] {
 		`  - install the vibemon ${VMON_PIN} helper and a sudoers rule that lets ${input.user} run only that helper (the updater uses it)`,
 		`  - install vibemon ${VMON_PIN} in /opt/vmon`,
 		"  - add the service network (ompsvc0, 10.254.254.1) and the system units omp-cloud-net and vmon, which start at boot",
+		`  - ${VMM_USER_PLAN}${input.vmmUserMissing ? "; vmon restarts for it, so a turn running now is re-run" : ""}`,
 		`  - make sure the vibemon team ${input.team} exists with its limits${args.maxSandboxes === undefined ? "" : ` (${args.maxSandboxes} sandboxes)`}`,
 	);
 	const cluster = input.clusterAddress ?? null;
@@ -129,7 +134,7 @@ export function buildPlan(input: PlanInput): string[] {
 	} else if (cluster === null && clusterWas !== null) {
 		lines.push("  - stop listening for other vibemon machines (vmon restarts; machines that joined lose contact, and threads whose VMs ran there are restored on this server)");
 	}
-	if (input.migrateFrom !== null) lines.push(`  - switch the team from ${input.migrateFrom} to ${input.team} (paused threads come back as cold restores and the VM template rebuilds)`);
+	if (input.migrateFrom !== null) lines.push(`  - switch the team from ${input.migrateFrom} to ${input.team} and delete the team ${input.migrateFrom} in vibemon with its sandboxes, templates and keys (paused threads come back as cold restores and the VM template rebuilds)`);
 	if (!args.noLinger) lines.push(`  - enable linger for ${input.user} (loginctl enable-linger), so the services start at boot without a login`);
 	lines.push("", `as ${input.user}:`);
 	if (pre.omp === null) lines.push(`  - install omp with its own installer (${OMP_INSTALL})`);
@@ -171,7 +176,7 @@ async function planTeam(ctx: SetupContext, args: SetupArgs): Promise<TeamPlan | 
 		return { requested: old, migrate: false, record: old, from: null };
 	}
 	if (args.team !== undefined && old !== null && args.team !== old) {
-		return `this host's vibemon team is ${old}; --team ${args.team} would need --migrate-team (paused threads come back as cold restores and the VM template rebuilds)`;
+		return `this host's vibemon team is ${old}; --team ${args.team} would need --migrate-team, which deletes the team ${old} with its sandboxes (paused threads come back as cold restores and the VM template rebuilds)`;
 	}
 	return { requested: old ?? args.team, migrate: false, record: old ?? undefined, from: null };
 }
@@ -206,7 +211,7 @@ async function ensureKey(ctx: SetupContext, request: RootRequest, report: System
 		reporter.note(`${state === "missing" ? "no team key yet" : "the team key in vmon.key is not known to vmon (the team was recreated)"}: minting one`);
 	}
 	if (key === undefined) {
-		const second = await runRootPart(ctx.run, ctx.self, rootArgs({ ...request, team: teamSlug, mintKey: true, migrateTeam: false, packages: [] }));
+		const second = await runRootPart(ctx.run, ctx.self, rootArgs({ ...request, team: teamSlug, mintKey: true, migrateFrom: undefined, packages: [] }));
 		if (!second.ok) {
 			reportRootFailure(ctx, second);
 			return false;
@@ -215,15 +220,11 @@ async function ensureKey(ctx: SetupContext, request: RootRequest, report: System
 		key = second.report.key;
 	}
 	if (key === undefined) {
-		reporter.report({ id: "config.key", status: "failed", detail: "the root part minted no team key", fix: `sudo -- ${ctx.self.argv.join(" ")} setup system ${rootArgs({ ...request, team: teamSlug, mintKey: true }).join(" ")}` });
+		reporter.report({ id: "config.key", status: "failed", detail: "the root part minted no team key", fix: `sudo -- ${ctx.self.argv.join(" ")} setup system ${rootArgs({ ...request, team: teamSlug, mintKey: true, migrateFrom: undefined }).join(" ")}` });
 		return false;
 	}
-	if (plan.migrate && plan.from !== null) {
-		const old = await readVmonKey(paths);
-		if (old !== null) await writeFileAtomic(`${paths.vmonKey}.${plan.from}`, old, 0o600);
-	}
 	await writeVmonKey(paths, key);
-	reporter.report({ id: "config.key", status: "changed", detail: `the team key was written to ${paths.vmonKey}${plan.migrate && plan.from !== null ? ` (the old one is kept as vmon.key.${plan.from})` : ""}` });
+	reporter.report({ id: "config.key", status: "changed", detail: `the team key was written to ${paths.vmonKey}` });
 	return true;
 }
 
@@ -283,10 +284,12 @@ export async function runSetup(args: SetupArgs, ctx: SetupContext): Promise<numb
 		...(args.maxSandboxes === undefined ? {} : { maxSandboxes: args.maxSandboxes }),
 		packages,
 		noLinger: args.noLinger,
-		migrateTeam: plan.migrate,
+		...(plan.from === null ? {} : { migrateFrom: plan.from }),
 		...(clusterAddress === null ? {} : { clusterAddress }),
 	};
-	const lines = buildPlan({ args, pre, packages, team: plan.requested ?? DEFAULT_TEAM, user: paths.user, version: ctx.version, appDir: paths.appDir, configDir: paths.configDir, migrateFrom: plan.from, clusterAddress, clusterWas });
+	const vmonUnit = await ctx.preflight.readText(join(SYSTEM_UNIT_DIR, VMON_UNIT)).catch(() => null);
+	const vmmUserMissing = vmonUnit !== null && vmmUserOfUnit(vmonUnit) === null;
+	const lines = buildPlan({ args, pre, packages, team: plan.requested ?? DEFAULT_TEAM, user: paths.user, version: ctx.version, appDir: paths.appDir, configDir: paths.configDir, migrateFrom: plan.from, clusterAddress, clusterWas, vmmUserMissing });
 	reporter.note(lines.join("\n"));
 	if (!args.yes) {
 		if (!ctx.stdinIsTty) {

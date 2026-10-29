@@ -19,6 +19,7 @@ import { preflight } from "./preflight";
 import { runRootPart, sudoReady } from "./root";
 import { Reporter, type StepResult } from "./steps";
 import { NODE_SECRET_PATTERN } from "./system";
+import { VMM_USER_PLAN } from "./system-units";
 
 export const NODE_USAGE = "usage: omp-cloud setup node --join <user@server> [--yes] [--json]";
 
@@ -262,6 +263,7 @@ export function buildNodePlan(input: NodePlanInput): string[] {
 		`  - install vibemon ${input.vmonVersion} and the vibemon helpers (the sync helper keeps it at the server's version)`,
 		"  - write /etc/vmon/env (the cluster secret, root only) and /etc/omp-cloud/node.env (the server's address and certificate pin)",
 		`  - add the system unit vmon (role node, joins ${input.address}:7946), which starts at boot`,
+		`  - ${VMM_USER_PLAN}`,
 		`  - add the system unit omp-cloud-node-net: VMs here reach only TCP 4000 and 4100 of ${SERVICE_IP}${input.route ? `, plus the route ${SERVICE_IP} via ${input.address}` : ""}`,
 		"  - add the timer omp-cloud-vmon-sync.timer",
 		"",

@@ -158,6 +158,7 @@ describe("buildNodePlan", () => {
 		const text = buildNodePlan(input).join("\n");
 		expect(text).toContain("install packages with apt: curl");
 		expect(text).toContain("install vibemon v0.4.0 and the vibemon helpers");
+		expect(text).toContain("run vibemon's VMMs as the system user omp-cloud-vmm (group kvm) under their seccomp and Landlock filters, not as root");
 		expect(text).toContain("/etc/vmon/env");
 		expect(text).toContain("/etc/omp-cloud/node.env");
 		expect(text).toContain(`the system unit vmon (role node, joins ${SERVER}:7946)`);

@@ -2,29 +2,20 @@ import { describe, expect, test } from "bun:test";
 import type { CommandResult } from "../update/system";
 import type { FakeRunner } from "./system-fakes";
 import { fakeRunner } from "./system-fakes";
-import { ensureTeam, envValueOf, limitArgs, parseApiKey, parseCreateTeam, parseListTeams } from "./vmon-team";
+import { deleteTeam, ensureTeam, envValueOf, limitArgs, parseApiKey, parseCreateTeam } from "./vmon-team";
 
 const SECRET = "c0ffee".repeat(10);
 const KEY = `e2b_${"ab12".repeat(10)}`;
 const OTHER_KEY = `e2b_${"cd34".repeat(10)}`;
-const COUNTS = "sandboxes=32 builds=4 vcpus=8 memory_mb=8192 disk_mb=20480 hours=24";
-const TEAMS = `0b3c\tacme\tacme\t${COUNTS}\n9f1d\tomp-cloud\tomp-cloud\t${COUNTS}\tBLOCKED\n7a2e\tsystem\tsystem\t${COUNTS}\tSYSTEM\n`;
 const CREATED = `team    omp-cloud (9f1d)\nslug    omp-cloud\napi key ${KEY}\n`;
+const EXISTING = "team    omp-cloud (9f1d)\nslug    omp-cloud\n";
+const DELETED = "deleted team acme (0b3c)\nkilled sandboxes=1 cancelled builds=0\nremoved templates=2 volumes=0 secrets=0 webhooks=0 api keys=1\n";
 
 describe("parsers", () => {
-	test("list-teams: tab-separated team lines with the BLOCKED and SYSTEM flags", () => {
-		expect(parseListTeams(TEAMS)).toEqual([
-			{ id: "0b3c", slug: "acme", name: "acme", blocked: false, system: false },
-			{ id: "9f1d", slug: "omp-cloud", name: "omp-cloud", blocked: true, system: false },
-			{ id: "7a2e", slug: "system", name: "system", blocked: false, system: true },
-		]);
-		expect(parseListTeams("")).toEqual([]);
-		expect(parseListTeams("vmon: error: noise\n")).toEqual([]);
-	});
-
-	test("create-team: slug and one-time key", () => {
+	test("create-team: the slug, and the one-time key only when the team was created", () => {
 		expect(parseCreateTeam(CREATED)).toEqual({ slug: "omp-cloud", key: KEY });
-		expect(parseCreateTeam("team x (1)\nslug    x\n")).toBeNull();
+		expect(parseCreateTeam(EXISTING)).toEqual({ slug: "omp-cloud", key: null });
+		expect(parseCreateTeam("team x (1)\n")).toBeNull();
 		expect(parseCreateTeam(`slug x\napi key not-a-key\n`)).toBeNull();
 	});
 
@@ -50,12 +41,11 @@ describe("parsers", () => {
 	});
 });
 
-function vmon(answers: { list?: Partial<CommandResult>[]; create?: Partial<CommandResult>; mint?: Partial<CommandResult>; limits?: Partial<CommandResult> }) {
-	const lists = [...(answers.list ?? [{ stdout: TEAMS }])];
+function vmon(answers: { create?: Partial<CommandResult>[]; mint?: Partial<CommandResult>; limits?: Partial<CommandResult> } = {}) {
+	const creates = [...(answers.create ?? [{ stdout: CREATED }])];
 	return fakeRunner((argv) => {
 		const verb = argv[4];
-		if (verb === "list-teams") return lists.length > 1 ? lists.shift() : lists[0];
-		if (verb === "create-team") return answers.create ?? { stdout: CREATED };
+		if (verb === "create-team") return creates.length > 1 ? creates.shift() : creates[0];
 		if (verb === "create-api-key") return answers.mint ?? { stdout: `${OTHER_KEY}\n` };
 		if (verb === "set-limits") return answers.limits ?? { stdout: "team line\n" };
 		return undefined;
@@ -66,37 +56,41 @@ const ensure = (runner: FakeRunner, overrides: { slug?: string; mintKey?: boolea
 	ensureTeam({ runner: runner.run, secret: SECRET, slug: overrides.slug ?? "omp-cloud", maxSandboxes: 12, mintKey: overrides.mintKey ?? false, sleep: async () => {} });
 
 describe("ensureTeam", () => {
-	test("creates a missing team with its limits, takes the key from create-team, then applies the limits", async () => {
-		const runner = vmon({ list: [{ stdout: `0b3c\tacme\tacme\t${COUNTS}\n` }] });
+	test("a missing team is created with its limits and the key of create-team, then the limits are applied", async () => {
+		const runner = vmon();
 		const outcome = await ensure(runner);
 		expect(outcome.team).toEqual({ slug: "omp-cloud", created: true });
 		expect(outcome.key).toBe(KEY);
 		expect(outcome.steps.map((step) => [step.id, step.status])).toEqual([["system.team", "changed"], ["system.team.key", "changed"], ["system.team.limits", "ok"]]);
-		const verbs = runner.calls.map((call) => call.argv.slice(4, 6).join(" "));
-		expect(verbs).toEqual(["list-teams", "create-team omp-cloud", "set-limits omp-cloud"]);
-		expect(runner.calls[1]?.argv.slice(6)).toEqual(limitArgs(12));
-		expect(runner.calls[2]?.argv.slice(6)).toEqual(limitArgs(12));
+		expect(runner.calls.map((call) => call.argv.slice(4).join(" "))).toEqual([
+			`create-team omp-cloud --if-missing ${limitArgs(12).join(" ")}`,
+			`set-limits omp-cloud ${limitArgs(12).join(" ")}`,
+		]);
 	});
 
-	test("an existing team is not created twice; limits are re-applied and no key is minted", async () => {
-		const runner = vmon({});
+	test("an existing team is left alone: no key, and the limits are re-applied", async () => {
+		const runner = vmon({ create: [{ stdout: EXISTING, stderr: "team omp-cloud already exists; left unchanged\n" }] });
 		const outcome = await ensure(runner);
 		expect(outcome.team).toEqual({ slug: "omp-cloud", created: false });
 		expect(outcome.key).toBeUndefined();
-		expect(runner.calls.map((call) => call.argv[4])).toEqual(["list-teams", "set-limits"]);
-		expect(outcome.steps.every((step) => step.status === "ok")).toBe(true);
+		expect(runner.calls.map((call) => call.argv[4])).toEqual(["create-team", "set-limits"]);
+		expect(outcome.steps.map((step) => [step.id, step.status])).toEqual([["system.team", "ok"], ["system.team.limits", "ok"]]);
 	});
 
 	test("an existing team gets a new key only when one is asked for", async () => {
-		const runner = vmon({});
+		const runner = vmon({ create: [{ stdout: EXISTING }] });
 		const outcome = await ensure(runner, { mintKey: true });
 		expect(outcome.key).toBe(OTHER_KEY);
 		expect(outcome.team.created).toBe(false);
-		expect(runner.calls.map((call) => call.argv.slice(4).join(" "))).toEqual(["list-teams", "create-api-key omp-cloud", `set-limits omp-cloud ${limitArgs(12).join(" ")}`]);
+		expect(runner.calls.map((call) => call.argv.slice(4).join(" "))).toEqual([
+			`create-team omp-cloud --if-missing ${limitArgs(12).join(" ")}`,
+			"create-api-key omp-cloud",
+			`set-limits omp-cloud ${limitArgs(12).join(" ")}`,
+		]);
 	});
 
 	test("the cluster secret goes into the child's environment and never into argv", async () => {
-		const runner = vmon({ list: [{ stdout: "" }] });
+		const runner = vmon();
 		await ensure(runner);
 		for (const call of runner.calls) {
 			expect(call.options.env).toEqual({ VMON_CLUSTER_SECRET: SECRET });
@@ -106,56 +100,102 @@ describe("ensureTeam", () => {
 	});
 
 	test("no key appears in any step text", async () => {
-		const outcome = await ensure(vmon({ list: [{ stdout: "" }] }), { mintKey: true });
+		const outcome = await ensure(vmon(), { mintKey: true });
 		expect(JSON.stringify(outcome.steps)).not.toContain("e2b_");
 	});
 
-	test("list-teams is retried while vmon admin is not ready yet", async () => {
-		const runner = vmon({ list: [{ code: 1, stderr: "vmon: error: no driver yet" }, { code: 1, stderr: "vmon: error: no driver yet" }, { stdout: TEAMS }] });
+	test("create-team is retried while vmon admin is not ready yet", async () => {
+		const runner = vmon({ create: [{ code: 1, stderr: "vmon: error: no driver yet" }, { code: 1, stderr: "vmon: error: no driver yet" }, { stdout: CREATED }] });
 		const outcome = await ensure(runner);
-		expect(outcome.steps.at(-1)?.status).toBe("ok");
-		expect(runner.calls.filter((call) => call.argv[4] === "list-teams")).toHaveLength(3);
+		expect(outcome.steps.every((step) => step.status !== "failed")).toBe(true);
+		expect(outcome.key).toBe(KEY);
+		expect(runner.calls.filter((call) => call.argv[4] === "create-team")).toHaveLength(3);
 	});
 
-	test("a list-teams that never works is a failed step with the reason", async () => {
-		const outcome = await ensure(vmon({ list: [{ code: 1, stderr: "vmon: error: no cluster secret\n" }] }));
-		expect(outcome.steps).toHaveLength(1);
-		expect(outcome.steps[0]).toMatchObject({ id: "system.team", status: "failed" });
-		expect(outcome.steps[0]?.detail).toContain("no cluster secret");
-	});
-
-	test("a failed create-team creates nothing and mints nothing", async () => {
-		const runner = vmon({ list: [{ stdout: "" }], create: { code: 1, stderr: "vmon: error: boom" } });
+	test("a create-team that never works is one failed step with the reason, and no limits are set", async () => {
+		const runner = vmon({ create: [{ code: 1, stderr: "vmon: error: no cluster secret\n" }] });
 		const outcome = await ensure(runner);
 		expect(outcome.team.created).toBe(false);
 		expect(outcome.key).toBeUndefined();
-		expect(outcome.steps[0]?.status).toBe("failed");
+		expect(outcome.steps).toHaveLength(1);
+		expect(outcome.steps[0]).toMatchObject({ id: "system.team", status: "failed" });
+		expect(outcome.steps[0]?.detail).toContain("no cluster secret");
+		expect(runner.calls.filter((call) => call.argv[4] === "create-team")).toHaveLength(5);
 		expect(runner.calls.some((call) => call.argv[4] === "set-limits")).toBe(false);
 	});
 
-	test("a team vmon named differently (slug collision) is a failure, and its key is still returned", async () => {
-		const outcome = await ensure(vmon({ list: [{ stdout: "" }], create: { stdout: `team    omp-cloud (1)\nslug    omp-cloud-2\napi key ${KEY}\n` } }));
-		expect(outcome.steps[0]).toMatchObject({ status: "failed" });
+	test("a team vmon named differently is a failure", async () => {
+		const runner = vmon({ create: [{ stdout: `team    omp-cloud (1)\nslug    omp-cloud-2\napi key ${KEY}\n` }] });
+		const outcome = await ensure(runner);
+		expect(outcome.steps).toHaveLength(1);
+		expect(outcome.steps[0]).toMatchObject({ id: "system.team", status: "failed" });
 		expect(outcome.steps[0]?.detail).toContain("omp-cloud-2");
-		expect(outcome.key).toBe(KEY);
+		expect(runner.calls.some((call) => call.argv[4] === "set-limits")).toBe(false);
 	});
 
-	test("a key that was minted survives a failing set-limits", async () => {
-		const outcome = await ensure(vmon({ list: [{ stdout: "" }], limits: { code: 1, stderr: "vmon: error: bad limit" } }));
+	test("a key that was created survives a failing set-limits", async () => {
+		const outcome = await ensure(vmon({ limits: { code: 1, stderr: "vmon: error: bad limit" } }));
 		expect(outcome.key).toBe(KEY);
 		expect(outcome.steps.at(-1)).toMatchObject({ id: "system.team.limits", status: "failed" });
 	});
 
-	test("create-team that printed no key marks the team created but fails", async () => {
-		const outcome = await ensure(vmon({ list: [{ stdout: "" }], create: { stdout: "slug    omp-cloud\n" } }));
+	test("an answer without a slug is a failure", async () => {
+		const outcome = await ensure(vmon({ create: [{ stdout: "team    omp-cloud (1)\n" }] }));
+		expect(outcome.team.created).toBe(false);
+		expect(outcome.steps).toHaveLength(1);
+		expect(outcome.steps[0]).toMatchObject({ id: "system.team", status: "failed" });
+	});
+
+	test("an api key line that is not a key marks the team created but fails", async () => {
+		const outcome = await ensure(vmon({ create: [{ stdout: "slug    omp-cloud\napi key garbage\n" }] }));
 		expect(outcome.team.created).toBe(true);
 		expect(outcome.key).toBeUndefined();
 		expect(outcome.steps[0]?.status).toBe("failed");
 	});
 
 	test("a failing create-api-key is a failed step", async () => {
-		const outcome = await ensure(vmon({ mint: { code: 1, stderr: "vmon: error: no such team" } }), { mintKey: true });
+		const outcome = await ensure(vmon({ create: [{ stdout: EXISTING }], mint: { code: 1, stderr: "vmon: error: no such team" } }), { mintKey: true });
 		expect(outcome.key).toBeUndefined();
 		expect(outcome.steps.at(-1)).toMatchObject({ id: "system.team.key", status: "failed" });
+	});
+});
+
+describe("deleteTeam", () => {
+	const remove = (runner: FakeRunner, clusterUrl?: string) =>
+		deleteTeam({ runner: runner.run, secret: SECRET, slug: "acme", ...(clusterUrl === undefined ? {} : { clusterUrl }) });
+
+	test("a deleted team is a changed step that carries vmon's counts", async () => {
+		const runner = fakeRunner(() => ({ stdout: DELETED }));
+		const step = await remove(runner);
+		expect(step).toEqual({
+			id: "system.team.old",
+			status: "changed",
+			detail: "deleted the old vmon team acme (killed sandboxes=1 cancelled builds=0; removed templates=2 volumes=0 secrets=0 webhooks=0 api keys=1)",
+		});
+		expect(runner.calls.map((call) => call.argv)).toEqual([["/opt/vmon/vmon", "admin", "--cluster-url", "http://127.0.0.1:7947", "delete-team", "acme", "--force"]]);
+	});
+
+	test("the cluster secret is in the environment only, and the cluster url is the given one", async () => {
+		const runner = fakeRunner(() => ({ stdout: DELETED }));
+		await remove(runner, "http://192.168.1.5:7947");
+		expect(runner.calls[0]?.options.env).toEqual({ VMON_CLUSTER_SECRET: SECRET });
+		expect(runner.calls[0]?.argv.join(" ")).not.toContain(SECRET);
+		expect(runner.calls[0]?.argv[3]).toBe("http://192.168.1.5:7947");
+	});
+
+	test("an unknown team is already gone", async () => {
+		const step = await remove(fakeRunner(() => ({ code: 1, stderr: "vmon: error: team acme not found\n" })));
+		expect(step).toMatchObject({ id: "system.team.old", status: "ok" });
+		expect(step.detail).toContain("already gone");
+	});
+
+	test("any other failure is skipped with a fix that never holds the secret", async () => {
+		const step = await remove(fakeRunner(() => ({ code: 1, stderr: "vmon: error: sandbox kill timed out\n" })), "http://192.168.1.5:7947");
+		expect(step.status).toBe("skipped");
+		expect(step.detail).toContain("kept the old vmon team acme");
+		expect(step.detail).toContain("sandbox kill timed out");
+		expect(step.fix).toContain("delete-team acme --force");
+		expect(step.fix).toContain("http://192.168.1.5:7947");
+		expect(`${step.detail}${step.fix}`).not.toContain(SECRET);
 	});
 });

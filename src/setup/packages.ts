@@ -10,7 +10,7 @@ import type { StepResult } from "./steps";
 export type PackageManager = "apt" | "dnf" | "pacman";
 
 /** The programs the preflight checks (vibemon, its helper and the service need them). */
-export const PREFLIGHT_TOOLS = ["ip", "iptables", "iptables-restore", "ip6tables-restore", "mkfs.ext4", "e2fsck", "resize2fs", "curl", "tar", "sha256sum", "flock", "timeout", "git"] as const;
+export const PREFLIGHT_TOOLS = ["ip", "iptables", "iptables-restore", "ip6tables-restore", "mkfs.ext4", "e2fsck", "resize2fs", "curl", "tar", "sha256sum", "flock", "timeout", "git", "udevadm"] as const;
 export type PreflightTool = (typeof PREFLIGHT_TOOLS)[number];
 
 /** Which package of each manager provides each tool. */
@@ -29,6 +29,7 @@ const PACKAGE_OF: Readonly<Record<PackageManager, Readonly<Record<PreflightTool,
 		flock: "util-linux",
 		timeout: "coreutils",
 		git: "git",
+		udevadm: "udev",
 	},
 	dnf: {
 		ip: "iproute",
@@ -44,6 +45,7 @@ const PACKAGE_OF: Readonly<Record<PackageManager, Readonly<Record<PreflightTool,
 		flock: "util-linux",
 		timeout: "coreutils",
 		git: "git",
+		udevadm: "systemd-udev",
 	},
 	pacman: {
 		ip: "iproute2",
@@ -59,6 +61,7 @@ const PACKAGE_OF: Readonly<Record<PackageManager, Readonly<Record<PreflightTool,
 		flock: "util-linux",
 		timeout: "coreutils",
 		git: "git",
+		udevadm: "systemd",
 	},
 };
 

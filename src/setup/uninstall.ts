@@ -52,7 +52,7 @@ export function buildUninstallPlan(args: UninstallArgs, ctx: SetupContext, node:
 			"  - VMs running on this machine are lost; the server restores their threads on its other machines",
 		];
 		if (args.purge) {
-			lines.push("  - --purge: also delete vibemon (/opt/vmon, /var/lib/vmon with every VM and template, /etc/vmon) and /etc/omp-cloud", `  - --purge: also delete ${paths.appDir}`);
+			lines.push("  - --purge: also delete vibemon (/opt/vmon, /var/lib/vmon with every VM and template, /etc/vmon), /etc/omp-cloud and the system user omp-cloud-vmm", `  - --purge: also delete ${paths.appDir}`);
 		}
 		lines.push(`kept: ${args.purge ? paths.configDir : `${paths.appDir} and vibemon's data`}`);
 		return lines;
@@ -67,7 +67,7 @@ export function buildUninstallPlan(args: UninstallArgs, ctx: SetupContext, node:
 	];
 	if (args.purge) {
 		lines.push(
-			"  - --purge: also delete vibemon (/opt/vmon, /var/lib/vmon with every VM and template, /etc/vmon) and /etc/omp-cloud",
+			"  - --purge: also delete vibemon (/opt/vmon, /var/lib/vmon with every VM and template, /etc/vmon), /etc/omp-cloud and the system user omp-cloud-vmm",
 			`  - --purge: also delete ${paths.configDir} (service config, API token, team key, the TLS identity: paired devices must pair again)`,
 			`  - --purge: also delete ${paths.authHome} (the model broker's vault: every model login is lost)`,
 			`  - --purge: also delete ${paths.dataDir} (threads and their data) and ${paths.appDir}`,

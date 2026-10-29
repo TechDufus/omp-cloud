@@ -3,6 +3,7 @@ import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { HostOmp } from "../omp-version";
 import { MIN_OMP_VERSION } from "./preflight";
+import { renderNodeVmonUnit, SYSTEM_UNIT_DIR, VMON_UNIT } from "./system-units";
 import type { CommandOptions, CommandResult, CommandRunner } from "../update/system";
 import { setupPaths } from "./config";
 import type { SetupContext, SetupParts } from "./context";
@@ -152,6 +153,8 @@ export interface RigOptions {
 	/** This machine is a vibemon node: `/etc/omp-cloud/node.env` exists and holds `nodeEnv`. */
 	node?: boolean;
 	nodeEnv?: string;
+	/** The text of `/etc/systemd/system/vmon.service`: by default a node's unit with `--vmm-user` on a node rig, and no file on a server rig. */
+	vmonUnit?: string;
 }
 
 /** A context whose home is `dir`: every file setup writes lands there, every command is `host`'s. */
@@ -213,7 +216,16 @@ export async function rig(dir: string, options: RigOptions = {}): Promise<TestRi
 			uid: options.uid ?? 1000,
 			which: (name) => (missing.has(name) ? null : `/usr/bin/${name}`),
 			exists: async (path) => path !== NODE_ENV_FILE || options.node === true,
-			readText: async (path) => (path === "/proc/1/comm" ? "systemd\n" : path === NODE_ENV_FILE ? (options.nodeEnv ?? NODE_ENV_TEXT) : "MemTotal: 16777216 kB\n"),
+			readText: async (path) => {
+				if (path === "/proc/1/comm") return "systemd\n";
+				if (path === NODE_ENV_FILE) return options.nodeEnv ?? NODE_ENV_TEXT;
+				if (path === `${SYSTEM_UNIT_DIR}/${VMON_UNIT}`) {
+					if (options.vmonUnit !== undefined) return options.vmonUnit;
+					if (options.node === true) return renderNodeVmonUnit("172.20.0.0/16", "192.168.1.20", { uid: 961, gid: 990 });
+					throw Object.assign(new Error(`ENOENT: no such file or directory, open '${path}'`), { code: "ENOENT" });
+				}
+				return "MemTotal: 16777216 kB\n";
+			},
 			freeBytes: async () => 200 * 1024 ** 3,
 			portInUse: async () => false,
 			httpsStatus: async () => 200,

@@ -29,7 +29,7 @@ describe("selfCommand", () => {
 describe("rootArgs and sudoCommand", () => {
 	test("only validated flags, in a fixed order, and nothing else", () => {
 		expect(rootArgs({ user: "tester", packages: [] })).toEqual(["--user", "tester"]);
-		expect(rootArgs({ user: "tester", team: "acme", maxSandboxes: 3, packages: ["git", "iproute2"], mintKey: true, noLinger: true, migrateTeam: true })).toEqual([
+		expect(rootArgs({ user: "tester", team: "acme", maxSandboxes: 3, packages: ["git", "iproute2"], mintKey: true, noLinger: true, migrateFrom: "old-team" })).toEqual([
 			"--user",
 			"tester",
 			"--team",
@@ -41,6 +41,7 @@ describe("rootArgs and sudoCommand", () => {
 			"--mint-key",
 			"--no-linger",
 			"--migrate-team",
+			"old-team",
 		]);
 	});
 
