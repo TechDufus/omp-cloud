@@ -47,3 +47,14 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* install.sh $prerelease \
             --title "omp-cloud ${GITHUB_REF_NAME#v}" \
             --notes-file dist/notes.md
+
+  # Posts the release, with its notes, to Discord. GitHub starts no `release` workflow for a release
+  # made with the workflow's own token, so the shared workflow runs here once the release exists.
+  # The webhook URL is the repository secret DISCORD_RELEASES_WEBHOOK.
+  announce:
+    needs: release
+    permissions:
+      contents: read
+    uses: TechDufus/.github/.github/workflows/release-announce.yml@f7202aa0c9295ebaba3f1161e1dba39b8d0e1ff1
+    secrets:
+      discord_webhook: ${{ secrets.DISCORD_RELEASES_WEBHOOK }}
