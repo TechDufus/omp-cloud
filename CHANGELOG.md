@@ -6,6 +6,8 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 ## Unreleased
 
+## 0.9.1 (2026-11-16)
+
 A server can follow release candidates: `update.channel: dev` offers prereleases, and `stable` stays the default. Nothing changes for a server that leaves the setting alone.
 
 ### Added
