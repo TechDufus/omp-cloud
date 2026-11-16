@@ -25,20 +25,20 @@ describe("the database as the updater reads it", () => {
 	});
 
 	test("update.* settings come from the stored values, defaults otherwise, and a missing database gives the defaults", () => {
-		expect(readUpdateSettings(join(dir, "nowhere"))).toEqual({ mode: "notify", feed: "github:TechDufus/omp-cloud", token: "", unit: "omp-cloud", ompUnits: ["omp-auth-broker", "omp-auth-gateway"] });
+		expect(readUpdateSettings(join(dir, "nowhere"))).toEqual({ mode: "notify", feed: "github:TechDufus/omp-cloud", channel: "stable", token: "", unit: "omp-cloud", ompUnits: ["omp-auth-broker", "omp-auth-gateway"] });
 		const store = Store.open({ dataDir: dir });
 		expect(readUpdateSettings(dir).mode).toBe("notify");
 		const settings = Settings.load(store);
-		settings.apply({ "update.mode": "auto", "update.feed": "https://feed.example.test/omp", "update.token": "!/usr/bin/gh auth token", "update.unit": "omp-cloud-dev" }, "owner");
+		settings.apply({ "update.mode": "auto", "update.feed": "https://feed.example.test/omp", "update.channel": "dev", "update.token": "!/usr/bin/gh auth token", "update.unit": "omp-cloud-dev" }, "owner");
 		store.close();
-		expect(readUpdateSettings(dir)).toEqual({ mode: "auto", feed: "https://feed.example.test/omp", token: "!/usr/bin/gh auth token", unit: "omp-cloud-dev", ompUnits: ["omp-auth-broker", "omp-auth-gateway"] });
+		expect(readUpdateSettings(dir)).toEqual({ mode: "auto", feed: "https://feed.example.test/omp", channel: "dev", token: "!/usr/bin/gh auth token", unit: "omp-cloud-dev", ompUnits: ["omp-auth-broker", "omp-auth-gateway"] });
 	});
 
 	test("a stored value the validator refuses falls back to the default", () => {
 		const store = Store.open({ dataDir: dir });
-		store.applySettings([{ key: "update.mode", value: '"sometimes"' }, { key: "update.unit", value: '"bad unit"' }], "owner", "set");
+		store.applySettings([{ key: "update.mode", value: '"sometimes"' }, { key: "update.unit", value: '"bad unit"' }, { key: "update.channel", value: '"nightly"' }], "owner", "set");
 		store.close();
-		expect(readUpdateSettings(dir)).toMatchObject({ mode: "notify", unit: "omp-cloud" });
+		expect(readUpdateSettings(dir)).toMatchObject({ mode: "notify", unit: "omp-cloud", channel: "stable" });
 	});
 
 	test("update.ompUnits: the default is the broker and gateway; a stored list, also an empty one, is read; a bad one falls back", () => {

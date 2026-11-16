@@ -18,6 +18,21 @@ function parseVersion(v: string): [number, number, number, string] | undefined {
 	return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4] ?? ""] : undefined;
 }
 
+/** Orders two prerelease parts as semver does: identifier by identifier, numbers by value and before words, fewer identifiers first (`rc.9` before `rc.10`). */
+function comparePrerelease(a: string, b: string): number {
+	const left = a.split(".");
+	const right = b.split(".");
+	for (let i = 0; i < Math.min(left.length, right.length); i++) {
+		const l = left[i] ?? "";
+		const r = right[i] ?? "";
+		const leftNumber = /^\d+$/.test(l);
+		if (leftNumber !== /^\d+$/.test(r)) return leftNumber ? -1 : 1;
+		const diff = leftNumber ? Number(l) - Number(r) : l < r ? -1 : l > r ? 1 : 0;
+		if (diff !== 0) return diff;
+	}
+	return left.length - right.length;
+}
+
 /** Negative when `a` is older than `b`, positive when newer, 0 when equal; undefined when either is not a version. A release outranks its own prereleases. */
 export function compareVersions(a: string, b: string): number | undefined {
 	const x = parseVersion(a);
@@ -32,7 +47,7 @@ export function compareVersions(a: string, b: string): number | undefined {
 	if (x[3] === y[3]) return 0;
 	if (x[3] === "") return 1;
 	if (y[3] === "") return -1;
-	return x[3] < y[3] ? -1 : 1;
+	return comparePrerelease(x[3], y[3]);
 }
 
 /** What the plugin tells the user when it is older than the service. */

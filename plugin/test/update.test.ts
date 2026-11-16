@@ -27,6 +27,11 @@ describe("versions", () => {
 		expect(compareVersions("0.5.0-rc.1", "0.5.0")).toBeLessThan(0);
 		expect(compareVersions("0.5.0", "0.5.0-rc.1")).toBeGreaterThan(0);
 		expect(compareVersions("0.5.0-rc.1", "0.5.0-rc.2")).toBeLessThan(0);
+		// Prerelease identifiers by value, not by text: rc.10 follows rc.9.
+		expect(compareVersions("0.5.0-rc.10", "0.5.0-rc.9")).toBeGreaterThan(0);
+		expect(compareVersions("0.5.0-rc.2", "0.5.0-rc.10")).toBeLessThan(0);
+		expect(compareVersions("0.5.0-rc", "0.5.0-rc.1")).toBeLessThan(0);
+		expect(compareVersions("0.5.0-1", "0.5.0-rc.1")).toBeLessThan(0);
 		expect(compareVersions("dev", "0.5.0")).toBeUndefined();
 		expect(compareVersions("", "0.5.0")).toBeUndefined();
 	});

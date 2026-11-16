@@ -40,7 +40,23 @@ Each omp-cloud release pins the vibemon version it was tested with (`infra/vmon.
 
 ## The feed
 
-`update.feed` is `github:<owner>/<repo>` (the default is `github:TechDufus/omp-cloud`, its latest GitHub release) or an `http(s)://` base URL that serves `release.json` and the files, for self-hosting and tests. A private repository or fork needs `update.token`: set it to a `!command` whose output is a GitHub token (for example `!/usr/bin/gh auth token`), the name of an environment variable of the service, or the token itself. In that last case it is stored in the clear in the database but reads back as `(set)` and is never audited or exported, and the service never logs the value; prefer a `!command`. A public repository is read without a token. `update.unit` names the service's user unit that an update restarts, and `update.ompUnits` the units whose omp the `omp` step checks (default the broker and gateway; `[]` skips the step).
+`update.feed` is `github:<owner>/<repo>` (the default is `github:TechDufus/omp-cloud`; which of its releases is offered is the [channel](#channels)) or an `http(s)://` base URL that serves `release.json` and the files, for self-hosting and tests. A private repository or fork needs `update.token`: set it to a `!command` whose output is a GitHub token (for example `!/usr/bin/gh auth token`), the name of an environment variable of the service, or the token itself. In that last case it is stored in the clear in the database but reads back as `(set)` and is never audited or exported, and the service never logs the value; prefer a `!command`. A public repository is read without a token. `update.unit` names the service's user unit that an update restarts, and `update.ompUnits` the units whose omp the `omp` step checks (default the broker and gateway; `[]` skips the step).
+
+## Channels
+
+`update.channel` says which releases a GitHub feed offers. Set it on the dashboard's Settings page or with `PUT /api/v1/settings`; it applies from the next check (hourly, **Check for updates**, or `omp-cloud update`).
+
+- **`stable`** (the default) offers the repository's latest release. A prerelease is never offered.
+- **`dev`** offers the highest version among the published releases, prereleases included: a tag with a `-`, such as `v0.10.0-rc.1`, which the release workflow publishes as a GitHub prerelease. Versions order as semver orders them (`rc.9` before `rc.10`, every release candidate before its final release), so a server on `dev` moves through the release candidates and then to the final release, and takes every stable release too.
+
+What does not change with the channel:
+
+- **`update.mode` decides how a release is installed.** `auto` installs a release candidate by itself under the same rule as any release ([`auto`](#auto)): a quiet service, the same vibemon, no new database schema. Otherwise it waits for a click.
+- **The service never goes back a version.** After a switch from `dev` to `stable`, a server on a release candidate keeps it until a stable release with a higher version exists.
+- **A feed that is a base URL** serves the one release its `release.json` describes and ignores the channel.
+- **Devices have no channel.** A device's plugin follows the version in the repository's `.omp-plugin/marketplace.json` ([The plugin](#the-plugin)), so a release candidate whose version commit is on the default branch reaches a device at its next `omp plugin upgrade`.
+
+`mise run release -- 0.10.0-rc.1` cuts a release candidate: it bumps the versions, commits and tags, and leaves `CHANGELOG.md` alone. The entries stay under `## Unreleased`, which is the release candidate's notes, and the final release (`mise run release -- 0.10.0`) moves them into its section. `dev` looks at the 100 most recently created releases of the repository.
 
 ## The plugin
 

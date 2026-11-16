@@ -154,7 +154,7 @@ export class UpdateService {
 		try {
 			const settings = this.#deps.settings();
 			const token = settings.token === "" ? undefined : await this.#deps.token(settings.token);
-			const options: FeedOptions = token === undefined ? {} : { token };
+			const options: FeedOptions = { channel: settings.channel, ...(token === undefined ? {} : { token }) };
 			const spec = parseFeedSpec(settings.feed);
 			const feed = (this.#deps.feed ?? ((s, o) => createFeed(s, o)))(spec, options);
 			const release = await feed.latest();

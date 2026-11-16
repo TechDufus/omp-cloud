@@ -297,6 +297,13 @@ describe("update.*", () => {
 		expect(() => REGISTRY["update.feed"].parse(5)).toThrow("update.feed must be a string");
 	});
 
+	test("channel takes stable and dev; stable is the default", () => {
+		expect(REGISTRY["update.channel"].default).toBe("stable");
+		expect(REGISTRY["update.channel"].choices).toEqual(["stable", "dev"]);
+		for (const channel of ["stable", "dev"] as const) expect(REGISTRY["update.channel"].parse(channel)).toBe(channel);
+		for (const bad of ["beta", "DEV", "", 1, null]) expect(() => REGISTRY["update.channel"].parse(bad)).toThrow("update.channel must be one of stable, dev");
+	});
+
 	test("token is a trimmed one-line string, empty by default", () => {
 		expect(REGISTRY["update.token"].default).toBe("");
 		expect(REGISTRY["update.token"].parse("  !/usr/bin/gh auth token ")).toBe("!/usr/bin/gh auth token");

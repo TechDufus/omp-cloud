@@ -73,6 +73,14 @@ describe("versions", () => {
 		expect(compareVersions("0.5.0-rc.1", "0.5.0")).toBeLessThan(0);
 		expect(compareVersions("0.5.0", "0.5.0-rc.1")).toBeGreaterThan(0);
 		expect(compareVersions("0.5.0-rc.2", "0.5.0-rc.1")).toBeGreaterThan(0);
+		// Prerelease identifiers compare as semver's do: numbers by value and before words, fewer identifiers first.
+		expect(compareVersions("0.5.0-rc.10", "0.5.0-rc.9")).toBeGreaterThan(0);
+		expect(compareVersions("0.5.0-rc.2", "0.5.0-rc.10")).toBeLessThan(0);
+		expect(compareVersions("0.5.0-rc.1", "0.5.0-rc")).toBeGreaterThan(0);
+		expect(compareVersions("0.5.0-1", "0.5.0-rc.1")).toBeLessThan(0);
+		expect(compareVersions("0.5.0-beta.3", "0.5.0-rc.1")).toBeLessThan(0);
+		expect(compareVersions("0.5.0-rc.01", "0.5.0-rc.1")).toBe(0);
+		expect(["0.6.0", "0.6.0-rc.10", "0.5.9", "0.6.0-rc.2", "0.6.0-rc.9"].sort(compareVersions)).toEqual(["0.5.9", "0.6.0-rc.2", "0.6.0-rc.9", "0.6.0-rc.10", "0.6.0"]);
 		expect(() => compareVersions("x", "0.5.0")).toThrow("not a version");
 	});
 

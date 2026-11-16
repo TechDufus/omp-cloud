@@ -197,10 +197,11 @@ describe("CHANGELOG", () => {
 		expect(unreleasedSection("# Changelog\n")).toBeNull();
 	});
 
-	test("this repository's CHANGELOG has an Unreleased section and a written section for the current version", () => {
+	test("this repository's CHANGELOG has an Unreleased section and notes for the current version: its own section, or for a prerelease the Unreleased entries", () => {
 		const text = readFileSync(join(REPO_ROOT, "CHANGELOG.md"), "utf8");
 		expect(unreleasedSection(text)).not.toBeNull();
-		expect(extractChangelogSection(text, SERVICE_VERSION)).not.toBeNull();
+		const notes = SERVICE_VERSION.includes("-") ? unreleasedSection(text) : extractChangelogSection(text, SERVICE_VERSION);
+		expect(notes ?? "").not.toBe("");
 	});
 
 	test("releasing moves Unreleased under the version and date and leaves an empty Unreleased above it", () => {
@@ -302,6 +303,22 @@ describe("release", () => {
 		expect(await git("remote")).toBe("");
 	});
 
+	test("a prerelease bumps, commits and tags without touching the changelog, and the final release then takes every entry", async () => {
+		await release(dir, "9.9.9-rc.1", "2026-10-21");
+		expect(await git("log", "-1", "--format=%s")).toBe("release: 9.9.9-rc.1");
+		expect((await git("show", "--name-only", "--format=", "HEAD")).split("\n").sort()).toEqual([".omp-plugin/marketplace.json", "package.json", "plugin/package.json"]);
+		expect(await git("tag", "--list")).toBe("v9.9.9-rc.1");
+		expect(readJson(join(dir, "plugin", "package.json"))).toMatchObject({ version: "9.9.9-rc.1" });
+		expect(readFileSync(join(dir, "CHANGELOG.md"), "utf8")).toBe(CHANGELOG);
+		expect(await git("status", "--porcelain")).toBe("");
+
+		await release(dir, "9.9.9", "2026-10-22");
+		const text = readFileSync(join(dir, "CHANGELOG.md"), "utf8");
+		expect(extractChangelogSection(text, "9.9.9")).toBe("- new thing\n- another thing");
+		expect(extractChangelogSection(text, "9.9.9-rc.1")).toBeNull();
+		expect((await git("tag", "--list")).split("\n")).toEqual(["v9.9.9", "v9.9.9-rc.1"]);
+	});
+
 	test("a dirty tree, an existing tag and an empty Unreleased are refused and leave the repository as it was", async () => {
 		const packageBefore = readFileSync(join(dir, "package.json"), "utf8");
 		writeFileSync(join(dir, "stray.txt"), "x");
@@ -315,6 +332,7 @@ describe("release", () => {
 		writeFileSync(join(dir, "CHANGELOG.md"), "# Changelog\n\n## Unreleased\n\n## 0.4.0\n\n- x\n");
 		await git("commit", "-qam", "empty unreleased");
 		await expect(release(dir, "0.5.0", "2026-10-21")).rejects.toThrow("no entries");
+		await expect(release(dir, "0.5.0-rc.1", "2026-10-21")).rejects.toThrow("no entries");
 		expect(await git("status", "--porcelain")).toBe("");
 		expect(await git("log", "-1", "--format=%s")).toBe("empty unreleased");
 		expect(readFileSync(join(dir, "package.json"), "utf8")).toBe(packageBefore);

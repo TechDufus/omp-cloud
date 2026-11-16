@@ -3,7 +3,7 @@
  * validator. The store keeps only the values that differ from the default, so `service.json` stays bootstrap-only.
  */
 import { parseDeviceName } from "../pairing/names";
-import { DEFAULT_FEED, parseFeedSpec } from "../update/feed-spec";
+import { DEFAULT_FEED, parseFeedSpec, UPDATE_CHANNELS } from "../update/feed-spec";
 import { OMP_UNITS } from "../update/omp-units";
 import { isRecord } from "../guards";
 import { THINKING_LEVELS } from "../store/types";
@@ -186,6 +186,8 @@ export interface SettingValues {
 	"update.mode": (typeof UPDATE_MODES)[number];
 	/** `github:<owner>/<repo>` or an http(s) base URL. */
 	"update.feed": string;
+	/** `stable`: a GitHub feed offers its latest release, never a prerelease; `dev`: its highest version, prereleases included. */
+	"update.channel": (typeof UPDATE_CHANNELS)[number];
 	/** The feed credential: a `!command`, an environment variable name or the token; "" for none. */
 	"update.token": string;
 	/** The service's systemd user unit. */
@@ -504,7 +506,7 @@ export const REGISTRY: Registry = {
 		key: "update.feed",
 		type: "string",
 		default: DEFAULT_FEED,
-		doc: "Where releases come from: github:<owner>/<repo> (its latest GitHub release) or an http(s) base URL that serves release.json and the files (self-hosting, tests).",
+		doc: "Where releases come from: github:<owner>/<repo> (the release update.channel selects) or an http(s) base URL that serves release.json and the files (self-hosting, tests).",
 		parse(raw) {
 			if (typeof raw !== "string") throw new SettingError("update.feed must be a string");
 			try {
@@ -513,6 +515,18 @@ export const REGISTRY: Registry = {
 				throw new SettingError(error instanceof Error ? error.message : String(error));
 			}
 			return raw;
+		},
+	},
+	"update.channel": {
+		key: "update.channel",
+		type: "enum",
+		default: "stable",
+		doc: "Which releases a GitHub feed offers. stable: the latest release, never a prerelease. dev: the highest version among the published releases, prereleases (tags such as v1.2.0-rc.1) included, so a server on dev tests release candidates and still moves to every final release. The service never goes back a version: after a switch from dev to stable it keeps a prerelease until a newer stable release exists. A feed that is a base URL serves one release and ignores this.",
+		choices: UPDATE_CHANNELS,
+		parse(raw) {
+			const channel = UPDATE_CHANNELS.find((choice) => choice === raw);
+			if (channel === undefined) throw new SettingError(`update.channel must be one of ${UPDATE_CHANNELS.join(", ")}`);
+			return channel;
 		},
 	},
 	"update.token": {
