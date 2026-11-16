@@ -1,8 +1,10 @@
 /**
- * `omp-cloud`: the service host's command line. Two subcommands run here (over ssh):
+ * `omp-cloud`: the service host's command line in a checkout (the wrapper `~/.local/bin/omp-cloud` runs this file). Two
+ * subcommands run here (over ssh), and `acp` is handed to the ACP agent (`acp/main.ts`), which owns stdout as its transport:
  *
  *   omp-cloud ssh-pair --name <name> --platform <platform> [--config <path>]
  *   omp-cloud node-join-info [--member <ipv4>] [--config <path>]
+ *   omp-cloud acp
  *
  * `ssh-pair` pairs a device without the offer/approve dance: whoever can run this has a login on the service's account,
  * which is the proof of ownership (the client reaches it over SSH, `/cloud connect user@host`). It needs only `dataDir`
@@ -281,4 +283,11 @@ export async function cliMain(argv: readonly string[]): Promise<void> {
 	}
 }
 
-if (import.meta.main) await cliMain(process.argv.slice(2));
+if (import.meta.main) {
+	const argv = process.argv.slice(2);
+	if (argv[0] === "acp") {
+		const { acpMain } = await import("../acp/main");
+		process.exit(await acpMain(argv.slice(1)));
+	}
+	await cliMain(argv);
+}

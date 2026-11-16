@@ -1,4 +1,5 @@
 import {
+  AppWindow,
   Archive,
   Bot,
   Boxes,
@@ -46,6 +47,7 @@ export const NAV: NavGroup[] = [
       { source: "docs/commands.md", icon: SquareTerminal },
       { source: "docs/cloud-tool.md", icon: Wrench },
       { source: "docs/jobs.md", icon: Layers },
+      { source: "docs/acp.md", icon: AppWindow },
       { source: "docs/archive.md", icon: Archive },
     ],
   },

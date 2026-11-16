@@ -485,6 +485,16 @@ export interface ThreadEvent {
 	text: string;
 }
 
+/** A piece of an assistant message's text while its turn runs (`Store.publishText`): handed to subscribers, never stored. */
+export interface LiveText {
+	turn: number;
+	/** 1-based among the assistant messages the turn's run has streamed. */
+	message: number;
+	/** UTF-16 code units of the message before this piece. */
+	offset: number;
+	text: string;
+}
+
 /** What a device may do: `full` is everything the owner token can; `threads` is threads and events only. */
 export type DeviceAccess = "full" | "threads";
 

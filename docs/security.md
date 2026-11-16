@@ -39,6 +39,16 @@ A cloud agent can be messaged from your omp and can message it back, the way omp
 - **Child jobs are display-only.** There is no remote cancel for them; to stop the work, stop the thread ([Cancelling](jobs.md#cancelling)).
 - **Not verified.** These are descriptions of what the code does, checked by unit tests and the plugin scenario, not an audit; no test tries to break out through the extension or to inject hostile message text into a local session.
 
+## Editors (ACP)
+
+`omp-cloud acp` ([Cloud agents in an editor](acp.md)) is a client of the service, like the plugin, started by an editor as your user.
+
+- **It holds no credential of its own.** It resolves this machine's connection the way the plugin does: the environment, the personal `config.yml`, else the pairing. An editor that can start it can do with your cloud what `/cloud` can; so can anything else that runs as you, which can read the same files. A repository's `.omp-cloud.yml` still cannot set the address or the token.
+- **The editor names the directory, and the first prompt ships it.** The handoff is the plugin's: the repository of the session's directory with its uncommitted work, the `secretFiles` and `secretEnv` you configured, your omp setup and the MCP servers of omp's `mcp.json`, with credential-named files withheld. Opening a session ships nothing; the first prompt does. MCP servers the editor passes are never shipped.
+- **A permission dialog is an answer.** An approval or a push question of the thread opens the editor's permission dialog, and the choice is sent as the answer: `Approve` runs the tool call in the VM, `Push` pushes the result under the [push policy](api.md#push-policy). A dismissed dialog answers nothing.
+- **What it shows is the agent's text.** Replies, tool titles and questions are what the cloud agent wrote, passed to the editor as text; how the editor renders them is the editor's. `/pull` only fetches a branch (and with `merge` fast-forwards a clean working tree), after the same check that the repository is the thread's.
+- **Stdout is the protocol.** The process points its own `stdout` and `console.log` at stderr before it starts, so nothing a module prints can be read as a frame.
+
 ## GitHub App and signing key
 
 Connecting GitHub ([GitHub](github.md)) puts two secrets on the service host and nothing in any VM:

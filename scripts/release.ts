@@ -256,6 +256,24 @@ export function embedPluginPlugin(source: string): Bun.BunPlugin {
 	};
 }
 
+/**
+ * A `Bun.build` plugin that answers `omp-legacy-pi-modules` with an empty registry. omp's extension discovery, which the
+ * ACP agent's handoff bundles (`acp/environment.ts`), imports that module when a legacy pi extension asks for one of the
+ * modules omp bundles, and only omp's own build generates it (`scripts/legacy-pi-virtual-module.ts` of pi-coding-agent):
+ * without an answer the bundle does not resolve. omp-cloud lists extensions and never loads one, so the registry is not
+ * read; if it ever is, omp's own `no bundled module registered` error names the module.
+ */
+export function legacyPiRegistryPlugin(): Bun.BunPlugin {
+	const namespace = "omp-cloud-legacy-pi-registry";
+	return {
+		name: namespace,
+		setup(build) {
+			build.onResolve({ filter: /^omp-legacy-pi-modules$/ }, () => ({ path: "omp-legacy-pi-modules", namespace }));
+			build.onLoad({ filter: /.*/, namespace }, () => ({ contents: "export const BUNDLED_PI_MODULE_LOADERS = {};\n", loader: "js" }));
+		},
+	};
+}
+
 // ---- commands
 
 async function run(command: string[], cwd: string): Promise<string> {
@@ -313,7 +331,7 @@ export async function buildRelease(options: BuildOptions): Promise<ReleaseManife
 				entrypoints: [join(root, "src", "bin.ts")],
 				root,
 				metafile: true,
-				plugins: [embedNativesPlugin(embeddedAddonSource(embedded)), embedPluginPlugin(pluginBundleSource(bundlePath))],
+				plugins: [embedNativesPlugin(embeddedAddonSource(embedded)), embedPluginPlugin(pluginBundleSource(bundlePath)), legacyPiRegistryPlugin()],
 				// Values are string literals the bundler substitutes for the identifiers src/version.ts reads; the build is JSON inside one.
 				define: { __OMP_CLOUD_VERSION__: JSON.stringify(version), __OMP_CLOUD_BUILD__: JSON.stringify(JSON.stringify(build)) },
 				compile: {

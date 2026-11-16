@@ -1,5 +1,5 @@
 import type { Store } from "../store";
-import type { ThreadEvent } from "../store/types";
+import type { LiveText, ThreadEvent } from "../store/types";
 import type { ApiServer } from "./api-server";
 import { ApiError } from "./errors";
 import { intParam } from "./query";
@@ -22,9 +22,19 @@ function parseAfter(req: Request): number {
 	return after;
 }
 
+/** `?text=1` asks for the running turn's reply text too; absent is off. Throws ApiError(400) for any other value. */
+function parseText(req: Request): boolean {
+	const raw = new URL(req.url).searchParams.get("text");
+	if (raw === null) return false;
+	if (raw !== "1") throw new ApiError(400, "text must be 1");
+	return true;
+}
+
 /**
  * GET /api/v1/threads/{id}/events for a thread the caller may read: every stored event above `after`, then the live
- * ones, until the thread is deleted or the client goes away. Throws ApiError(400) for a bad `after` before streaming.
+ * ones, until the thread is deleted or the client goes away. With `?text=1` the reply text of the running turn is sent as
+ * `event: text` messages between them: the message being written whole so far after the backlog, then each piece. Throws
+ * ApiError(400) for a bad `after` or `text` before streaming.
  */
 export function eventStream(
 	store: Store,
@@ -34,6 +44,7 @@ export function eventStream(
 	options: EventStreamOptions = {},
 ): Response {
 	const after = parseAfter(req);
+	const wantsText = parseText(req);
 	// The stream is silent between events; Bun's idle timeout would cut the connection.
 	server?.timeout(req, 0);
 
@@ -44,7 +55,7 @@ export function eventStream(
 			let lastSent = after;
 			let closed = false;
 			let backlogDone = false;
-			const queued: ThreadEvent[] = [];
+			const queued: (ThreadEvent | LiveText)[] = [];
 			let keepalive: NodeJS.Timeout | undefined;
 			let unsubscribe: (() => void) | undefined;
 
@@ -76,6 +87,13 @@ export function eventStream(
 				controller.enqueue(encoder.encode(`id: ${event.seq}\ndata: ${data}\n\n`));
 			};
 
+			// Not an event: no `id:` line, so `Last-Event-ID` never names it.
+			const sendText = (live: LiveText): void => {
+				if (closed) return;
+				const data = JSON.stringify({ turn: live.turn, message: live.message, offset: live.offset, text: live.text });
+				controller.enqueue(encoder.encode(`event: text\ndata: ${data}\n\n`));
+			};
+
 			if (req.signal.aborted) {
 				end();
 				return;
@@ -89,6 +107,14 @@ export function eventStream(
 						else queued.push(event);
 					},
 					deleted: end,
+					...(wantsText
+						? {
+								text: (live: LiveText) => {
+									if (backlogDone) sendText(live);
+									else queued.push(live);
+								},
+							}
+						: {}),
 				});
 				keepalive = setInterval(() => {
 					if (!closed) controller.enqueue(encoder.encode(": keepalive\n\n"));
@@ -97,7 +123,12 @@ export function eventStream(
 					for (const event of page) send(event);
 					page = store.events(threadId, lastSent, PAGE_SIZE);
 				}
-				for (const event of queued) send(event);
+				const snapshot = wantsText ? store.liveText(threadId) : null;
+				if (snapshot !== null) sendText(snapshot);
+				for (const item of queued) {
+					if ("seq" in item) send(item);
+					else sendText(item);
+				}
 				queued.length = 0;
 				backlogDone = true;
 				// Bun sends the response headers with the first chunk; without a backlog the client would wait for a keepalive.

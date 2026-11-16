@@ -134,6 +134,7 @@ const CAPABILITIES: readonly string[] = [
 	"threads.irc",
 	"events.live",
 	"events.children",
+	"events.text",
 	"github.app",
 	"commits.signed",
 	"threads.pr",

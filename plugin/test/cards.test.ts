@@ -24,7 +24,6 @@ import {
 	PlainCard,
 	QUESTIONS,
 	questionCard,
-	threadBranch,
 	threadLabel,
 	type CardAct,
 	type CardActions,
@@ -168,10 +167,6 @@ describe("asCard", () => {
 });
 
 describe("card builders", () => {
-	test("the result branch of a thread", () => {
-		expect(threadBranch(ID)).toBe("omp-cloud/aaaaaak3x9fa");
-	});
-
 	test("questionCard keeps the pending question's fields, the thread's name and the origin", () => {
 		const c = questionCard("tool", ID, "Fix login", pending({ turn: 3, id: 7, ask: 2, remaining: 2, header: "H", text: "q", multi: true, recommended: 1, options: [{ label: "a", description: "da" }, { label: "b", description: "" }] }));
 		expect(c).toEqual({

@@ -9,13 +9,14 @@
  */
 
 import type { TerminalNotification } from "@oh-my-pi/pi-tui";
-import { CARD_TYPE, CARD_VERSION, asCard, cardContent, cardEvents, DETAILS_REPLY_MAX, noticeCard, QUESTIONS, questionCard, threadBranch, threadLabel, type CardDetails, type LaunchCard, type NoticeCard, type TurnCard } from "./cards";
+import { CARD_TYPE, CARD_VERSION, asCard, cardContent, cardEvents, DETAILS_REPLY_MAX, noticeCard, QUESTIONS, questionCard, threadLabel, type CardDetails, type LaunchCard, type NoticeCard, type TurnCard } from "./cards";
 import type { DeliverMode } from "./config";
 import { clip, controlFree, spanBetween, threadHeading, turnCost } from "./format";
 import { isRecord } from "./guards";
 import type { JobSettled } from "./cloud-jobs";
 import type { Inbox, InboxKind } from "./inbox";
 import type { HandoffSummary } from "./launch";
+import { threadBranch } from "./pull";
 import type { WatchSink } from "./watch";
 import type { Host, PendingQuestion, PiHost, ThreadDetail, ThreadEvent, ThreadOrigin, ThreadTurn } from "./types";
 

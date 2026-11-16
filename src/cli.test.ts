@@ -279,6 +279,16 @@ describe("omp-cloud (process)", () => {
 		expect(JSON.parse(unknown.stdout.trimEnd())).toEqual({ ompCloudPair: 1, error: expect.stringContaining('unknown command "frobnicate"') });
 		expect(store.devices("owner")).toEqual([]);
 	});
+
+	test("acp through the checkout entry is the ACP agent: the JSON-RPC answer alone on stdout, exit 0 when stdin closes", async () => {
+		const proc = Bun.spawn(["bun", CLI, "acp"], { env: { ...process.env, OMP_CLOUD_CONFIG: configPath }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+		proc.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } })}\n`);
+		await proc.stdin.end();
+		const [stdout, , code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+		expect(code).toBe(0);
+		expect(stdout.trimEnd().split("\n")).toHaveLength(1);
+		expect(JSON.parse(stdout)).toMatchObject({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 1, agentInfo: { name: "omp-cloud" } } });
+	});
 });
 
 /** The pin as `openssl` computes it, the way the plan's curl check does. */

@@ -282,6 +282,57 @@ describe("live events", () => {
 	});
 });
 
+describe("the running turn's reply text (?text=1)", () => {
+	const piece = (offset: number, text: string): string => `event: text\ndata: ${JSON.stringify({ turn: 1, message: 1, offset, text })}`;
+
+	test("a piece published after the stream opened is an `event: text` message without an id", async () => {
+		const sse = open("?text=1");
+		expect(await sse.seqs(1)).toEqual([1]);
+		store.publishText(threadId, 1, 1, "Hel");
+		store.publishText(threadId, 1, 1, "lo");
+		expect(await sse.message()).toBe(piece(0, "Hel"));
+		expect(await sse.message()).toBe(piece(3, "lo"));
+		// Events keep their place among the pieces.
+		append(1);
+		expect(await sse.seqs(1)).toEqual([2]);
+		await sse.cancel();
+	});
+
+	test("a stream that did not ask gets none", async () => {
+		const sse = open();
+		expect(await sse.seqs(1)).toEqual([1]);
+		store.publishText(threadId, 1, 1, "Hel");
+		append(1);
+		// `seqs` fails on any message that is not an event.
+		expect(await sse.seqs(1)).toEqual([2]);
+		await sse.cancel();
+	});
+
+	test("the message being written when the stream opens arrives once, whole so far, after the backlog", async () => {
+		store.publishText(threadId, 1, 1, "Hel");
+		store.publishText(threadId, 1, 1, "lo");
+		append(1);
+		const sse = open("?text=1");
+		expect(await sse.seqs(2)).toEqual([1, 2]);
+		expect(await sse.message()).toBe(piece(0, "Hello"));
+		store.publishText(threadId, 1, 1, "!");
+		expect(await sse.message()).toBe(piece(5, "!"));
+		await sse.cancel();
+	});
+
+	test.each([["2"], ["0"], ["true"], [""]])("text=%p is 400 before streaming", value => {
+		let error: unknown;
+		try {
+			eventStream(store, threadId, request(`?text=${value}`), undefined);
+		} catch (caught) {
+			error = caught;
+		}
+		expect(error).toBeInstanceOf(ApiError);
+		expect((error as ApiError).status).toBe(400);
+		expect((error as ApiError).message).toBe("text must be 1");
+	});
+});
+
 describe("ending", () => {
 	test("the stream ends after the thread is deleted", async () => {
 		const sse = open();

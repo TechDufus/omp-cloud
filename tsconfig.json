@@ -13,6 +13,6 @@
     "resolveJsonModule": true,
     "jsx": "react-jsx"
   },
-  "include": ["dev/**/*.ts", "src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "plugin/**/*.ts", "infra/**/*.ts"],
+  "include": ["acp/**/*.ts", "dev/**/*.ts", "src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "plugin/**/*.ts", "infra/**/*.ts"],
   "exclude": ["src/dashboard/client"]
 }

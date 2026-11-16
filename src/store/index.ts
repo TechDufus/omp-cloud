@@ -54,6 +54,7 @@ import {
 	MAX_QUESTION_TEXT_BYTES,
 	MAX_QUESTIONS_PER_TURN,
 	MAX_TURNS,
+	type LiveText,
 	type NewDevice,
 	type NewDeviceRecord,
 	type NewThread,
@@ -123,6 +124,8 @@ export interface ThreadListener {
 	event(event: ThreadEvent): void;
 	/** Once, after the thread was deleted. */
 	deleted(): void;
+	/** Each piece of the running turn's reply text as it is published (`Store.publishText`), in order. */
+	text?(text: LiveText): void;
 }
 
 const EVENT_KIND_PATTERN = /^[a-z][a-z0-9_]{0,31}$/;
@@ -193,6 +196,8 @@ interface Subscription {
 export class Store {
 	private readonly listeners = new Map<string, Subscription[]>();
 	private readonly allListeners = new Set<AllThreadsListener>();
+	/** The assistant message each thread's running turn is writing, whole so far (`publishText`); never stored. */
+	private readonly liveTexts = new Map<string, { turn: number; message: number; text: string }>();
 	/** Creates in progress, by owner and `Idempotency-Key`. */
 	private readonly creating = new Set<string>();
 
@@ -498,6 +503,7 @@ export class Store {
 		if (!deleted) return false;
 		const subscriptions = this.listeners.get(threadId) ?? [];
 		this.listeners.delete(threadId);
+		this.liveTexts.delete(threadId);
 		for (const { listener } of subscriptions) {
 			try {
 				listener.deleted();
@@ -961,6 +967,38 @@ export class Store {
 		return () => {
 			this.allListeners.delete(listener);
 		};
+	}
+
+	/**
+	 * Hands a piece of the assistant message the thread's running turn is writing to the thread's subscribers, and keeps the
+	 * message so far for {@link liveText}. Nothing is stored. A `turn` or `message` other than the kept one starts a new message.
+	 */
+	publishText(threadId: string, turn: number, message: number, delta: string): void {
+		if (delta === "") return;
+		const kept = this.liveTexts.get(threadId);
+		const entry = kept !== undefined && kept.turn === turn && kept.message === message ? kept : { turn, message, text: "" };
+		const offset = entry.text.length;
+		entry.text += delta;
+		this.liveTexts.set(threadId, entry);
+		const live: LiveText = { turn, message, offset, text: delta };
+		for (const { listener } of [...(this.listeners.get(threadId) ?? [])]) {
+			try {
+				listener.text?.(live);
+			} catch (err) {
+				console.error("thread listener failed in text():", err);
+			}
+		}
+	}
+
+	/** The assistant message the thread's running turn is writing, whole so far from offset 0; null when none is being written. */
+	liveText(threadId: string): LiveText | null {
+		const entry = this.liveTexts.get(threadId);
+		return entry === undefined ? null : { turn: entry.turn, message: entry.message, offset: 0, text: entry.text };
+	}
+
+	/** Forgets the message {@link publishText} kept: it ended, or its turn did. */
+	endText(threadId: string): void {
+		this.liveTexts.delete(threadId);
 	}
 
 	/** What the owner's turns completed on UTC `day` (`YYYY-MM-DD`) cost in USD, deleted threads' included. */

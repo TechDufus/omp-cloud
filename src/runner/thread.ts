@@ -60,7 +60,7 @@ import { ompAlive, OmpProcess } from "./omp-process";
 import { dropStaleSockets } from "./stale-sockets";
 import { IRC_COMMAND, ircDelivered, ircInCommand, ircPlainText, parseIrcFrame, turnMessage } from "./irc";
 import { classifyPrompt, type TurnOutcome } from "./outcome";
-import { addUsage, type AssistantEnd, assistantEnd, messageText, progressOf, toolEndEventOf, toolStartEventOf, usageEventOf } from "./progress";
+import { addUsage, type AssistantEnd, assistantEnd, messageText, progressOf, textDeltaOf, toolEndEventOf, toolStartEventOf, usageEventOf } from "./progress";
 import { downloadBlob, ompLaunchArgs, provisionVm, shipIrcExtension, threadMaskEntries, uploadBlob } from "./provision";
 import { NOT_PUSHED, PushStep, pullRequestsOf, type PushRecord } from "./push";
 import { exportSession, exportSessionId } from "./session-export";
@@ -245,6 +245,9 @@ interface RunningTurn {
 	last: AssistantEnd | null;
 	/** The last non-empty assistant text of this turn: its reply. */
 	lastText: string;
+	/** Assistant messages of this run whose text was published live (`Store.publishText`), and whether one is being written. */
+	textMessage: number;
+	textOpen: boolean;
 	/** Frames of this turn may have been missed (a redelivery, a lost stream): the reply is read back from omp when no text was seen. */
 	eventsLost: boolean;
 	/** Set once omp acknowledged the prompt. */
@@ -671,6 +674,7 @@ export class ThreadRunner {
 			rt.clock.stop();
 			for (const open of rt.asks.values()) clearTimeout(open.timer);
 			rt.asks.clear();
+			this.env.store.endText(this.id);
 			this.#running = null;
 		}
 	}
@@ -694,6 +698,8 @@ export class ThreadRunner {
 			context: null,
 			last: null,
 			lastText: "",
+			textMessage: 0,
+			textOpen: false,
 			eventsLost: false,
 			promptId: undefined,
 			sent: false,
@@ -1602,11 +1608,23 @@ export class ThreadRunner {
 		if (this.#live !== live) return;
 		this.#children.delivered(this.#childTurn(), event);
 		if (rt === null) return;
+		const delta = textDeltaOf(event);
+		if (delta !== "") {
+			if (!rt.textOpen) {
+				rt.textOpen = true;
+				rt.textMessage++;
+			}
+			this.env.store.publishText(this.id, rt.turn.id, rt.textMessage, delta);
+		}
 		const progress = progressOf(event);
 		if (progress !== null) this.#event(progress.kind, progress.text, rt.turn.id);
 		if (isRecord(event) && event.type === "message_end") {
 			const end = assistantEnd(event.message);
 			if (end !== null) {
+				if (rt.textOpen) {
+					rt.textOpen = false;
+					this.env.store.endText(this.id);
+				}
 				rt.requests++;
 				rt.usage = addUsage(rt.usage, end.usage);
 				rt.last = end;

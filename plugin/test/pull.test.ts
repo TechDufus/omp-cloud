@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { threadBranch } from "../src/cards";
-import { applyPull, describePull, isClean, pullBundle, type ApplyInput } from "../src/pull";
+import { applyPull, describePull, isClean, pullBundle, threadBranch, type ApplyInput } from "../src/pull";
 import { CloudError } from "../src/errors";
 import { git, gitRaw } from "../src/snapshot";
 import { cleanup, commitFile, configureRepo, remoteFixture, REMOTE_URL, tmp } from "./helpers";
@@ -27,6 +26,10 @@ async function cloudResult(remoteBare: string, root: string, files: Record<strin
 }
 
 describe("pullBundle", () => {
+	test("the result branch of a thread", () => {
+		expect(threadBranch("aaaaaak3x9fa")).toBe("omp-cloud/aaaaaak3x9fa");
+	});
+
 	test("creates omp-cloud/<thread> from a result bundle without touching the checked-out branch", async () => {
 		const f = await remoteFixture();
 		const res = await cloudResult(f.bare, f.root, { "hello.txt": "hello\n" }, "r1");

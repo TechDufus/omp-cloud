@@ -834,10 +834,10 @@ describe("access levels", () => {
 		expect((await loopback("PATCH", "/api/v1/devices")).status).toBe(404);
 	});
 
-	test("whoami lists the access in the capabilities, and the API revision is 6", async () => {
+	test("whoami lists the access in the capabilities, and the API revision is 7", async () => {
 		const body = await bodyOf(await loopback("GET", "/api/v1/whoami"));
 		expect(body.capabilities).toContain("devices.access");
-		expect((body.service as Record<string, unknown>).api).toBe(6);
+		expect((body.service as Record<string, unknown>).api).toBe(7);
 	});
 });
 

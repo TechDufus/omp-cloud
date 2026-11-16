@@ -12,7 +12,7 @@ import { openPath } from "@oh-my-pi/pi-coding-agent/utils/open";
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { fullAccess, youLine } from "./access";
 import { capacityLine, readCapacity } from "./capacity";
-import { DETAILS_REPLY_MAX, inventoryCard, loginCard, noticeCard, patternProviders, QUESTIONS, threadBranch, updateCard, type CardAct, type CardActions, type NoticeCard, type TuiModule } from "./cards";
+import { DETAILS_REPLY_MAX, inventoryCard, loginCard, noticeCard, patternProviders, QUESTIONS, updateCard, type CardAct, type CardActions, type NoticeCard, type TuiModule } from "./cards";
 import { cloudLines, knownClouds, readConfig, resolveConnection, setDefaultCloud, statusLines, tilde, type CloudConfig, type CloudsView, type Connection, type ConnectionSource, type DeliverMode, type Env } from "./config";
 import { CLOUD_SOURCES, completions, parseCommand, shortName, USAGE_CONNECT, USAGE_LOGIN, type Command, type Completion } from "./commands";
 import { runConnect, type ConnectOutcome } from "./connect";
@@ -33,7 +33,7 @@ import { launchBatch, modelServed, sessionModelOf, type LaunchedThread } from ".
 import { loginHint, loginLines, loginListLines, runLogin, serverHostOf } from "./login";
 import { PairComponent, type PairOutcome } from "./pair";
 import { refusePairingCode } from "./pairing";
-import { applyPull, isClean, notInRepository, pullBundle, type Applied } from "./pull";
+import { applyPull, isClean, notInRepository, pullBundle, threadBranch, type Applied } from "./pull";
 import { repoKey } from "./repo-key";
 import { syncConversation, type SyncOutcome } from "./session-sync";
 import { git, gitRaw, resolveRemote } from "./snapshot";

@@ -31,11 +31,12 @@ import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry
 import * as sessionLoader from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CloudClient } from "./api";
-import { AGENT_IDS, threadBranch } from "./cards";
+import { AGENT_IDS } from "./cards";
 import { cloudJobId } from "./cloud-job";
 import { CloudError, cloudErrorText } from "./errors";
 import { IRC_OUT_KIND } from "./events";
 import { clip, spanBetween } from "./format";
+import { threadBranch } from "./pull";
 import { isRecord } from "./guards";
 import { readArchiveJournal } from "./session-sync";
 import { taskResultText } from "./task-result";

@@ -190,6 +190,7 @@ More in [`docs/security.md`](docs/security.md).
 | [`/cloud` commands](docs/commands.md) | The command reference, the inbox and tray, cards and buttons, slash commands in the cloud agent |
 | [The `cloud` tool](docs/cloud-tool.md) | What omp's model can do: subagent-style delegation, plan mode, picking a cloud, and scratch threads |
 | [Cloud agents as omp jobs](docs/jobs.md) | Job tiles, `wait`, `agent://` and messaging, how results arrive, cancelling |
+| [Cloud agents in an editor (ACP)](docs/acp.md) | `omp-cloud acp` for editors that host Agent Client Protocol agents: sessions as threads, questions, `/pull`, loading |
 | [Configuration](docs/configuration.md) | The client config files and `service.json` |
 | [GitHub](docs/github.md) | The GitHub App, one-hour tokens, Verified commits, pull requests |
 | [Secrets and MCP servers](docs/secrets-and-mcp.md) | Secrets scoped to repositories, MCP servers through the service, and what stays on your machine |

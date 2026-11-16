@@ -63,19 +63,26 @@
  *     still obeys `policy.egress`; a changed `bun.lock` prepares a new environment (a new stamp). The scenario deletes the snapshots it made
  *  AG preview: `GET /threads/{id}/ports/8000/` relays a web server the agent started in the VM; once the idle VM is paused the same GET resumes
  *     it and answers again; port 49983 is 400 and a websocket upgrade is 501
+ *  AH acp: an ACP host (`omp-cloud acp`, `test/acp-client.ts`) with an empty home starts a session in a repository with uncommitted work: the
+ *     first prompt hands it off (the thread's `ref` is the session id) and shows the tool call and the reply; a long reply arrives as it is
+ *     written, on the agent's stream and as `event: text` messages of `GET /events?text=1`; a turn that changes a file names the result
+ *     branch and `/pull` fetches it; an `ask` question ends the prompt and the next prompt answers it; a second agent process reloads the
+ *     session (`session/load`). With `OMP_CLOUD_ACP_BIN=<release binary>` step AH2 runs a first prompt through that binary too
  */
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import type { SessionUpdate } from "@oh-my-pi/pi-utils/acp";
 import { Sandbox } from "e2b";
 import { GatewayClients } from "../src/gateway/clients";
 import { isRecord } from "../src/guards";
 import { hostOmp } from "../src/omp-version";
 import { exportSessionId } from "../src/runner/session-export";
 import { API_VERSION } from "../src/version";
+import { type AcpAgentProcess, startAcpAgent } from "./acp-client";
 import { expectContains, expectEqual, Report, StepFailed } from "./report";
 import { describeRequest, type FakeProvider, longReply, modelsYaml, startFakeProvider } from "./fake-provider";
 import { type GitHttpServer, serveGitHttp } from "./git-http";
@@ -495,6 +502,45 @@ function expectMetrics(thread: Json, label: string): void {
 	const context = obj(metrics.context, `${label}: metrics.context`);
 	if (!(Number(context.tokens) > 0)) throw new Error(`${label}: metrics.context.tokens is not above 0: ${JSON.stringify(context)}`);
 	if (!(Number(context.window) > 0)) throw new Error(`${label}: metrics.context.window is unknown: ${JSON.stringify(context)}`);
+}
+
+/** Sends `prompt` to an ACP session and waits for its answer: how it ended and the updates it produced. An agent that does not answer in `timeoutMs` fails the step. */
+async function acpPrompt(agent: AcpAgentProcess, sessionId: string, prompt: string, timeoutMs = 300_000): Promise<{ stop: string; updates: SessionUpdate[] }> {
+	const from = agent.updates.length;
+	const late = Promise.withResolvers<never>();
+	const timer = setTimeout(() => late.reject(new Error(`the ACP agent did not answer ${JSON.stringify(prompt)} within ${timeoutMs / 1000} s`)), timeoutMs);
+	try {
+		const answer = await Promise.race([agent.connection.prompt({ sessionId, prompt: [{ type: "text", text: prompt }] }), late.promise]);
+		return { stop: answer.stopReason, updates: agent.updates.slice(from).map(notification => notification.update) };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** The text of the chunks of `kind`, joined as an editor joins them. */
+function acpText(updates: readonly SessionUpdate[], kind: "agent_message_chunk" | "user_message_chunk"): string {
+	return updates
+		.map(update =>
+			(update.sessionUpdate === "agent_message_chunk" || update.sessionUpdate === "user_message_chunk") && update.sessionUpdate === kind && update.content.type === "text"
+				? update.content.text
+				: "",
+		)
+		.join("");
+}
+
+/** Reads an event stream opened with `?text=1` to its end and adds the payload of every `event: text` message to `pieces`. */
+async function collectLiveText(body: ReadableStream<Uint8Array>, pieces: Json[]): Promise<void> {
+	const decoder = new TextDecoder();
+	let buffer = "";
+	for await (const chunk of body) {
+		buffer += decoder.decode(chunk, { stream: true });
+		for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
+			const lines = buffer.slice(0, end).split("\n");
+			buffer = buffer.slice(end + 2);
+			const data = lines.find(line => line.startsWith("data: "));
+			if (lines.includes("event: text") && data !== undefined) pieces.push(obj(JSON.parse(data.slice("data: ".length)), "live text"));
+		}
+	}
 }
 
 async function run(): Promise<void> {
@@ -1836,7 +1882,7 @@ async function run(): Promise<void> {
 		expectEqual("service.api", service.api, API_VERSION);
 		if (text(service.name) === "") throw new Error(`whoami.service.name is empty: ${JSON.stringify(service)}`);
 		expectEqual("update.mode", obj(who.update, "whoami.update").mode, "notify");
-		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.preview", "threads.setup", "threads.readonly", "threads.subagent", "devices.access", "logins.list", "capacity"];
+		const expected = ["threads.paging", "threads.meta", "threads.idempotency", "threads.scratch", "turns.reply", "events.json", "inspect", "messages.interrupt", "questions.meta", "threads.irc", "events.live", "events.children", "events.text", "github.app", "commits.signed", "threads.pr", "secrets.store", "mcp.proxy", "threads.preview", "threads.setup", "threads.readonly", "threads.subagent", "devices.access", "logins.list", "capacity"];
 		expectEqual("capabilities", JSON.stringify((Array.isArray(who.capabilities) ? who.capabilities.map(text) : []).sort()), JSON.stringify([...expected].sort()));
 		const limits = obj(who.limits, "whoami.limits");
 		expectEqual("limits", JSON.stringify([limits.maxMessageBytes, limits.maxAnswerBytes, limits.listMax, limits.maxTurns]), JSON.stringify([32768, 4000, 200, 200]));
@@ -1995,6 +2041,127 @@ async function run(): Promise<void> {
 			threadId = previous;
 		}
 	});
+
+	/** What an ACP agent runs against: an empty home (no omp and no omp-cloud configuration) and a repository with one commit and an uncommitted `wip.txt`. */
+	const acpWorkspace = async (name: string): Promise<{ env: Record<string, string>; repo: string }> => {
+		const home = join(dir, `${name}-home`);
+		const repo = join(dir, `${name}-repo`);
+		await mkdir(home, { recursive: true });
+		await Bun.$`git init -q -b main ${repo}`.quiet();
+		await commitFile(repo, "README.md", `# ${name}\n`, "initial");
+		await writeFile(join(repo, "wip.txt"), `wip-${name}\n`);
+		return { env: { HOME: home, OMP_CLOUD_URL: origin, OMP_CLOUD_TOKEN: token, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }, repo };
+	};
+
+	/** The one thread whose `ref` is the ACP session id, started from `repo`; it is the scenario's to clean up from here on. */
+	const acpThreadOf = async (sessionId: string, repo: string): Promise<string> => {
+		const listed = await listThreads(`ref=${sessionId}`);
+		expectEqual("threads with the session's ref", listed.threads.length, 1);
+		expectEqual("the thread's workspace", text(listed.threads[0]?.workspace), repo);
+		const id = text(listed.threads[0]?.id);
+		createdThreads.push(id);
+		return id;
+	};
+
+	await report.step("AH acp: an ACP host starts, follows, answers, pulls and reloads a thread", async () => {
+		const { env, repo } = await acpWorkspace("acp");
+		const agent = startAcpAgent(env);
+		const again = startAcpAgent(env);
+		const exits: number[] = [];
+		try {
+			expectEqual("agentInfo.name", (await agent.connection.initialize({ protocolVersion: 1 })).agentInfo?.name, "omp-cloud");
+			const { sessionId } = await agent.connection.newSession({ cwd: repo, mcpServers: [] });
+			if (!/^acp-[0-9a-f]{32}$/.test(sessionId)) throw new Error(`the session id is not acp-<32 hex>: ${JSON.stringify(sessionId)}`);
+
+			// The first prompt creates the thread from the repository as it stands; the first VM of a thread takes its time.
+			const first = await acpPrompt(agent, sessionId, "BASH: cat wip.txt", 600_000);
+			expectEqual("first prompt", first.stop, "end_turn");
+			expectContains("the uncommitted file reached the VM", acpText(first.updates, "agent_message_chunk"), "DONE=wip-acp");
+			const call = first.updates.find(update => update.sessionUpdate === "tool_call" && update.kind === "execute");
+			if (call === undefined || call.sessionUpdate !== "tool_call") throw new Error(`no tool call of kind execute among ${JSON.stringify(first.updates.map(update => update.sessionUpdate))}`);
+			if (!first.updates.some(update => update.sessionUpdate === "tool_call_update" && update.toolCallId === call.toolCallId && update.status === "completed")) {
+				throw new Error(`tool call ${call.toolCallId} was never completed`);
+			}
+			const thread = await acpThreadOf(sessionId, repo);
+			const latestTurn = async (): Promise<number> => Number(latestOf(await apiJson("GET", `/threads/${thread}`, 200))?.id);
+
+			// A long reply streams: to the agent, and as `event: text` messages to a plain client of the event stream. They are never
+			// replayed, so every one this stream gets belongs to the turn that runs from now on.
+			const abort = new AbortController();
+			const pieces: Json[] = [];
+			const stream = await fetch(`${origin}/api/v1/threads/${thread}/events?text=1`, { headers: authHeaders, signal: abort.signal });
+			if (stream.status !== 200 || stream.body === null) throw new Error(`events?text=1: expected 200 with a body, got ${stream.status}`);
+			const reading = collectLiveText(stream.body, pieces).catch((error: unknown) => {
+				if (!abort.signal.aborted) throw error;
+			});
+			try {
+				const long = await acpPrompt(agent, sessionId, "LONG:3000");
+				expectEqual("long prompt", long.stop, "end_turn");
+				expectEqual("the agent's reply text", acpText(long.updates, "agent_message_chunk").trim(), longReply(3000));
+				const streamed = (): string => pieces.map(piece => text(piece.text)).join("").trim();
+				for (const deadline = Date.now() + 10_000; streamed() !== longReply(3000) && Date.now() < deadline; ) await Bun.sleep(POLL_MS);
+				if (pieces.length === 0) throw new Error("the event stream sent no `event: text` message");
+				expectEqual("the turns of the live text", JSON.stringify([...new Set(pieces.map(piece => piece.turn))]), JSON.stringify([await latestTurn()]));
+				expectEqual("the live text of the event stream", streamed(), longReply(3000));
+			} finally {
+				abort.abort();
+				await reading;
+			}
+
+			// A turn that changes a file names its result, and /pull brings the branch into the editor's repository.
+			const wrote = await acpPrompt(agent, sessionId, "BASH: printf acp > acp.txt");
+			expectEqual("writing prompt", wrote.stop, "end_turn");
+			const result = `result-${await latestTurn()}`;
+			if (!wrote.updates.some(update => update.sessionUpdate === "tool_call" && update.toolCallId === result)) {
+				throw new Error(`no tool call ${result} among ${JSON.stringify(wrote.updates.filter(update => update.sessionUpdate === "tool_call"))}`);
+			}
+			const pulled = await acpPrompt(agent, sessionId, "/pull");
+			expectEqual("/pull", pulled.stop, "end_turn");
+			expectContains("/pull text", acpText(pulled.updates, "agent_message_chunk"), `omp-cloud/${thread}`);
+			expectEqual("the pulled branch's file", (await git(repo, "show", `omp-cloud/${thread}:acp.txt`)).trim(), "acp");
+
+			// The cloud agent's question ends the prompt; the next prompt is its answer.
+			const asked = await acpPrompt(agent, sessionId, "ASK: color");
+			expectEqual("asking prompt", asked.stop, "end_turn");
+			expectContains("the question's first option", acpText(asked.updates, "agent_message_chunk"), "1. red");
+			expectContains("the question's second option", acpText(asked.updates, "agent_message_chunk"), "2. blue");
+			const answered = await acpPrompt(agent, sessionId, "blue");
+			expectEqual("answering prompt", answered.stop, "end_turn");
+			expectContains("the reply to the answer", acpText(answered.updates, "agent_message_chunk"), "ANSWER=");
+
+			// Another agent process loads the session by its id and replays it.
+			await again.connection.initialize({ protocolVersion: 1 });
+			await again.connection.loadSession({ sessionId, cwd: repo, mcpServers: [] });
+			const replayed = again.updates.map(notification => notification.update);
+			expectContains("the replayed prompts", acpText(replayed, "user_message_chunk"), "LONG:3000");
+			expectContains("the replayed replies", acpText(replayed, "agent_message_chunk"), "DONE=wip-acp");
+			await waitGone(thread);
+		} finally {
+			// A failure above is the step's failure, whatever the agents exit with.
+			exits.push(await agent.close(), await again.close());
+		}
+		expectEqual("the agents' exit codes", JSON.stringify(exits), JSON.stringify([0, 0]));
+	});
+
+	const acpBinary = process.env.OMP_CLOUD_ACP_BIN ?? "";
+	if (acpBinary !== "") {
+		await report.step("AH2 acp from a release binary: the first prompt hands the workspace off and its reply comes back", async () => {
+			const { env, repo } = await acpWorkspace("acpbin");
+			const agent = startAcpAgent(env, [resolve(acpBinary), "acp"]);
+			const exits: number[] = [];
+			try {
+				expectEqual("agentInfo.name", (await agent.connection.initialize({ protocolVersion: 1 })).agentInfo?.name, "omp-cloud");
+				const { sessionId } = await agent.connection.newSession({ cwd: repo, mcpServers: [] });
+				const first = await acpPrompt(agent, sessionId, "BASH: cat wip.txt", 600_000);
+				expectEqual("first prompt", first.stop, "end_turn");
+				expectContains("the uncommitted file reached the VM", acpText(first.updates, "agent_message_chunk"), "DONE=wip-acpbin");
+				await waitGone(await acpThreadOf(sessionId, repo));
+			} finally {
+				exits.push(await agent.close());
+			}
+			expectEqual("the agent's exit code", JSON.stringify(exits), JSON.stringify([0]));
+		}, () => acpBinary);
+	}
 }
 
 let failure: unknown = null;

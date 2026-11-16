@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { MAX_STRUCTURED_EVENT_CHARS } from "../store/types";
-import { addUsage, assistantEnd, messageText, progressOf, toolEndEventOf, toolStartEventOf, usageEventOf } from "./progress";
+import { addUsage, assistantEnd, messageText, progressOf, textDeltaOf, toolEndEventOf, toolStartEventOf, usageEventOf } from "./progress";
 
 const assistant = (content: unknown, extra: Record<string, unknown> = {}) => ({ role: "assistant", content, ...extra });
 
@@ -107,6 +107,19 @@ describe("messageText", () => {
 		expect(messageText({ content: [{ type: "text", text: "a" }, { type: "image" }, { type: "text", text: "b" }] })).toBe("ab");
 		expect(messageText({ content: 5 })).toBe("");
 		expect(messageText(null)).toBe("");
+	});
+});
+
+describe("textDeltaOf", () => {
+	const update = (role: string, assistantMessageEvent: unknown) => ({ type: "message_update", message: { role }, assistantMessageEvent });
+
+	test("is the delta of an assistant text_delta frame and empty for everything else", () => {
+		expect(textDeltaOf(update("assistant", { type: "text_delta", contentIndex: 0, delta: "Hel" }))).toBe("Hel");
+		expect(textDeltaOf(update("assistant", { type: "thinking_delta", contentIndex: 0, delta: "hmm" }))).toBe("");
+		expect(textDeltaOf(update("user", { type: "text_delta", contentIndex: 0, delta: "Hel" }))).toBe("");
+		expect(textDeltaOf(update("assistant", { type: "text_delta", contentIndex: 0, delta: 5 }))).toBe("");
+		expect(textDeltaOf({ type: "message_end", message: { role: "assistant" } })).toBe("");
+		expect(textDeltaOf("message_update")).toBe("");
 	});
 });
 

@@ -340,6 +340,16 @@ export interface ThreadEvent {
 	text: string;
 }
 
+/** A piece of an assistant message's text while its turn runs (`events.text`): sent on the event stream, never stored. */
+export interface LiveText {
+	turn: number;
+	/** 1-based among the assistant messages the turn's run has streamed. */
+	message: number;
+	/** UTF-16 code units of the message before this piece. */
+	offset: number;
+	text: string;
+}
+
 /** One page of `GET /threads`: newest first. `next` is the opaque cursor for the following page, null at the end. */
 export interface ThreadsPage {
 	threads: ThreadSummary[];

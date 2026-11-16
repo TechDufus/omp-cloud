@@ -1,13 +1,13 @@
 /** The operations of the `cloud` tool. Each takes validated parameters and returns the text lines and the typed details of its result. */
 
 import { answerAsModel, HUMAN_ANSWER_HINT } from "./answer";
-import { cloudFence, inventoryThread, threadBranch } from "./cards";
+import { cloudFence, inventoryThread } from "./cards";
 import type { CloudJobThread } from "./cloud-job";
 import { CloudError, cloudErrorText } from "./errors";
 import { clip, diffstat, formatAge, formatCost, formatTokens, metricsLine, plural, pushedText, threadTag, truncateText } from "./format";
 import { asCloudError, MAX_BATCH_TASKS, modelServed, type LaunchFailure, type LaunchProgress, type LaunchTask } from "./launch";
 import { AGENT_PORT } from "./commands";
-import type { PullApply } from "./pull";
+import { threadBranch, type PullApply } from "./pull";
 import { repoLabel } from "./repo-key";
 import { asEnvelope, type AgentsDetail, type DelegateDetail, type DelegatedThread, type OpDetails, type OpOutput, type ThreadFailure, type ToolCloud, type ToolParams, type ToolSession } from "./tool";
 import { updateLine } from "./update";

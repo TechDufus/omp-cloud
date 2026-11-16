@@ -18,7 +18,21 @@ describe("omp-cloud entry (src/bin.ts)", () => {
 	test("--help lists every command", async () => {
 		const { code, out } = await bin("--help");
 		expect(code).toBe(0);
-		for (const command of ["serve", "setup", "doctor", "login", "uninstall", "ssh-pair", "update", "install", "backup", "version"]) expect(out).toContain(`  ${command}`);
+		for (const command of ["serve", "setup", "doctor", "login", "acp", "uninstall", "ssh-pair", "update", "install", "backup", "version"]) expect(out).toContain(`  ${command}`);
+	});
+
+	test("acp answers ACP on stdio: stdout is the JSON-RPC answer and nothing else, and it exits 0 when stdin closes", async () => {
+		const proc = Bun.spawn(["bun", BIN, "acp"], { env: { ...process.env, OMP_CLOUD_CONFIG: "" }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+		proc.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } })}\n`);
+		await proc.stdin.end();
+		const [out, , code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+		expect(code).toBe(0);
+		expect(out.trimEnd().split("\n")).toHaveLength(1);
+		expect(JSON.parse(out)).toMatchObject({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 1, agentInfo: { name: "omp-cloud", version: SERVICE_VERSION } } });
+	});
+
+	test("acp takes no arguments", async () => {
+		expect(await bin("acp", "--bogus")).toEqual({ code: 2, out: "", err: "usage: omp-cloud acp\n" });
 	});
 
 	test("an unknown command exits 2 and names it; nothing is started", async () => {

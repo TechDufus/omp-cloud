@@ -19,6 +19,7 @@ usage: omp-cloud [command] [options]
                                          set up this machine as a vibemon machine of that omp-cloud server
   doctor [--json]                        check the host and the stack, with a fix beside each failure
   login [<provider>]                     log the service in to a model provider
+  acp                                    speak ACP (Agent Client Protocol) on stdio: an ACP host such as Zed runs cloud agents through it
   uninstall [--purge] [--yes] [--checkout]
                                          remove what setup installed (--purge also deletes data and vibemon); backups are kept
   serve [--config <path>]                run the service (the default with no command)
@@ -94,6 +95,10 @@ async function run(argv: readonly string[]): Promise<number | undefined> {
 		case "login": {
 			const { loginMain } = await import("./setup/login");
 			return loginMain(rest);
+		}
+		case "acp": {
+			const { acpMain } = await import("../acp/main");
+			return acpMain(rest);
 		}
 		case "version":
 			console.log(`omp-cloud ${SERVICE_VERSION} (${BUILD.id})`);

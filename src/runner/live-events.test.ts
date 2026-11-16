@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GatewayClients } from "../gateway/clients";
 import type { Store } from "../store";
-import type { ThreadEvent, Turn } from "../store/types";
+import type { LiveText, ThreadEvent, Turn } from "../store/types";
 import { type Frame, fakeVm, fakeVmon, openEnv, promptResult, response, sandboxWithOmp, type Script, seedThread, until } from "./test-support";
 import { type ThreadEnv, ThreadRunner } from "./thread";
 
@@ -46,9 +46,13 @@ function message(content: string, usage: Record<string, unknown>, stopReason: st
 	};
 }
 
-/** Runs one turn of a fake omp that answers its prompt with `frames`, and returns the turn once it ended with the events it appended. */
-async function runTurn(frames: Frame[]): Promise<{ turn: Turn; events: ThreadEvent[] }> {
+/**
+ * Runs one turn of a fake omp that answers its prompt with `frames`, and returns the turn once it ended with the events it
+ * appended. `seeded` runs with the thread's id before the turn starts.
+ */
+async function runTurn(frames: Frame[], seeded: (id: string) => void = () => {}): Promise<{ id: string; turn: Turn; events: ThreadEvent[] }> {
 	const id = await seedThread(store, gateway, 1);
+	seeded(id);
 	const script: Script = promptId => [response(promptId, "prompt"), ...frames, promptResult(promptId, true)];
 	const omp = sandboxWithOmp(fakeVm({ dirty: false, head: "a".repeat(40) }), script);
 	const runner = new ThreadRunner({ ...env, vmon: fakeVmon(omp.sandbox).vmon }, id);
@@ -58,7 +62,7 @@ async function runTurn(frames: Frame[]): Promise<{ turn: Turn; events: ThreadEve
 	await until(() => ["done", "failed"].includes(store.turns(id).find(t => t.id === turn.id)?.state ?? ""), "the turn to end");
 	const ended = store.turns(id).find(t => t.id === turn.id);
 	if (ended === undefined) throw new Error("the turn vanished");
-	return { turn: ended, events: store.events(id, 0, 1000) };
+	return { id, turn: ended, events: store.events(id, 0, 1000) };
 }
 
 function json(event: ThreadEvent): Record<string, unknown> {
@@ -169,5 +173,27 @@ describe("live progress events", () => {
 		expect(spawned).toHaveLength(16);
 		expect(spawned[15]).toEqual({ agent: id(15, "a"), job: id(15, "j") });
 		expect(json(finished)).toMatchObject({ async: true, detached: true });
+	});
+
+	test("the text deltas of an assistant message reach the thread's subscribers as it is written, and nothing of them is stored", async () => {
+		const delta = (piece: string): Frame => ({
+			type: "message_update",
+			message: { role: "assistant" },
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: piece },
+		});
+		const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } };
+		const heard: LiveText[] = [];
+		const { id, turn, events } = await runTurn([delta("Hel"), delta("lo"), message("Hello", usage, "stop"), delta("Bye"), message("Bye", usage, "stop")], id => {
+			store.subscribe(id, { event: () => {}, deleted: () => {}, text: live => void heard.push(live) });
+		});
+		expect(turn.state).toBe("done");
+		expect(heard).toEqual([
+			{ turn: turn.id, message: 1, offset: 0, text: "Hel" },
+			{ turn: turn.id, message: 1, offset: 3, text: "lo" },
+			{ turn: turn.id, message: 2, offset: 0, text: "Bye" },
+		]);
+		expect(events.filter(event => event.turn === turn.id && event.kind === "assistant").map(event => event.text)).toEqual(["Hello", "Bye"]);
+		expect(events.some(event => event.kind === "text")).toBe(false);
+		expect(store.liveText(id)).toBeNull();
 	});
 });

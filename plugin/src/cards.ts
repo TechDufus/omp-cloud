@@ -288,10 +288,6 @@ export function asCard(details: unknown): CardDetails | undefined {
 // Builders from API data
 // ---------------------------------------------------------------------------
 
-export function threadBranch(thread: string): string {
-	return `omp-cloud/${thread}`;
-}
-
 /** Providers of `provider/*` patterns (and exact `provider/id` entries). */
 export function patternProviders(patterns: readonly string[]): string[] {
 	return [...new Set(patterns.map(p => p.split("/")[0] ?? "").filter(p => p !== ""))];

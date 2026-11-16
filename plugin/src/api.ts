@@ -14,6 +14,7 @@ import type {
 	EventsPage,
 	FileResult,
 	HandoffRequest,
+	LiveText,
 	Login,
 	LoginList,
 	OfferState,
@@ -53,6 +54,7 @@ import {
 	parseFile,
 	parseLogin,
 	parseLoginList,
+	parseLiveText,
 	parseOfferState,
 	parsePairingOffer,
 	parseQuestion,
@@ -95,6 +97,11 @@ export interface EventStreamOptions extends CallOptions {
 	idleMs?: number;
 	/** Called once when the response is open, before the first event is read: contact with the service is proven. */
 	onOpen?: () => void;
+	/**
+	 * Asks the service for the running turn's reply text (`events.text`) and is called for each piece, in stream order between
+	 * the yielded events. A service without the capability ignores the request and sends none.
+	 */
+	onText?: (text: LiveText) => void;
 }
 
 /** `GET /threads` filters (`threads.paging`; a service without it ignores them and answers its newest 50). */
@@ -483,7 +490,7 @@ export class CloudClient {
 		const signal = opts.signal ? AbortSignal.any([opts.signal, ctrl.signal]) : ctrl.signal;
 		const headers: Record<string, string> = { Accept: "text/event-stream" };
 		if (opts.lastEventId !== undefined) headers["Last-Event-ID"] = String(opts.lastEventId);
-		const search = opts.after !== undefined ? `?after=${opts.after}` : "";
+		const search = query({ after: opts.after, text: opts.onText ? 1 : undefined });
 		const call: Call = { mode: "stream", headers, signal, timeoutMs: 0 };
 		const res = await this.#run(call, () => this.#exchange("GET", `/api/v1/threads/${encodeURIComponent(id)}/events${search}`, call));
 		const failed = { repeatable: true, target: this.#base };
@@ -514,9 +521,14 @@ export class CloudClient {
 					clearTimeout(timer);
 				}
 				for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
-					const event = parseSseMessage(buffer.slice(0, end));
+					const block = buffer.slice(0, end);
 					buffer = buffer.slice(end + 2);
-					if (event) yield event;
+					const live = opts.onText ? parseSseText(block) : undefined;
+					if (live) opts.onText?.(live);
+					else {
+						const event = parseSseMessage(block);
+						if (event) yield event;
+					}
 				}
 			}
 		} catch (e) {
@@ -729,6 +741,22 @@ export function parseSseMessage(block: string): ThreadEvent | undefined {
 	if (data.length === 0) return undefined;
 	try {
 		return parseEvent(JSON.parse(data.join("\n")));
+	} catch {
+		return undefined;
+	}
+}
+
+/** The piece of reply text of one SSE `event: text` message, or undefined when the message is not one. */
+export function parseSseText(block: string): LiveText | undefined {
+	const data: string[] = [];
+	let named = false;
+	for (const line of block.split("\n")) {
+		if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+		else if (line === "event: text" || line === "event:text") named = true;
+	}
+	if (!named || data.length === 0) return undefined;
+	try {
+		return parseLiveText(JSON.parse(data.join("\n")));
 	} catch {
 		return undefined;
 	}

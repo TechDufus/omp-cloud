@@ -1,6 +1,5 @@
 import { mkdir, readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { threadBranch } from "./cards";
 import { CloudError } from "./errors";
 import { normalizeRemote, type NormalizedRemote } from "./repo-key";
 import { git, gitRaw, resolveRemote } from "./snapshot";
@@ -22,6 +21,11 @@ export interface PullOutcome {
 	checkedOutMoved: boolean;
 	/** Another worktree of the repository that had the branch checked out and was fast-forwarded. */
 	movedIn?: string;
+}
+
+/** The local branch a thread's result is pulled to, and the branch of the result bundle. */
+export function threadBranch(thread: string): string {
+	return `omp-cloud/${thread}`;
 }
 
 /** The worktree of the repository that has `branch` checked out, if any (`git branch -f` refuses to move such a branch). */

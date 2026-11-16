@@ -3,7 +3,7 @@ import type { Server } from "bun";
 import { CloudClient, type EventStreamOptions } from "../src/api";
 import { CloudError, cloudErrorFromStatus } from "../src/errors";
 import { follow, type EventSource, type Follower, type FollowOptions } from "../src/events";
-import type { PendingQuestion, ThreadDetail, ThreadEvent, ThreadTurn } from "../src/types";
+import type { LiveText, PendingQuestion, ThreadDetail, ThreadEvent, ThreadTurn } from "../src/types";
 import { type WatchSink, Watcher } from "../src/watch";
 import { detail, event, turn } from "./builders";
 import { ManualClock } from "./clock";
@@ -515,6 +515,18 @@ describe("the SSE stream over HTTP", () => {
 	test("a message that is not an event is skipped, the stream goes on", async () => {
 		const { client } = serve({ steps: ["data: not json\n\n", `data: ${JSON.stringify({ kind: "x" })}\n\n`, "data: [1]\n\n", message(1)] });
 		expect((await collect(client.events("k3x9fa2m7q1z"))).map(e => e.seq)).toEqual([1]);
+	});
+
+	test("with onText the request asks for ?text=1 and each `event: text` message goes to it, between the events around it", async () => {
+		const piece = { turn: 1, message: 1, offset: 0, text: "Hel" };
+		const steps = [message(1), 5, `event: text\ndata: ${JSON.stringify(piece)}\n\n`, 5, "event: text\ndata: {\"turn\":0}\n\n", 5, message(2)];
+		const { client, seen } = serve({ steps }, { steps });
+		const order: (number | LiveText)[] = [];
+		for await (const e of client.events("k3x9fa2m7q1z", { after: 0, onText: live => void order.push(live) })) order.push(e.seq);
+		expect(order).toEqual([1, piece, 2]);
+		// Without it nothing is asked for, and a text message is no event.
+		expect((await collect(client.events("k3x9fa2m7q1z", { after: 0 }))).map(e => e.seq)).toEqual([1, 2]);
+		expect(seen.map(s => s.search)).toEqual(["?after=0&text=1", "?after=0"]);
 	});
 
 	test("an error status throws a CloudError with the server's message and its code", async () => {

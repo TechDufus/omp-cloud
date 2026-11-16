@@ -18,6 +18,7 @@ import type {
 	LoginState,
 	OfferState,
 	OfferStatus,
+	LiveText,
 	PairingOffer,
 	PendingQuestion,
 	Question,
@@ -432,6 +433,17 @@ export function parseEvent(json: unknown): ThreadEvent | undefined {
 	const seq = json.seq;
 	if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 1) return undefined;
 	return { seq, at: str(json, "at"), kind: str(json, "kind"), turn: numOrNull(json, "turn"), text: str(json, "text") };
+}
+
+/** The piece of reply text of one SSE `event: text` payload; undefined for a payload that is not one. */
+export function parseLiveText(json: unknown): LiveText | undefined {
+	if (!isRecord(json)) return undefined;
+	const { turn, message, offset, text } = json;
+	if (typeof turn !== "number" || !Number.isInteger(turn) || turn < 1) return undefined;
+	if (typeof message !== "number" || !Number.isInteger(message) || message < 1) return undefined;
+	if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0) return undefined;
+	if (typeof text !== "string") return undefined;
+	return { turn, message, offset, text };
 }
 
 export function parseLogin(json: unknown): Login {

@@ -124,7 +124,7 @@ describe("whoami (1.1)", () => {
 		expect(res.status).toBe(200);
 		const body = await jsonOf(res);
 
-		expect(body.service).toEqual({ version: isRecord(pkg) ? pkg.version : null, api: 6, name: hostname() });
+		expect(body.service).toEqual({ version: isRecord(pkg) ? pkg.version : null, api: 7, name: hostname() });
 		expect(body.capabilities).toEqual([
 			"threads.paging",
 			"threads.meta",
@@ -138,6 +138,7 @@ describe("whoami (1.1)", () => {
 			"threads.irc",
 			"events.live",
 			"events.children",
+			"events.text",
 			"github.app",
 			"commits.signed",
 			"threads.pr",

@@ -23,6 +23,14 @@ export function messageText(message: unknown): string {
 	return content.map(block => (isRecord(block) && block.type === "text" && typeof block.text === "string" ? block.text : "")).join("");
 }
 
+/** The text an omp `message_update` frame adds to the assistant message being written (its `text_delta`); `""` for every other event. */
+export function textDeltaOf(event: unknown): string {
+	if (!isRecord(event) || event.type !== "message_update") return "";
+	if (!isRecord(event.message) || event.message.role !== "assistant") return "";
+	const update = event.assistantMessageEvent;
+	return isRecord(update) && update.type === "text_delta" && typeof update.delta === "string" ? update.delta : "";
+}
+
 /** Whitespace-collapsed JSON of tool arguments, cut to `MAX_ARGS_CHARS`; `""` for none. */
 function compactArgs(args: unknown): string {
 	if (args === undefined || args === null) return "";

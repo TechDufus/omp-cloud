@@ -20,6 +20,7 @@ import {
 	unreleasedSection,
 	VERSION_FILES,
 	embedPluginPlugin,
+	legacyPiRegistryPlugin,
 	pluginBundleFiles,
 	pluginBundleSource,
 } from "./release";
@@ -413,13 +414,16 @@ describe("third-party notices", () => {
 	});
 
 	test("every package this repository's real build bundles has license text, from the package or from scripts/license-texts", async () => {
-		const result = await Bun.build({ entrypoints: [join(REPO_ROOT, "src", "bin.ts")], root: REPO_ROOT, metafile: true, target: "bun", outdir: join(dir, "out") });
+		// Bundled as the release bundles it: omp's build-only registry is answered, or the graph of `omp-cloud acp` does not resolve.
+		const result = await Bun.build({ entrypoints: [join(REPO_ROOT, "src", "bin.ts")], root: REPO_ROOT, metafile: true, target: "bun", outdir: join(dir, "out"), plugins: [legacyPiRegistryPlugin()] });
 		expect(result.success).toBe(true);
 		expect(result.metafile).toBeDefined();
 		if (result.metafile === undefined) return;
 		const entries = collectNotices(REPO_ROOT, result.metafile, { embeddedPackages: ["node_modules/@oh-my-pi/pi-natives-linux-x64"], vendored: [{ dir: "src/dashboard/client/kit", name: "kit", source: "omp-stats", license: "MIT" }], suppliedDir: join(REPO_ROOT, "scripts", "license-texts") });
 		expect(entries.length).toBeGreaterThan(15);
 		expect(entries.map((entry) => entry.name)).toEqual(expect.arrayContaining(["e2b", "react", "@oh-my-pi/pi-natives-linux-x64"]));
+		// The ACP agent's handoff bundles omp's extension discovery, and with it these two, which ship no license file.
+		expect(entries.filter((entry) => entry.supplied).map((entry) => entry.name)).toEqual(expect.arrayContaining(["puppeteer-core", "@puppeteer/browsers"]));
 	});
 });
 

@@ -14,6 +14,7 @@ import {
 	MAX_QUESTIONS_PER_TURN,
 	MAX_TEXT_BYTES,
 	MAX_TURNS,
+	type LiveText,
 	type NewThread,
 	type QuestionInput,
 	type SettingChange,
@@ -957,6 +958,42 @@ describe("events and subscriptions", () => {
 		expect(store.events(ID, 0, 100)).toEqual(eventsBefore);
 		expect(store.getThread(ID)).toMatchObject({ phase: "working", error: "" });
 		expect(store.turns(ID).map((t) => t.state)).toEqual(["running", "queued"]);
+	});
+
+	test("publishText hands each piece to the thread's text listeners with its offset, and keeps the message so far", () => {
+		store.createThread(ID, newThread());
+		const heard: LiveText[] = [];
+		const plain = record();
+		store.subscribe(ID, { event: () => {}, deleted: () => {}, text: live => void heard.push(live) });
+		// A listener without `text` is skipped.
+		store.subscribe(ID, plain.listener);
+		expect(store.liveText(ID)).toBeNull();
+
+		store.publishText(ID, 1, 1, "Hel");
+		store.publishText(ID, 1, 1, "");
+		store.publishText(ID, 1, 1, "lo");
+		expect(heard).toEqual([
+			{ turn: 1, message: 1, offset: 0, text: "Hel" },
+			{ turn: 1, message: 1, offset: 3, text: "lo" },
+		]);
+		expect(store.liveText(ID)).toEqual({ turn: 1, message: 1, offset: 0, text: "Hello" });
+
+		// Another message of the turn starts over.
+		store.publishText(ID, 1, 2, "Next");
+		expect(heard.at(-1)).toEqual({ turn: 1, message: 2, offset: 0, text: "Next" });
+		expect(store.liveText(ID)).toEqual({ turn: 1, message: 2, offset: 0, text: "Next" });
+
+		store.endText(ID);
+		expect(store.liveText(ID)).toBeNull();
+		expect(plain.seen).toEqual([]);
+		expect(store.events(ID, 0, 100).map(event => event.kind)).toEqual(["turn_queued"]);
+	});
+
+	test("a deleted thread keeps no live text", async () => {
+		store.createThread(ID, newThread());
+		store.publishText(ID, 1, 1, "Hel");
+		await store.deleteThread(ID);
+		expect(store.liveText(ID)).toBeNull();
 	});
 });
 
