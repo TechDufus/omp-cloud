@@ -291,7 +291,8 @@ export async function buildRelease(options: BuildOptions): Promise<ReleaseManife
 	let notes = extractChangelogSection(changelog, version);
 	if (notes === null) {
 		notes = unreleasedSection(changelog) ?? "";
-		console.warn(`release: CHANGELOG.md has no section for ${version}; the notes are its Unreleased entries`);
+		// A prerelease has no section of its own: its notes are what is unreleased so far.
+		if (!version.includes("-")) console.warn(`release: CHANGELOG.md has no section for ${version}; the notes are its Unreleased entries`);
 	}
 
 	rmSync(out, { recursive: true, force: true });
@@ -347,16 +348,23 @@ export async function buildRelease(options: BuildOptions): Promise<ReleaseManife
 	return manifest;
 }
 
-/** Bumps the versions, promotes the changelog, commits `release: <version>` and tags `v<version>`; pushes nothing. */
+/**
+ * Bumps the versions, promotes the changelog, commits `release: <version>` and tags `v<version>`; pushes nothing. A
+ * prerelease (`1.2.0-rc.1`) leaves the changelog alone: its entries stay under `## Unreleased`, which is also its notes,
+ * so the final release still takes all of them and every release candidate's notes say what is new since the last release.
+ */
 export async function release(root: string, version: string, today: string): Promise<string[]> {
 	const tag = `v${version}`;
 	if ((await run(["git", "status", "--porcelain"], root)).trim() !== "") throw new Error("the working tree is not clean: commit or stash first");
 	if ((await run(["git", "tag", "--list", tag], root)).trim() !== "") throw new Error(`tag ${tag} exists already`);
 	const changelogPath = join(root, "CHANGELOG.md");
-	const promoted = promoteUnreleased(readFileSync(changelogPath, "utf8"), version, today);
+	const changelog = readFileSync(changelogPath, "utf8");
+	const prerelease = version.includes("-");
+	if (prerelease && (unreleasedSection(changelog) ?? "") === "") throw new Error("CHANGELOG.md `## Unreleased` has no entries to release");
+	const promoted = prerelease ? null : promoteUnreleased(changelog, version, today);
 	const bumped = bumpVersions(root, version);
-	writeFileSync(changelogPath, promoted);
-	const files = [...VERSION_FILES, "CHANGELOG.md"];
+	if (promoted !== null) writeFileSync(changelogPath, promoted);
+	const files = [...VERSION_FILES, ...(promoted === null ? [] : ["CHANGELOG.md"])];
 	await run(["git", "add", "--", ...files], root);
 	await run(["git", "commit", "-m", `release: ${version}`, "--", ...files], root);
 	await run(["git", "tag", "-a", tag, "-m", `omp-cloud ${version}`], root);

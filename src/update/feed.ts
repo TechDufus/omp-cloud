@@ -2,8 +2,8 @@ import { createWriteStream } from "node:fs";
 import { rm } from "node:fs/promises";
 import { isRecord } from "../guards";
 import { SERVICE_VERSION } from "../version";
-import type { FeedSpec } from "./feed-spec";
-import { parseManifest, type ReleaseManifest } from "./manifest";
+import type { FeedSpec, UpdateChannel } from "./feed-spec";
+import { compareVersions, isVersion, parseManifest, type ReleaseManifest } from "./manifest";
 
 /** The fetch the feed uses; tests pass a fake. */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -15,6 +15,8 @@ const API_TIMEOUT_MS = 30_000;
 const DOWNLOAD_TIMEOUT_MS = 20 * 60_000;
 const MAX_REDIRECTS = 5;
 const GITHUB_API = "https://api.github.com";
+/** How many releases the `dev` channel looks at: one page of GitHub's list, which is newest first. */
+const DEV_CHANNEL_RELEASES = 100;
 
 /**
  * Why a feed gave something other than what was asked. `none`: it has nothing to offer (no release published, a private
@@ -50,6 +52,8 @@ export interface Feed {
 export interface FeedOptions {
 	/** The credential to send as `Authorization: Bearer`; absent sends none. */
 	token?: string;
+	/** Which releases a GitHub feed offers; absent is `stable`. A static feed has one release and ignores it. */
+	channel?: UpdateChannel;
 	fetch?: FetchLike;
 }
 
@@ -170,30 +174,24 @@ function feedRelease(manifest: ReleaseManifest, publishedAt: string, assets: Rea
 	return { manifest, publishedAt, has: (asset) => assets.has(asset), text: via.text, download: via.download };
 }
 
-/**
- * The newest release of the repository, through `GET /releases/latest`: GitHub's "latest" skips prereleases and drafts, so a
- * tag with a `-` (released with `--prerelease`) is never offered as an update. Each asset is then fetched by id through
- * `/releases/assets/<id>`, which redirects to a signed storage URL ({@link get} keeps the token off that second origin).
- */
-async function githubLatest(spec: Extract<FeedSpec, { kind: "github" }>, options: FeedOptions): Promise<FeedRelease> {
-	const fetcher = options.fetch ?? fetch;
-	const { owner, repo } = spec;
-	const api = `${GITHUB_API}/repos/${owner}/${repo}`;
-	const response = await get(
-		fetcher,
-		`${api}/releases/latest`,
-		{ Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
-		options.token,
-		API_TIMEOUT_MS,
+type GithubSpec = Extract<FeedSpec, { kind: "github" }>;
+
+/** The feed has nothing for this caller: no release is published, or the repository is private and the token does not see it. */
+function noRelease({ owner, repo }: GithubSpec, token: string | undefined): FeedError {
+	return new FeedError(
+		"none",
+		token === undefined
+			? `no release of ${owner}/${repo} is visible (none is published, or it is a private repository or fork and update.token is not set)`
+			: `no release of ${owner}/${repo} is visible to update.token`,
 	);
+}
+
+/** The JSON GitHub answers `url` with, a route of the repository's releases. Throws FeedError: `none` for a 404. */
+async function githubJson(url: string, spec: GithubSpec, options: FeedOptions): Promise<unknown> {
+	const response = await get(options.fetch ?? fetch, url, { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" }, options.token, API_TIMEOUT_MS);
 	if (response.status === 404) {
 		await response.body?.cancel();
-		throw new FeedError(
-			"none",
-			options.token === undefined
-				? `no release of ${owner}/${repo} is visible (none is published, or it is a private repository or fork and update.token is not set)`
-				: `no release of ${owner}/${repo} is visible to update.token`,
-		);
+		throw noRelease(spec, options.token);
 	}
 	if (response.status === 401 || response.status === 403) {
 		await response.body?.cancel();
@@ -203,12 +201,47 @@ async function githubLatest(spec: Extract<FeedSpec, { kind: "github" }>, options
 		await response.body?.cancel();
 		throw new FeedError("failed", `GitHub answered ${response.status}`);
 	}
-	let body: unknown;
 	try {
-		body = JSON.parse(await boundedText(response, MAX_JSON_BYTES));
+		return JSON.parse(await boundedText(response, MAX_JSON_BYTES));
 	} catch (error) {
 		if (error instanceof FeedError) throw error;
 		throw new FeedError("failed", "GitHub's release answer is not JSON");
+	}
+}
+
+/**
+ * The release with the highest version in a `GET /releases` answer, prereleases included. A draft does not count (GitHub
+ * lists them to a token that may write), nor does a tag that is not a version. Undefined when nothing is left.
+ */
+function highestRelease(list: readonly unknown[]): Record<string, unknown> | undefined {
+	let best: { version: string; release: Record<string, unknown> } | undefined;
+	for (const entry of list) {
+		if (!isRecord(entry) || entry.draft === true || typeof entry.tag_name !== "string") continue;
+		const version = entry.tag_name.replace(/^v/, "");
+		if (!isVersion(version)) continue;
+		if (best === undefined || compareVersions(version, best.version) > 0) best = { version, release: entry };
+	}
+	return best?.release;
+}
+
+/**
+ * The release of the repository that the channel offers. `stable` asks `GET /releases/latest`: GitHub's "latest" skips
+ * prereleases and drafts, so a tag with a `-` (released with `--prerelease`) is never offered. `dev` reads the newest
+ * {@link DEV_CHANNEL_RELEASES} releases and takes the highest version among them, so a prerelease is offered until its
+ * final release, or a later one, outranks it. Each asset is then fetched by id through `/releases/assets/<id>`, which
+ * redirects to a signed storage URL ({@link get} keeps the token off that second origin).
+ */
+async function githubLatest(spec: GithubSpec, options: FeedOptions): Promise<FeedRelease> {
+	const fetcher = options.fetch ?? fetch;
+	const api = `${GITHUB_API}/repos/${spec.owner}/${spec.repo}`;
+	let body: unknown;
+	if (options.channel === "dev") {
+		const list = await githubJson(`${api}/releases?per_page=${DEV_CHANNEL_RELEASES}`, spec, options);
+		if (!Array.isArray(list)) throw new FeedError("failed", "GitHub's release answer has an unexpected shape");
+		body = highestRelease(list);
+		if (body === undefined) throw noRelease(spec, options.token);
+	} else {
+		body = await githubJson(`${api}/releases/latest`, spec, options);
 	}
 	if (!isRecord(body) || typeof body.tag_name !== "string" || !Array.isArray(body.assets)) {
 		throw new FeedError("failed", "GitHub's release answer has an unexpected shape");

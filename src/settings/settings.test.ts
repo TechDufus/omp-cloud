@@ -129,6 +129,7 @@ describe("get and list", () => {
 			["service.name", "string"],
 			["update.mode", "enum"],
 			["update.feed", "string"],
+			["update.channel", "enum"],
 			["update.token", "string"],
 			["update.unit", "string"],
 			["update.ompUnits", "string[]"],

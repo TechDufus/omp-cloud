@@ -150,6 +150,81 @@ describe("the github feed", () => {
 	});
 });
 
+describe("the github feed on the dev channel", () => {
+	interface Listed {
+		tag: string;
+		draft?: boolean;
+	}
+
+	/** A repository with `releases`, in the order GitHub lists them (newest first). The release.json of release `n` is asset `n * 10 + 1`. */
+	function repository(releases: Listed[] | unknown, urls: string[] = []): FetchLike {
+		return async (url) => {
+			urls.push(url);
+			if (url === "https://api.github.com/repos/TechDufus/omp-cloud/releases?per_page=100") {
+				if (!Array.isArray(releases)) return json(releases);
+				const listed: Listed[] = releases;
+				return json(listed.map((release, n) => ({ tag_name: release.tag, draft: release.draft === true, prerelease: release.tag.includes("-"), published_at: `2026-11-1${n}T00:00:00Z`, assets: [{ id: n * 10 + 1, name: "release.json" }] })));
+			}
+			const asset = /\/releases\/assets\/(\d+)$/.exec(url);
+			const release = asset !== null && Array.isArray(releases) ? (releases as Listed[])[(Number(asset[1]) - 1) / 10] : undefined;
+			if (release !== undefined) return json(makeManifest(release.tag.replace(/^v/, "")));
+			return new Response("not found", { status: 404 });
+		};
+	}
+
+	const dev = (fetch: FetchLike) => createFeed(spec, { channel: "dev", fetch }).latest();
+
+	test("offers the highest version among the releases, a prerelease included, whatever was published last", async () => {
+		const urls: string[] = [];
+		// A patch of the stable line was published after the release candidates of the next one.
+		const release = await dev(repository([{ tag: "v0.9.1" }, { tag: "v0.10.0-rc.10" }, { tag: "v0.10.0-rc.9" }, { tag: "v0.9.0" }], urls));
+		expect(release.manifest.version).toBe("0.10.0-rc.10");
+		expect(release.publishedAt).toBe("2026-11-11T00:00:00Z");
+		expect(urls).toEqual(["https://api.github.com/repos/TechDufus/omp-cloud/releases?per_page=100", "https://api.github.com/repos/TechDufus/omp-cloud/releases/assets/11"]);
+	});
+
+	test("a final release outranks its release candidates, so a server on dev lands on it", async () => {
+		const release = await dev(repository([{ tag: "v0.10.0-rc.2" }, { tag: "v0.10.0" }, { tag: "v0.10.0-rc.1" }]));
+		expect(release.manifest.version).toBe("0.10.0");
+	});
+
+	test("a draft and a tag that is not a version are never offered", async () => {
+		const release = await dev(repository([{ tag: "v0.11.0", draft: true }, { tag: "nightly" }, { tag: "v0.10.0-rc.1" }]));
+		expect(release.manifest.version).toBe("0.10.0-rc.1");
+	});
+
+	test("no usable release is `none`; an answer that is not a list is a failure", async () => {
+		for (const releases of [[], [{ tag: "v1.0.0", draft: true }]]) {
+			const nothing = await dev(repository(releases)).catch((error: unknown) => error);
+			expect(nothing).toMatchObject({ kind: "none" });
+			expect(String((nothing as Error).message)).toContain("no release of TechDufus/omp-cloud is visible");
+		}
+		const hidden = await dev(async () => json({ message: "Not Found" }, 404)).catch((error: unknown) => error);
+		expect(hidden).toMatchObject({ kind: "none" });
+		const odd = await dev(repository({ message: "x" })).catch((error: unknown) => error);
+		expect(odd).toBeInstanceOf(FeedError);
+		expect(odd).toMatchObject({ kind: "failed", message: "GitHub's release answer has an unexpected shape" });
+	});
+
+	test("stable, and a feed without a channel, ask GitHub for its latest release; a static feed ignores the channel", async () => {
+		for (const channel of ["stable", undefined] as const) {
+			const seen: Seen[] = [];
+			await createFeed(spec, { channel, fetch: github({ seen }) }).latest();
+			expect(seen[0]?.url).toBe("https://api.github.com/repos/TechDufus/omp-cloud/releases/latest");
+		}
+		const urls: string[] = [];
+		const fixed = await createFeed(parseFeedSpec("https://feed.example.test/omp/"), {
+			channel: "dev",
+			fetch: async (url) => {
+				urls.push(url);
+				return json(MANIFEST);
+			},
+		}).latest();
+		expect(fixed.manifest.version).toBe("0.5.1");
+		expect(urls).toEqual(["https://feed.example.test/omp/release.json"]);
+	});
+});
+
 describe("a static feed", () => {
 	function staticServer(seen: Seen[]): FetchLike {
 		return async (url, init) => {

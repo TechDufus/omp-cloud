@@ -34,6 +34,25 @@ function versionParts(version: string): { numbers: [number, number, number]; pre
 	return { numbers: [Number(match[1]), Number(match[2]), Number(match[3])], pre: match[4] ?? "" };
 }
 
+/**
+ * Orders two prerelease parts as semver does: identifier by identifier, numbers by value and before words, and the part
+ * with fewer identifiers first when the shared ones are equal. So `rc.9` is older than `rc.10`, which a string
+ * comparison gets wrong.
+ */
+function comparePrerelease(a: string, b: string): number {
+	const left = a.split(".");
+	const right = b.split(".");
+	for (let i = 0; i < Math.min(left.length, right.length); i++) {
+		const l = left[i] ?? "";
+		const r = right[i] ?? "";
+		const leftNumber = /^\d+$/.test(l);
+		if (leftNumber !== /^\d+$/.test(r)) return leftNumber ? -1 : 1;
+		const diff = leftNumber ? Number(l) - Number(r) : l < r ? -1 : l > r ? 1 : 0;
+		if (diff !== 0) return diff;
+	}
+	return left.length - right.length;
+}
+
 /** Negative when `a` is older than `b`, 0 when equal, positive when newer; a prerelease is older than its release. */
 export function compareVersions(a: string, b: string): number {
 	const left = versionParts(a);
@@ -45,7 +64,7 @@ export function compareVersions(a: string, b: string): number {
 	if (left.pre === right.pre) return 0;
 	if (left.pre === "") return 1;
 	if (right.pre === "") return -1;
-	return left.pre < right.pre ? -1 : 1;
+	return comparePrerelease(left.pre, right.pre);
 }
 
 /** The asset of this machine's executable. */

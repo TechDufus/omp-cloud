@@ -6,6 +6,16 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 ## Unreleased
 
+A server can follow release candidates: `update.channel: dev` offers prereleases, and `stable` stays the default. Nothing changes for a server that leaves the setting alone.
+
+### Added
+
+- **Update channels (`update.channel`).** `stable`, the default, offers the latest release as before. `dev` also offers prereleases such as `v0.10.0-rc.1`: the service takes the highest published version, so a server on `dev` runs release candidates and still moves to each final release. Set it on the dashboard's Settings page; `update.mode` still decides whether a release installs by itself, and the service never goes back a version.
+
+### Fixed
+
+- **Release candidates past `rc.9` are ordered correctly.** Versions were compared as text in their prerelease part, so `0.10.0-rc.10` counted as older than `0.10.0-rc.9` and would have been refused as an update. They now compare as semver's do, in the service and in the plugin's check that it is not older than the service.
+
 ## 0.9.0 (2026-10-29)
 
 omp-cloud moves to vibemon v0.4.1: vibemon's VMMs no longer run as root, setup creates its team idempotently, and `--migrate-team` deletes the team it leaves. Rerun `omp-cloud setup` once after updating. This release moves vibemon, so `update.mode: auto` waits for a click.

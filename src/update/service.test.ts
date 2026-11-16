@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { UpdateSettings } from "./db";
-import { FeedError } from "./feed";
+import { FeedError, type FeedOptions } from "./feed";
 import { AppLayout } from "./layout";
 import { AUTO_QUIET_MS, CHECKOUT_MESSAGE } from "./policy";
 import { APPLY_UNIT, CHECK_INTERVAL_MS, FIRST_CHECK_DELAY_MS, UpdateConflict, UpdateService, type UpdateServiceDeps } from "./service";
@@ -41,7 +41,7 @@ interface Harness {
 
 function harness(over: Partial<UpdateServiceDeps> & { managed?: boolean; version?: string; latest?: string; failRun?: boolean; schema?: number; vmonInstalled?: string | null; unitEnvironment?: string } = {}): Harness {
 	const clock = { now: T0 };
-	const settings: UpdateSettings = { mode: "notify", feed: "github:TechDufus/omp-cloud", token: "", unit: "omp-cloud", ompUnits: ["omp-auth-broker", "omp-auth-gateway"] };
+	const settings: UpdateSettings = { mode: "notify", feed: "github:TechDufus/omp-cloud", channel: "stable", token: "", unit: "omp-cloud", ompUnits: ["omp-auth-broker", "omp-auth-gateway"] };
 	const downloads = { count: 0 };
 	const latest = over.latest ?? "0.5.1";
 	const answer: Harness["answer"] = { current: { release: fakeRelease(makeManifest(latest), { downloads }) } };
@@ -206,6 +206,21 @@ describe("check", () => {
 		expect(h.feedCalls.count).toBe(0);
 		expect(await h.service.status()).toMatchObject({ managed: false, state: "unsupported", message: CHECKOUT_MESSAGE, error: null, latest: null });
 		expect(await h.service.summary()).toEqual({ state: "unsupported", available: null });
+	});
+
+	test("the feed is read on the channel update.channel names, as it stands at each check", async () => {
+		const asked: FeedOptions[] = [];
+		const h = harness({
+			feed: (_spec, options) => {
+				asked.push(options);
+				return fakeFeed({ failure: new FeedError("none", "nothing published") });
+			},
+		});
+		await h.service.check();
+		h.settings.channel = "dev";
+		h.settings.token = "GH_TOKEN";
+		await h.service.check();
+		expect(asked).toEqual([{ channel: "stable" }, { channel: "dev", token: "resolved-GH_TOKEN" }]);
 	});
 });
 

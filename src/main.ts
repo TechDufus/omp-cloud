@@ -183,6 +183,7 @@ export async function serve(args: readonly string[]): Promise<void> {
 			settings: () => ({
 				mode: settings.get("update.mode"),
 				feed: settings.get("update.feed"),
+				channel: settings.get("update.channel"),
 				token: settings.get("update.token"),
 				unit: settings.get("update.unit"),
 				ompUnits: [...settings.get("update.ompUnits")],

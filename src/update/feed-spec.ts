@@ -1,7 +1,14 @@
 /** The default of `update.feed`: the GitHub Releases of the omp-cloud repository. */
 export const DEFAULT_FEED = "github:TechDufus/omp-cloud";
 
-/** Where releases come from: a GitHub repository's latest release, or a static base URL that serves `release.json` and the assets. */
+/**
+ * Which releases a GitHub feed offers (`update.channel`): `stable` is the latest release, never a prerelease; `dev` is
+ * the highest version among all published releases, prereleases included.
+ */
+export const UPDATE_CHANNELS = ["stable", "dev"] as const;
+export type UpdateChannel = (typeof UPDATE_CHANNELS)[number];
+
+/** Where releases come from: a GitHub repository's releases, or a static base URL that serves `release.json` and the assets. */
 export type FeedSpec = { kind: "github"; owner: string; repo: string } | { kind: "static"; base: string };
 
 const GITHUB_SPEC = /^github:([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})$/;

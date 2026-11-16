@@ -3,6 +3,7 @@ import { mkdtemp, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { REGISTRY } from "../settings/registry";
 import { DEFAULT_RECIPE, type Recipe, recipeFrom } from "../vmon/recipe";
+import type { UpdateChannel } from "./feed-spec";
 import { lastLine, type CommandRunner } from "./system";
 
 const DB_FILE = "omp-cloud.db";
@@ -12,6 +13,8 @@ const BUSY_TIMEOUT_MS = 10_000;
 export interface UpdateSettings {
 	mode: "off" | "notify" | "auto";
 	feed: string;
+	/** Which releases a GitHub feed offers (`update.channel`). */
+	channel: UpdateChannel;
 	token: string;
 	unit: string;
 	/** The units the applier's omp step checks and restarts. */
@@ -38,6 +41,7 @@ export function readUpdateSettings(dataDir: string): UpdateSettings {
 	const found: UpdateSettings = {
 		mode: REGISTRY["update.mode"].default,
 		feed: REGISTRY["update.feed"].default,
+		channel: REGISTRY["update.channel"].default,
 		token: REGISTRY["update.token"].default,
 		unit: REGISTRY["update.unit"].default,
 		ompUnits: [...REGISTRY["update.ompUnits"].default],
@@ -56,6 +60,7 @@ export function readUpdateSettings(dataDir: string): UpdateSettings {
 				const raw: unknown = JSON.parse(row.value);
 				if (row.key === "update.mode") found.mode = REGISTRY["update.mode"].parse(raw);
 				else if (row.key === "update.feed") found.feed = REGISTRY["update.feed"].parse(raw);
+				else if (row.key === "update.channel") found.channel = REGISTRY["update.channel"].parse(raw);
 				else if (row.key === "update.token") found.token = REGISTRY["update.token"].parse(raw);
 				else if (row.key === "update.unit") found.unit = REGISTRY["update.unit"].parse(raw);
 				else if (row.key === "update.ompUnits") found.ompUnits = [...REGISTRY["update.ompUnits"].parse(raw)];
