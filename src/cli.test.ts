@@ -87,7 +87,8 @@ describe("omp-cloud ssh-pair", () => {
 		expect(out.token).toMatch(TOKEN_FORMAT);
 		expect(out.device.name).toBe("work laptop");
 		expect(out.service).toEqual({ version: SERVICE_VERSION, api: API_VERSION });
-		expect(out.service.version).toMatch(/^\d+\.\d+\.\d+$/);
+		// A release version, or a release candidate's (`0.10.0-rc.1`).
+		expect(out.service.version).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
 
 		const served = await loadIdentity(identity);
 		expect(out.server.fingerprint).toBe(served.fingerprint);
