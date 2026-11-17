@@ -6,18 +6,25 @@ Each section opens with a one- or two-sentence summary, then groups its entries 
 
 ## Unreleased
 
-Editors that host Agent Client Protocol agents can run cloud agents: `omp-cloud acp` makes each editor session a cloud thread, and the event stream can carry a reply as it is written. A server can follow release candidates with `update.channel: dev`. This is Service API 7.
+Editors that host Agent Client Protocol agents can run cloud agents: `omp-cloud acp` makes each editor session a cloud thread, and the event stream can carry a reply as it is written. This is Service API 7.
 
 ### Added
 
 - **`omp-cloud acp`: cloud agents in an editor.** An editor that hosts ACP agents, such as Zed, starts `omp-cloud acp` and runs cloud threads through it: the first prompt hands the workspace off with its uncommitted work, the reply shows as it is written, tool calls and the service's progress show as they happen, an approval or push question opens the editor's permission dialog, and `/pull` fetches the result branch. It uses this machine's omp-cloud connection; in Zed, add an `agent_servers` entry with command `omp-cloud` and args `["acp"]`.
 - **Sessions are threads.** A session lists and loads like any thread: the editor's session list is the cloud's threads of the workspace, a thread started with `/cloud` in omp opens in the editor by its id, and `/follow` shows a turn another device started.
 - **Reply text on the event stream (`events.text`, Service API 7).** `GET /api/v1/threads/{id}/events?text=1` also sends the running turn's reply text as omp writes it, as `event: text` messages that are never stored or replayed. Clients that do not ask see no change, and the event log is the same.
-- **Update channels (`update.channel`).** `stable`, the default, offers the latest release as before. `dev` also offers prereleases such as `v0.10.0-rc.1`: the service takes the highest published version, so a server on `dev` runs release candidates and still moves to each final release. Set it on the dashboard's Settings page; `update.mode` still decides whether a release installs by itself, and the service never goes back a version.
 
 ### Changed
 
 - **The release binary is about 30 MB larger.** It now carries the code that hands a workspace off, for `omp-cloud acp`. Nothing changes for the service.
+
+## 0.9.1 (2026-11-16)
+
+A server can follow release candidates: `update.channel: dev` offers prereleases, and `stable` stays the default. Nothing changes for a server that leaves the setting alone.
+
+### Added
+
+- **Update channels (`update.channel`).** `stable`, the default, offers the latest release as before. `dev` also offers prereleases such as `v0.10.0-rc.1`: the service takes the highest published version, so a server on `dev` runs release candidates and still moves to each final release. Set it on the dashboard's Settings page; `update.mode` still decides whether a release installs by itself, and the service never goes back a version.
 
 ### Fixed
 
