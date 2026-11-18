@@ -28,5 +28,7 @@ jobs:
       - name: Site
         run: bun run site/build.ts --out "$RUNNER_TEMP/site"
       # Unit tests only: the scenarios and the smoke test need vmon (KVM) and a model.
+      # --parallel runs one worker per vCPU; --no-isolate lets each worker keep one global across its files, as the
+      # single-process `bun test` did for all of them.
       - name: Test
-        run: bun test
+        run: bun test --parallel --no-isolate
